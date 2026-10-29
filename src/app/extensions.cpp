@@ -29,6 +29,7 @@
 #include "base/fs.h"
 #include "base/fstream_path.h"
 #include "base/log.h"
+#include <filesystem>
 #include "dio/detect_format.h"
 #include "file/file.h"
 #include "file/file_format.h"
@@ -1046,6 +1047,92 @@ void Extension::addScript(const std::string& fn)
 //////////////////////////////////////////////////////////////////////
 // Extensions
 
+void Extensions::autoImportPixelLab()
+{
+  std::string targetDir = base::join_path(m_userExtensionsPath, "pixellab");
+  if (base::is_directory(targetDir))
+    return;
+
+  std::vector<std::string> candidateFolders;
+  std::vector<std::string> candidateZips;
+
+  // 1. Check environment variable
+  const char* envVal = std::getenv("ASEPRITE2_PIXELLAB_PATH");
+  if (envVal && *envVal) {
+    std::string envPath(envVal);
+    if (base::is_directory(envPath)) candidateFolders.push_back(envPath);
+    else if (base::is_file(envPath)) candidateZips.push_back(envPath);
+  }
+
+  // 2. Stock Aseprite install folder
+  std::string stockAsepriteExt = m_userExtensionsPath;
+  auto pos = stockAsepriteExt.find("Aseprite2");
+  if (pos != std::string::npos) {
+    stockAsepriteExt.replace(pos, 9, "Aseprite");
+    std::string stockPixellab = base::join_path(stockAsepriteExt, "pixellab");
+    if (base::is_directory(stockPixellab)) {
+      candidateFolders.push_back(stockPixellab);
+    }
+  }
+
+  // 3. User Downloads folder
+  std::vector<std::string> homeVars = { "USERPROFILE", "HOME" };
+  for (const auto& var : homeVars) {
+    const char* home = std::getenv(var.c_str());
+    if (home && *home) {
+      std::string dl = base::join_path(home, "Downloads");
+      std::string zipCandidate = base::join_path(dl, "PixelLab.aseprite-extension");
+      if (base::is_file(zipCandidate)) {
+        candidateZips.push_back(zipCandidate);
+      }
+    }
+  }
+
+  // Try folders first
+  for (const auto& srcDir : candidateFolders) {
+    if (base::is_file(base::join_path(srcDir, kPackageJson))) {
+      LOG("EXT: Auto-importing PixelLab from folder '%s'...\n", srcDir.c_str());
+      try {
+        std::error_code ec;
+#if _WIN32
+        auto pSrc = std::filesystem::path(base::from_utf8(srcDir));
+        auto pDst = std::filesystem::path(base::from_utf8(targetDir));
+#else
+        auto pSrc = std::filesystem::path(srcDir);
+        auto pDst = std::filesystem::path(targetDir);
+#endif
+        std::filesystem::create_directories(pDst, ec);
+        std::filesystem::copy(pSrc, pDst,
+                              std::filesystem::copy_options::recursive |
+                              std::filesystem::copy_options::overwrite_existing, ec);
+        if (!ec) {
+          LOG("EXT: Successfully auto-imported PixelLab from '%s'\n", srcDir.c_str());
+          return;
+        }
+      }
+      catch (const std::exception& ex) {
+        LOG("EXT: Error copying PixelLab: %s\n", ex.what());
+      }
+    }
+  }
+
+  // Try archives
+  for (const auto& zipPath : candidateZips) {
+    LOG("EXT: Auto-importing PixelLab from archive '%s'...\n", zipPath.c_str());
+    try {
+      ExtensionInfo info = getCompressedExtensionInfo(zipPath);
+      if (!info.name.empty()) {
+        installCompressedExtension(zipPath, info);
+        LOG("EXT: Successfully auto-imported PixelLab archive '%s'\n", zipPath.c_str());
+        return;
+      }
+    }
+    catch (const std::exception& ex) {
+      LOG("EXT: Error installing PixelLab archive: %s\n", ex.what());
+    }
+  }
+}
+
 Extensions::Extensions()
 {
   // Create and get the user extensions directory
@@ -1059,6 +1146,9 @@ Extensions::Extensions()
     }
     LOG("EXT: User extensions path '%s'\n", m_userExtensionsPath.c_str());
   }
+
+  // Auto-import PixelLab if available
+  autoImportPixelLab();
 
   ResourceFinder rf;
   rf.includeUserDir("extensions");

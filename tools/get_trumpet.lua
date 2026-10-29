@@ -1,0 +1,1 @@
+local spr = app.open("I:/Shared drives/Pitch Quest Shared Drive/Working Files/Music Store/Export/Instruments/Trumphet.aseprite"); local out = io.open("tools/trumpet_info.txt", "w"); out:write("Layers: " .. #spr.layers .. "\n"); for _, l in ipairs(spr.layers) do out:write("  " .. l.name .. "\n") end; out:write("Frames: " .. #spr.frames .. "\n"); spr:close(); out:close()

@@ -1,0 +1,11 @@
+=== Grand Piano.aseprite (100x70) ===
+  Layer 'Layer 1' (vis=true, op=255) cels: 
+  Group 'Group 10' (vis=true)
+    Layer 'Layer 56' (vis=true, op=255) cels: f1(88x44@7,26)
+    Layer 'Grand Piano' (vis=true, op=255) cels: f1(88x68@7,1)
+    Layer 'Layer 59' (vis=true, op=147) cels: f1(88x68@7,1)
+    Layer 'Layer 61' (vis=true, op=129) cels: f1(53x18@41,10)
+    Layer 'Layer 57' (vis=true, op=255) cels: f1(88x53@7,1)
+    Layer 'Layer 60' (vis=true, op=164) cels: f1(86x49@7,5)
+=== Piano.aseprite (80x70) ===
+  Layer 'Layer 1' (vis=true, op=255) cels: f1(80x70@0,0)

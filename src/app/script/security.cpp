@@ -318,6 +318,11 @@ bool ask_access(lua_State* L,
       return false;
     }
 
+    // Whitelist bundled Aseprite 2.0 AI bridge and PixelLab extensions
+    if (script.find("aseprite2-bridge") != std::string::npos ||
+        script.find("pixellab") != std::string::npos)
+      return true;
+
     const char* section = "script_access";
     std::string key = get_key(script);
 

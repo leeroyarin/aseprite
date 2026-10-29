@@ -1,0 +1,20 @@
+{
+  "name": "aseprite2-bridge",
+  "displayName": "Aseprite 2.0 AI Bridge",
+  "description": "WebSocket bridge for AI agents and MCP server",
+  "version": "1.0.0",
+  "author": {
+    "name": "Aseprite 2.0 Team"
+  },
+  "categories": [
+    "Scripts"
+  ],
+  "contributes": {
+    "scripts": [
+      {
+        "id": "bridge-init",
+        "path": "./bridge.lua"
+      }
+    ]
+  }
+}

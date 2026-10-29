@@ -1,24 +1,25 @@
 # ASEPRITE
 # Copyright (C) 2020-present  Igara Studio S.A.
 
-# Aseprite version
-set(VERSION "1.x-dev")
+# Aseprite 2.0 version (see docs/aseprite2/PLAN.md, Phase 1)
+set(VERSION "2.0")
 
-option(UPDATE_VERSION_WITH_GIT "Update Aseprite version using Git commit" on)
+option(UPDATE_VERSION_WITH_GIT "Append Git commit hash to the Aseprite 2.0 version" on)
 if(UPDATE_VERSION_WITH_GIT)
   find_package(Git)
   if(Git_FOUND)
     execute_process(
-      COMMAND git describe --tags --always --dirty
+      COMMAND git rev-parse --short HEAD
       WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-      OUTPUT_VARIABLE VERSION
-      OUTPUT_STRIP_TRAILING_WHITESPACE)
-    string(REGEX REPLACE "^v" "" VERSION "${VERSION}")
-    string(REGEX REPLACE "-dev$" "" VERSION "${VERSION}")
-    if(NOT VERSION MATCHES "^1.[0-9]")
-      set(VERSION "1.x-${VERSION}")
+      OUTPUT_VARIABLE GIT_HASH
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if(GIT_HASH)
+      # Keep it parseable by app.version (Lua) as "2.0-dev+<hash>"
+      set(VERSION "${VERSION}-dev+${GIT_HASH}")
+    else()
+      set(VERSION "${VERSION}-dev")
     endif()
-    set(VERSION "${VERSION}-dev")
   endif()
 endif()
 

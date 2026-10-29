@@ -25,6 +25,7 @@
       <key command="SaveFile" shortcut="Ctrl+S" mac="Cmd+S" />
       <key command="SaveFileAs" shortcut="Ctrl+Shift+S" mac="Cmd+Shift+S" />
       <key command="SaveFileCopyAs" shortcut="Ctrl+Alt+Shift+S" mac="Cmd+Alt+Shift+S" />
+      <key command="SaveVersion" shortcut="Ctrl+Alt+S" mac="Cmd+Alt+S" />
       <key command="CloseFile" shortcut="Ctrl+W" mac="Cmd+W" />
       <key command="CloseAllFiles" shortcut="Ctrl+Shift+W" mac="Cmd+Shift+W" />
       <key command="ImportSpriteSheet" shortcut="Ctrl+I" mac="Cmd+I" />
@@ -712,6 +713,8 @@
         <separator />
         <item command="SaveFile" text="@.file_save" />
         <item command="SaveFileAs" text="@.file_save_as" group="file_save" />
+        <item command="SaveVersion" text="@.file_save_version" />
+        <item command="VersionHistory" text="@.file_version_history" />
         <item command="CloseFile" text="@.file_close" />
         <item command="CloseAllFiles" text="@.file_close_all" group="file_close" />
         <separator />

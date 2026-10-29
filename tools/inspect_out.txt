@@ -1,0 +1,33 @@
+--- I:/Shared drives/Pitch Quest Shared Drive/Working Files/Music Store/Export/Instruments/Mic.aseprite ---
+Size: 20x60
+ColorMode: 0
+Frames: 1
+Layers: 1
+  Layer 1: Layer 1 (visible=true, opacity=255)
+  Frame 1 duration: 0.1
+--- I:/Shared drives/Pitch Quest Shared Drive/Working Files/Music Store/Export/Instruments/Cello.aseprite ---
+Size: 60x60
+ColorMode: 0
+Frames: 17
+Layers: 4
+  Layer 1: Layer 3 (visible=true, opacity=255)
+  Layer 2: Layer 2 (visible=true, opacity=255)
+  Layer 3: Layer 1 (visible=true, opacity=255)
+  Layer 4: Layer 4 (visible=false, opacity=255)
+  Frame 1 duration: 0.1
+  Frame 2 duration: 0.1
+  Frame 3 duration: 0.1
+  Frame 4 duration: 0.1
+  Frame 5 duration: 0.1
+  Frame 6 duration: 0.1
+  Frame 7 duration: 0.1
+  Frame 8 duration: 0.1
+  Frame 9 duration: 0.1
+  Frame 10 duration: 0.1
+  Frame 11 duration: 0.1
+  Frame 12 duration: 0.1
+  Frame 13 duration: 0.1
+  Frame 14 duration: 0.1
+  Frame 15 duration: 0.1
+  Frame 16 duration: 0.1
+  Frame 17 duration: 0.1

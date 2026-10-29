@@ -1,0 +1,81 @@
+=== Grand Piano.aseprite (100x70) ===
+Frames: 1
+  Layer 1: 'Layer 1' (vis=true) cels: []
+  Layer 2: 'Group 10' (vis=true) cels: []
+=== Piano.aseprite (80x70) ===
+Frames: 1
+  Layer 1: 'Layer 1' (vis=true) cels: [1]
+=== Cello.aseprite (60x60) ===
+Frames: 17
+  Layer 1: 'Layer 3' (vis=true) cels: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]
+  Layer 2: 'Layer 2' (vis=true) cels: [1,2,3]
+  Layer 3: 'Layer 1' (vis=true) cels: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]
+  Layer 4: 'Layer 4' (vis=false) cels: [1,2,3]
+=== Drumset.aseprite (90x70) ===
+Frames: 4
+  Layer 1: 'Layer 3' (vis=true) cels: [1,2,3,4]
+  Layer 2: 'Layer 1' (vis=true) cels: [1,2,3,4]
+  Layer 3: 'Layer 2' (vis=true) cels: [2,3,4]
+  Layer 4: 'Layer 6' (vis=true) cels: [2,3,4]
+  Layer 5: 'Layer 7' (vis=true) cels: [2,4]
+  Layer 6: 'Layer 2 Copy' (vis=true) cels: [2,3,4]
+  Layer 7: 'Layer 4' (vis=true) cels: [2,3,4]
+  Layer 8: 'Layer 4 Copy' (vis=true) cels: [2,3,4]
+  Layer 9: 'Layer 5' (vis=true) cels: [2,3,4]
+  Layer 10: 'Layer 11' (vis=true) cels: [3,4]
+  Layer 11: 'Layer 8' (vis=true) cels: [2,3,4]
+  Layer 12: 'Layer 9' (vis=true) cels: [2]
+  Layer 13: 'Layer 10' (vis=true) cels: [2,4]
+  Layer 14: 'Layer 12' (vis=true) cels: [4]
+=== Keyboard.aseprite (60x40) ===
+Frames: 4
+  Layer 1: 'Layer 1' (vis=true) cels: [1,2,3,4]
+  Layer 2: 'Layer 2' (vis=true) cels: [4]
+  Layer 3: 'Layer 3' (vis=true) cels: [4]
+=== Guitar.aseprite (30x60) ===
+Frames: 3
+  Layer 1: 'Layer 4' (vis=true) cels: [1,2]
+  Layer 2: 'Layer 1' (vis=false) cels: [1,2,3]
+  Layer 3: 'Layer 2' (vis=false) cels: [1,2]
+  Layer 4: 'Layer 3' (vis=false) cels: [1,2]
+  Layer 5: 'Flattened' (vis=true) cels: [1,2]
+=== Saxophone.aseprite (32x64) ===
+Frames: 17
+  Layer 1: 'Layer 3' (vis=true) cels: [7,8,9,10]
+  Layer 2: 'Layer 1' (vis=true) cels: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]
+  Layer 3: 'Layer 2' (vis=true) cels: [9]
+=== Trumphet.aseprite (48x26) ===
+Frames: 21
+  Layer 1: 'Layer 3' (vis=true) cels: [1,2,3,4,5,21]
+  Layer 2: 'Layer 2' (vis=true) cels: [1,2,3,5,21]
+  Layer 3: 'Layer 1' (vis=true) cels: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21]
+  Layer 4: 'Layer 4' (vis=true) cels: [21]
+=== Trumbone.aseprite (96x24) ===
+Frames: 19
+  Layer 1: 'Layer 3' (vis=true) cels: [1,2,3,4]
+  Layer 2: 'Layer 2' (vis=true) cels: [1]
+  Layer 3: 'Layer 1' (vis=true) cels: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+=== Mic.aseprite (32x60) ===
+Frames: 4
+  Layer 1: 'Common (Rarity 1)' (vis=true) cels: [1]
+  Layer 2: 'Rare (Rarity 2)' (vis=true) cels: [2]
+  Layer 3: 'Epic (Rarity 3)' (vis=true) cels: [3]
+  Layer 4: 'Legendary (Rarity 4)' (vis=true) cels: [4]
+=== Double Bass.aseprite (50x90) ===
+Frames: 1
+  Layer 1: 'Layer 1' (vis=true) cels: [1]
+=== Double Bass 2.aseprite (50x90) ===
+Frames: 4
+  Layer 1: 'Layer 12' (vis=true) cels: [1,2,3,4]
+  Layer 2: 'Layer' (vis=true) cels: [1]
+  Layer 3: 'Layer 1' (vis=true) cels: [2,3,4]
+  Layer 4: 'Layer 7' (vis=true) cels: [2,3,4]
+  Layer 5: 'Layer 4' (vis=true) cels: [2,3,4]
+  Layer 6: 'Layer 2' (vis=true) cels: [2,3,4]
+  Layer 7: 'Layer 6' (vis=true) cels: [2,3,4]
+  Layer 8: 'Layer 3' (vis=true) cels: [2,3,4]
+  Layer 9: 'Layer 5' (vis=true) cels: [2,3,4]
+  Layer 10: 'Layer 8' (vis=true) cels: [2,4]
+  Layer 11: 'Layer 9' (vis=true) cels: [2,3,4]
+  Layer 12: 'Layer 10' (vis=true) cels: [2,3,4]
+  Layer 13: 'Layer 11' (vis=true) cels: []

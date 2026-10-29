@@ -472,6 +472,8 @@ target_sources(app-lib PRIVATE
   commands/cmd_save_file.cpp
   commands/cmd_save_mask.cpp
   commands/cmd_save_palette.cpp
+  commands/cmd_version.cpp
+  versions/version_store.cpp
   commands/cmd_scroll.cpp
   commands/cmd_scroll_center.cpp
   commands/cmd_select_palette.cpp

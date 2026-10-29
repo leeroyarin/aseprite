@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "aseprite2": {
+      "command": "node",
+      "args": [
+        "c:/Users/leero/Source/Repos/aseprite2/tools/aseprite2-mcp/dist/index.js"
+      ],
+      "env": {
+        "ASEPRITE2_EXE": "c:/Users/leero/Source/Repos/aseprite2/build/bin/aseprite.exe"
+      }
+    }
+  }
+}

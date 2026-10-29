@@ -255,6 +255,7 @@ private:
                            const std::string& fullPackageFilename,
                            bool isBuiltinExtension);
   void generateExtensionSignals(Extension* extension);
+  void autoImportPixelLab();
 
   List m_extensions;
   std::string m_userExtensionsPath;

@@ -88,7 +88,7 @@ void ResourceFinder::includeDataDir(const char* filename)
 #ifdef _WIN32
 
   std::snprintf(buf, sizeof(buf), "data/%s", filename);
-  includeHomeDir(buf); // %AppData%/Aseprite/data/filename
+  includeHomeDir(buf); // %AppData%/Aseprite2/data/filename
   includeBinDir(buf);  // $BINDIR/data/filename
 
 #elif __APPLE__
@@ -102,8 +102,8 @@ void ResourceFinder::includeDataDir(const char* filename)
 
 #else
 
-  // $HOME/.config/aseprite/filename
-  std::snprintf(buf, sizeof(buf), "aseprite/data/%s", filename);
+  // $HOME/.config/aseprite2/filename (Aseprite 2.0 uses its own folder)
+  std::snprintf(buf, sizeof(buf), "aseprite2/data/%s", filename);
   includeHomeConfigDir(buf);
 
   // $BINDIR/data/filename
@@ -121,10 +121,11 @@ void ResourceFinder::includeHomeDir(const char* filename)
 {
 #ifdef _WIN32
 
-  // %AppData%/Aseprite/filename
+  // %AppData%/Aseprite2/filename (Aseprite 2.0 uses its own folder so
+  // it doesn't clash with a stock Aseprite installation)
   wchar_t* env = _wgetenv(L"AppData");
   if (env) {
-    std::string path = base::join_path(base::to_utf8(env), "Aseprite");
+    std::string path = base::join_path(base::to_utf8(env), "Aseprite2");
     path = base::join_path(path, filename);
     addPath(path);
     m_default = path;
@@ -179,7 +180,7 @@ void ResourceFinder::includeUserDir(const char* filename)
     includeBinDir(filename);
   }
   else {
-    // %AppData%/Aseprite/filename
+    // %AppData%/Aseprite2/filename
     includeHomeDir(filename);
   }
 
@@ -199,8 +200,8 @@ void ResourceFinder::includeUserDir(const char* filename)
 
   #else // !__APPLE__
 
-    // $HOME/.config/aseprite/filename
-    includeHomeConfigDir((std::string("aseprite/") + filename).c_str());
+    // $HOME/.config/aseprite2/filename
+    includeHomeConfigDir((std::string("aseprite2/") + filename).c_str());
 
   #endif
   }
