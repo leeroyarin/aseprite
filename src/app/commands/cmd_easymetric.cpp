@@ -1,0 +1,2591 @@
+// Aseprite 2.0
+// Copyright (C) 2026 Antigravity / Aseprite 2.0 contributors
+//
+// This program is distributed under the terms of
+// the End-User License Agreement for Aseprite.
+
+#ifdef HAVE_CONFIG_H
+  #include "config.h"
+#endif
+
+#include "app/app.h"
+#include "app/cmd/add_slice.h"
+#include "app/cmd/add_tag.h"
+#include "app/commands/command.h"
+#include "app/commands/commands.h"
+#include "app/console.h"
+#include "app/context.h"
+#include "app/doc.h"
+#include "app/doc_api.h"
+#include "app/extra_cel.h"
+#include "app/file/file.h"
+#include "app/file_selector.h"
+#include "app/pref/preferences.h"
+#include "app/site.h"
+#include "app/tx.h"
+#include "app/ui/doc_view.h"
+#include "app/ui/editor/editor.h"
+#include "app/ui/editor/editor_view.h"
+#include "app/ui/skin/skin_theme.h"
+#include "app/ui/status_bar.h"
+#include "app/ui_context.h"
+#include "app/util/conversion_to_surface.h"
+#include "base/fs.h"
+#include "doc/cel.h"
+#include "doc/cels_range.h"
+#include "doc/color.h"
+#include "doc/frames_sequence.h"
+#include "doc/image.h"
+#include "doc/layer.h"
+#include "doc/primitives.h"
+#include "doc/slice.h"
+#include "doc/sprite.h"
+#include "doc/tag.h"
+#include "doc/tags.h"
+#include "fmt/format.h"
+#include "os/sampling.h"
+#include "os/surface.h"
+#include "os/system.h"
+#include "render/render.h"
+#include "ui/box.h"
+#include "ui/button.h"
+#include "ui/combobox.h"
+#include "ui/graphics.h"
+#include "ui/label.h"
+#include "ui/manager.h"
+#include "ui/message.h"
+#include "ui/paint_event.h"
+#include "ui/resize_event.h"
+#include "ui/scale.h"
+#include "ui/separator.h"
+#include "ui/size_hint_event.h"
+#include "ui/slider.h"
+#include "ui/system.h"
+#include "ui/timer.h"
+#include "ui/view.h"
+#include "ui/widget.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace app {
+
+namespace {
+
+enum FaceId : int {
+  kFaceTop = 0,
+  kFaceDown = 1,
+  kFaceFront = 2,
+  kFaceBack = 3,
+  kFaceRight = 4,
+  kFaceLeft = 5,
+  kFaceCount = 6
+};
+
+enum RenderStyle : int {
+  kRenderTexturedLit = 0,
+  kRenderTexturedFlat = 1,
+  kRenderColoredFaces = 2,
+  kRenderNormalShaded = 3,
+  kRenderDepthShaded = 4,
+  kRenderWireframeTex = 5
+};
+
+struct FaceSpec {
+  const char* sliceName;
+  const char* displayName;
+  int gridCol;
+  int gridRow;
+  uint8_t r, g, b;
+  int defaultYaw;
+  int defaultPitch;
+};
+
+// 4-Column 2-Row layout matching reference UI:
+// Col 0: Top (row 0),    Bottom (row 1)
+// Col 1: Front (row 0),  Back (row 1)
+// Col 2: Right (row 0),  Left (row 1)
+// Col 3: Preview (row 0), Fields (row 1)
+constexpr std::array<FaceSpec, kFaceCount> kFaceSpecs = {{
+  { "TOP",   "Top",    0, 0, 168,  85, 247,  45,  60 },
+  { "DOWN",  "Bottom", 0, 1, 244,  63,  94,  45, -60 },
+  { "FRONT", "Front",  1, 0,   0, 229, 255,   0,   0 },
+  { "BACK",  "Back",   1, 1,  59, 130, 246, 180,   0 },
+  { "RIGHT", "Right",  2, 0, 245, 158,  11, -90,   0 },
+  { "LEFT",  "Left",   2, 1,  16, 185, 129,  90,   0 },
+}};
+
+inline uint8_t clampByte(float v)
+{
+  if (v <= 0.0f) return 0;
+  if (v >= 255.0f) return 255;
+  return static_cast<uint8_t>(v + 0.5f);
+}
+
+inline float pixelLuma(uint32_t c)
+{
+  if (doc::rgba_geta(c) <= 16)
+    return 0.0f;
+  return (0.299f * doc::rgba_getr(c) +
+          0.587f * doc::rgba_getg(c) +
+          0.114f * doc::rgba_getb(c)) * (1.0f / 255.0f);
+}
+
+uint32_t starterSurfacePixel(int face, int u, int v, int W, int H)
+{
+  const bool isBorder = (u == 0 || v == 0 || u == W - 1 || v == H - 1);
+  const bool isInnerBorder = (u == 1 || v == 1 || u == W - 2 || v == H - 2);
+  const bool isCorner = ((u <= 2 && v <= 2) || (u >= W - 3 && v <= 2) ||
+                         (u <= 2 && v >= H - 3) || (u >= W - 3 && v >= H - 3));
+  if (isCorner)
+    return doc::rgba(251, 191, 36, 255);
+  if (isBorder)
+    return doc::rgba(30, 41, 59, 255);
+  if (isInnerBorder) {
+    const auto& spec = kFaceSpecs[face];
+    return doc::rgba(spec.r / 2 + 30, spec.g / 2 + 30, spec.b / 2 + 30, 255);
+  }
+
+  const float cx = (W - 1) * 0.5f;
+  const float cy = (H - 1) * 0.5f;
+  const float dx = u - cx;
+  const float dy = v - cy;
+  const float dist = std::sqrt(dx * dx + dy * dy);
+  const int minDim = std::min(W, H);
+
+  switch (face) {
+    case kFaceFront: {
+      if (v == 3 && u >= 4 && u <= W - 5)
+        return doc::rgba(0, 229, 255, 255);
+      if (dist <= 2.3f)
+        return doc::rgba(148, 163, 184, 255);
+      if (dist <= minDim * 0.30f)
+        return doc::rgba(15, 23, 42, 255);
+      if (dist <= minDim * 0.36f)
+        return doc::rgba(71, 85, 105, 255);
+      return (((u + v) & 1) == 0) ? doc::rgba(30, 41, 59, 255) : doc::rgba(51, 65, 85, 255);
+    }
+    case kFaceBack: {
+      if (v >= 4 && v <= 8 && (v & 1) == 0 && u >= 5 && u <= W - 6)
+        return doc::rgba(15, 23, 42, 255);
+      if (dist <= 2.5f)
+        return doc::rgba(239, 68, 68, 255);
+      return doc::rgba(45, 55, 72, 255);
+    }
+    case kFaceLeft:
+    case kFaceRight: {
+      if (v >= H / 2 - 2 && v <= H / 2 + 2 && u >= 5 && u <= W - 6)
+        return doc::rgba(28, 25, 23, 255);
+      return (((u + v) % 3) == 0) ? doc::rgba(93, 64, 55, 255) : doc::rgba(78, 52, 46, 255);
+    }
+    case kFaceTop: {
+      if (v >= H / 2 - 1 && v <= H / 2 + 1 && u >= 4 && u <= W - 5)
+        return doc::rgba(15, 23, 42, 255);
+      if (v >= 3 && v <= 4 && u >= 4 && u <= W - 5 && (u % 3 == 0))
+        return doc::rgba(253, 224, 71, 255);
+      return doc::rgba(109, 76, 65, 255);
+    }
+    case kFaceDown:
+    default: {
+      if ((u >= 3 && u <= 5 && v >= 3 && v <= 5) ||
+          (u >= W - 6 && u <= W - 4 && v >= 3 && v <= 5) ||
+          (u >= 3 && u <= 5 && v >= H - 6 && v <= H - 4) ||
+          (u >= W - 6 && u <= W - 4 && v >= H - 6 && v <= H - 4)) {
+        return doc::rgba(15, 23, 42, 255);
+      }
+      return doc::rgba(51, 65, 85, 255);
+    }
+  }
+}
+
+struct SixSurfaceData {
+  int S = 24;
+  std::array<int, kFaceCount> w = { 24, 24, 24, 24, 24, 24 };
+  std::array<int, kFaceCount> h = { 24, 24, 24, 24, 24, 24 };
+  std::array<std::vector<uint32_t>, kFaceCount> pixels;
+  std::array<std::vector<uint8_t>, kFaceCount> depthPixels;
+  std::array<gfx::Rect, kFaceCount> bounds;
+  std::array<bool, 3> colLinked = { false, false, false };
+  bool hasSlices = false;
+  bool hasCustomDepthLayer = false;
+
+  void init(int faceSize)
+  {
+    S = std::max(8, faceSize);
+    for (int f = 0; f < kFaceCount; ++f) {
+      w[f] = S;
+      h[f] = S;
+      pixels[f].assign(S * S, 0);
+      depthPixels[f].assign(S * S, 128);
+    }
+    colLinked.fill(false);
+  }
+
+  void setFaceSize(int face, int fw, int fh)
+  {
+    fw = std::clamp(fw, 4, 256);
+    fh = std::clamp(fh, 4, 256);
+    w[face] = fw;
+    h[face] = fh;
+    pixels[face].assign(fw * fh, 0);
+    depthPixels[face].assign(fw * fh, 128);
+    S = std::max(S, std::max(fw, fh));
+  }
+
+  uint32_t sample(int face, int u, int v) const
+  {
+    const int fw = w[face];
+    const int fh = h[face];
+    u = std::clamp(u, 0, fw - 1);
+    v = std::clamp(v, 0, fh - 1);
+    return pixels[face][v * fw + u];
+  }
+
+  float sampleDepthNorm(int face, int u, int v) const
+  {
+    const int fw = w[face];
+    const int fh = h[face];
+    u = std::clamp(u, 0, fw - 1);
+    v = std::clamp(v, 0, fh - 1);
+    if (hasCustomDepthLayer) {
+      return float(depthPixels[face][v * fw + u]) * (1.0f / 255.0f);
+    }
+    return pixelLuma(pixels[face][v * fw + u]);
+  }
+
+  bool hasPixels(int face) const
+  {
+    if (face < 0 || face >= kFaceCount) return false;
+    const auto& px = pixels[face];
+    for (uint32_t c : px) {
+      if (doc::rgba_geta(c) > 16)
+        return true;
+    }
+    return false;
+  }
+
+  int symmetricFace(int face) const
+  {
+    if (hasPixels(face)) return face;
+    switch (face) {
+      case kFaceTop:   if (hasPixels(kFaceDown)) return kFaceDown; break;
+      case kFaceDown:  if (hasPixels(kFaceTop))  return kFaceTop; break;
+      case kFaceFront: if (hasPixels(kFaceBack)) return kFaceBack; break;
+      case kFaceBack:  if (hasPixels(kFaceFront)) return kFaceFront; break;
+      case kFaceRight: if (hasPixels(kFaceLeft))  return kFaceLeft; break;
+      case kFaceLeft:  if (hasPixels(kFaceRight)) return kFaceRight; break;
+    }
+    return face;
+  }
+
+  uint32_t sampleSymmetric(int face, int u, int v) const
+  {
+    const int sf = symmetricFace(face);
+    return sample(sf, u, v);
+  }
+
+  bool isFaceSolid(int face, int u, int v) const
+  {
+    return doc::rgba_geta(sampleSymmetric(face, u, v)) > 16;
+  }
+};
+
+struct SculptedVoxelVolume {
+  int vx = 24;
+  int vy = 24;
+  int vz = 24;
+  std::vector<uint8_t> solid;
+
+  bool isSolid(int x, int y, int z) const
+  {
+    if (x < 0 || x >= vx || y < 0 || y >= vy || z < 0 || z >= vz)
+      return false;
+    return solid[(y * vz + z) * vx + x] != 0;
+  }
+
+  void setSolid(int x, int y, int z, bool val)
+  {
+    if (x >= 0 && x < vx && y >= 0 && y < vy && z >= 0 && z < vz)
+      solid[(y * vz + z) * vx + x] = (val ? 1 : 0);
+  }
+};
+
+static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
+                                              int pivX, int pivY, int pivZ)
+{
+  SculptedVoxelVolume vol;
+  const int dimX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown], 8 });
+  const int dimY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight], 8 });
+  const int dimZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown], 8 });
+
+  vol.vx = std::clamp(dimX, 8, 64);
+  vol.vy = std::clamp(dimY, 8, 64);
+  vol.vz = std::clamp(dimZ, 8, 64);
+  vol.solid.assign(vol.vx * vol.vy * vol.vz, 0);
+
+  const bool hasTop   = data.hasPixels(kFaceTop);
+  const bool hasDown  = data.hasPixels(kFaceDown);
+  const bool hasFront = data.hasPixels(kFaceFront);
+  const bool hasBack  = data.hasPixels(kFaceBack);
+  const bool hasRight = data.hasPixels(kFaceRight);
+  const bool hasLeft  = data.hasPixels(kFaceLeft);
+
+  const bool activeTopDown   = (hasTop || hasDown);
+  const bool activeFrontBack = (hasFront || hasBack);
+  const bool activeRightLeft = (hasRight || hasLeft);
+
+  if (!activeTopDown && !activeFrontBack && !activeRightLeft) {
+    vol.solid.assign(vol.vx * vol.vy * vol.vz, 1);
+    return vol;
+  }
+
+  const int pivIndexX = std::clamp(int(pivX * 0.01f * (vol.vx - 1)), 0, vol.vx - 1);
+  const int pivIndexY = std::clamp(int(pivY * 0.01f * (vol.vy - 1)), 0, vol.vy - 1);
+  const int pivIndexZ = std::clamp(int(pivZ * 0.01f * (vol.vz - 1)), 0, vol.vz - 1);
+
+  const bool onlyTopDown = activeTopDown && !activeFrontBack && !activeRightLeft;
+  const bool onlyFrontBack = activeFrontBack && !activeTopDown && !activeRightLeft;
+  const bool onlyRightLeft = activeRightLeft && !activeTopDown && !activeFrontBack;
+
+  const int slabYMin = std::max(0, pivIndexY - 1);
+  const int slabYMax = std::min(vol.vy - 1, pivIndexY + 1);
+
+  const int slabZMin = std::max(0, pivIndexZ - 1);
+  const int slabZMax = std::min(vol.vz - 1, pivIndexZ + 1);
+
+  const int slabXMin = std::max(0, pivIndexX - 1);
+  const int slabXMax = std::min(vol.vx - 1, pivIndexX + 1);
+
+  for (int y = 0; y < vol.vy; ++y) {
+    if (onlyTopDown && (y < slabYMin || y > slabYMax))
+      continue;
+
+    for (int z = 0; z < vol.vz; ++z) {
+      if (onlyFrontBack && (z < slabZMin || z > slabZMax))
+        continue;
+
+      for (int x = 0; x < vol.vx; ++x) {
+        if (onlyRightLeft && (x < slabXMin || x > slabXMax))
+          continue;
+
+        bool solid = true;
+
+        if (activeTopDown) {
+          const int uTop = std::clamp(int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceTop]), 0, data.w[kFaceTop] - 1);
+          const int vTop = std::clamp(int((float(z) + 0.5f) / float(vol.vz) * data.h[kFaceTop]), 0, data.h[kFaceTop] - 1);
+          bool topSolid = data.isFaceSolid(kFaceTop, uTop, vTop);
+
+          if (!data.colLinked[0] && hasDown) {
+            const int uDown = std::clamp(int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceDown]), 0, data.w[kFaceDown] - 1);
+            const int vDown = std::clamp(int((float(vol.vz - 1 - z) + 0.5f) / float(vol.vz) * data.h[kFaceDown]), 0, data.h[kFaceDown] - 1);
+            bool downSolid = data.isFaceSolid(kFaceDown, uDown, vDown);
+            topSolid = (hasTop ? (topSolid || downSolid) : downSolid);
+          }
+          if (!topSolid) {
+            solid = false;
+          }
+        }
+
+        if (solid && activeFrontBack) {
+          const int uFront = std::clamp(int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceFront]), 0, data.w[kFaceFront] - 1);
+          const int vFront = std::clamp(int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceFront]), 0, data.h[kFaceFront] - 1);
+          bool frontSolid = data.isFaceSolid(kFaceFront, uFront, vFront);
+
+          if (!data.colLinked[1] && hasBack) {
+            const int uBack = std::clamp(int((float(vol.vx - 1 - x) + 0.5f) / float(vol.vx) * data.w[kFaceBack]), 0, data.w[kFaceBack] - 1);
+            const int vBack = std::clamp(int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceBack]), 0, data.h[kFaceBack] - 1);
+            bool backSolid = data.isFaceSolid(kFaceBack, uBack, vBack);
+            frontSolid = (hasFront ? (frontSolid || backSolid) : backSolid);
+          }
+          if (!frontSolid) {
+            solid = false;
+          }
+        }
+
+        if (solid && activeRightLeft) {
+          const int uRight = std::clamp(int((float(vol.vz - 1 - z) + 0.5f) / float(vol.vz) * data.w[kFaceRight]), 0, data.w[kFaceRight] - 1);
+          const int vRight = std::clamp(int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceRight]), 0, data.h[kFaceRight] - 1);
+          bool sideSolid = data.isFaceSolid(kFaceRight, uRight, vRight);
+
+          if (!data.colLinked[2] && hasLeft) {
+            const int uLeft = std::clamp(int((float(z) + 0.5f) / float(vol.vz) * data.w[kFaceLeft]), 0, data.w[kFaceLeft] - 1);
+            const int vLeft = std::clamp(int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceLeft]), 0, data.h[kFaceLeft] - 1);
+            bool leftSolid = data.isFaceSolid(kFaceLeft, uLeft, vLeft);
+            sideSolid = (hasRight ? (sideSolid || leftSolid) : leftSolid);
+          }
+          if (!sideSolid) {
+            solid = false;
+          }
+        }
+
+        if (solid) {
+          vol.setSolid(x, y, z, true);
+        }
+      }
+    }
+  }
+
+  return vol;
+}
+
+static doc::Slice* findSliceForFace(doc::Sprite* spr, int face)
+{
+  if (!spr || face < 0 || face >= kFaceCount)
+    return nullptr;
+  const char* primary = kFaceSpecs[face].sliceName;
+  const char* display = kFaceSpecs[face].displayName;
+  for (auto* slice : spr->slices()) {
+    if (slice->name() == primary || slice->name() == display ||
+        (face == kFaceDown && slice->name() == "BOTTOM")) {
+      return slice;
+    }
+  }
+  return nullptr;
+}
+
+static doc::LayerImage* findLayerByName(doc::Sprite* spr, const std::string& name)
+{
+  if (!spr)
+    return nullptr;
+  for (doc::Layer* lyr : spr->allLayers()) {
+    if (lyr->isImage() && lyr->name() == name)
+      return static_cast<doc::LayerImage*>(lyr);
+  }
+  return nullptr;
+}
+
+static doc::LayerImage* findOrCreateLayer(app::Doc* doc,
+                                          app::DocApi& api,
+                                          doc::Sprite* spr,
+                                          const std::string& name)
+{
+  if (auto* existing = findLayerByName(spr, name))
+    return existing;
+  return api.newLayer(spr->root(), name);
+}
+
+class LinkToggleButton : public ui::Button {
+public:
+  LinkToggleButton()
+    : ui::Button("")
+    , m_linked(false)
+  {
+    setFocusStop(false);
+  }
+
+  bool isLinked() const { return m_linked; }
+
+  void setLinked(bool linked)
+  {
+    if (m_linked != linked) {
+      m_linked = linked;
+      setSelected(linked);
+      invalidate();
+    }
+  }
+
+protected:
+  void onSizeHint(ui::SizeHintEvent& ev) override
+  {
+    const int s = ui::guiscale();
+    ev.setSizeHint(gfx::Size(20 * s, 14 * s));
+  }
+
+  void onPaint(ui::PaintEvent& ev) override
+  {
+    ui::Graphics* g = ev.graphics();
+    const gfx::Rect rc = clientBounds();
+    const int s = ui::guiscale();
+    auto* theme = skin::SkinTheme::instance();
+
+    gfx::Color bg, borderCol, iconCol;
+    if (m_linked) {
+      bg = hasMouse() ? gfx::rgba(14, 165, 233) : gfx::rgba(2, 132, 199);
+      borderCol = gfx::rgba(56, 189, 248);
+      iconCol = gfx::rgba(255, 255, 255);
+    }
+    else {
+      bg = hasMouse() ? gfx::rgba(100, 116, 139) : gfx::rgba(64, 78, 94);
+      borderCol = hasMouse() ? gfx::rgba(148, 163, 184) : gfx::rgba(45, 55, 66);
+      iconCol = hasMouse() ? gfx::rgba(241, 245, 249) : gfx::rgba(180, 195, 210);
+    }
+
+    g->fillRect(bg, rc);
+    g->drawRect(borderCol, rc);
+
+    // Draw link icon from theme part
+    os::Surface* icon = nullptr;
+    if (theme) {
+      const auto& part = theme->parts.iconAspectRatio();
+      if (part)
+        icon = part->bitmap(0);
+    }
+
+    if (icon) {
+      const int ix = rc.x + (rc.w - icon->width()) / 2;
+      const int iy = rc.y + (rc.h - icon->height()) / 2;
+      g->drawColoredRgbaSurface(icon, iconCol, ix, iy);
+    }
+    else {
+      const int cx = rc.x + rc.w / 2;
+      const int cy = rc.y + rc.h / 2;
+      g->drawRect(iconCol, gfx::Rect(cx - 5 * s, cy - 2 * s, 5 * s, 4 * s));
+      g->drawRect(iconCol, gfx::Rect(cx - 1 * s, cy - 2 * s, 5 * s, 4 * s));
+      g->drawHLine(iconCol, cx - 2 * s, cy, 3 * s);
+    }
+  }
+
+private:
+  bool m_linked;
+};
+
+// Folder-tab ear header bar matching reference UI
+class PaneHeader : public ui::Widget {
+public:
+  PaneHeader(const std::string& title, gfx::Color accentCol = gfx::ColorNone)
+    : ui::Widget(ui::kGenericWidget)
+    , m_title(title)
+    , m_accentCol(accentCol)
+    , m_active(false)
+    , m_linkBtn(nullptr)
+  {
+    setFocusStop(false);
+  }
+
+  void setTitle(const std::string& title)
+  {
+    m_title = title;
+    invalidate();
+  }
+
+  const std::string& title() const { return m_title; }
+
+  void setActive(bool active)
+  {
+    if (m_active != active) {
+      m_active = active;
+      invalidate();
+    }
+  }
+
+  void setLinkButton(LinkToggleButton* btn)
+  {
+    m_linkBtn = btn;
+    if (btn)
+      addChild(btn);
+  }
+
+protected:
+  void onSizeHint(ui::SizeHintEvent& ev) override
+  {
+    ev.setSizeHint(gfx::Size(64 * ui::guiscale(), 16 * ui::guiscale()));
+  }
+
+  void onResize(ui::ResizeEvent& ev) override
+  {
+    setBoundsQuietly(ev.bounds());
+    if (m_linkBtn) {
+      const gfx::Rect rc = childrenBounds();
+      const int s = ui::guiscale();
+      const int btnW = 20 * s;
+      const int btnH = 14 * s;
+      m_linkBtn->setBounds(gfx::Rect(rc.x + rc.w - btnW - 3 * s,
+                                     rc.y + (rc.h - btnH) / 2,
+                                     btnW,
+                                     btnH));
+    }
+  }
+
+  void onPaint(ui::PaintEvent& ev) override
+  {
+    ui::Graphics* g = ev.graphics();
+    const gfx::Rect rc = clientBounds();
+    const int s = ui::guiscale();
+
+    const gfx::Size textSz = g->measureText(m_title);
+    const int tabW = std::min(rc.w, std::max(textSz.w + 14 * s, 48 * s));
+    const gfx::Rect tabRc(rc.x, rc.y, tabW, rc.h);
+
+    // Slate blue header bar background
+    g->fillRect(gfx::rgba(92, 108, 122), rc);
+    // Raised folder tab ear
+    g->fillRect(m_active ? gfx::rgba(125, 142, 160) : gfx::rgba(105, 122, 138), tabRc);
+    g->drawRect(gfx::rgba(28, 35, 43), rc);
+
+    if (m_accentCol != gfx::ColorNone) {
+      g->fillRect(m_accentCol, gfx::Rect(tabRc.x + 1, tabRc.y + 1, 3 * s, tabRc.h - 2));
+    }
+
+    // Grip dots ":::"
+    const int rightReserve = (m_linkBtn ? 26 * s : 4 * s);
+    if (rc.w > tabW + rightReserve + 16 * s) {
+      const int availableSpace = rc.w - tabW - rightReserve;
+      const int gx = rc.x + tabW + availableSpace / 2 - 4 * s;
+      const int gy = rc.y + rc.h / 2 - 1 * s;
+      const gfx::Color dotCol = gfx::rgba(45, 55, 66);
+      for (int dx = 0; dx < 3; ++dx) {
+        g->fillRect(dotCol, gfx::Rect(gx + dx * 3 * s, gy, s, s));
+        g->fillRect(dotCol, gfx::Rect(gx + dx * 3 * s, gy + 2 * s, s, s));
+      }
+    }
+
+    g->drawText(m_title,
+                gfx::rgba(255, 255, 255),
+                gfx::ColorNone,
+                gfx::Point(tabRc.x + (m_accentCol != gfx::ColorNone ? 6 * s : 4 * s),
+                           tabRc.y + (rc.h - textSz.h) / 2));
+  }
+
+private:
+  std::string m_title;
+  gfx::Color m_accentCol;
+  bool m_active;
+  LinkToggleButton* m_linkBtn;
+};
+
+class FacePaneBox : public ui::VBox {
+public:
+  FacePaneBox(int faceIndex, DocView* docView, Editor* editor)
+    : m_faceIndex(faceIndex)
+    , m_docView(docView)
+    , m_editor(editor)
+  {
+  }
+
+protected:
+  bool onProcessMessage(ui::Message* msg) override
+  {
+    if (msg->type() == ui::kMouseDownMessage) {
+      if (m_docView && m_docView->document() && m_docView->document()->sprite()) {
+        const std::string lyrName = std::string("Surface_") + kFaceSpecs[m_faceIndex].sliceName;
+        if (doc::LayerImage* lyr = findLayerByName(m_docView->document()->sprite(), lyrName)) {
+          m_editor->setLayer(lyr);
+          if (m_docView->editor() != m_editor) {
+            m_docView->setActivePaneEditor(m_editor);
+          }
+          if (UIContext* ctx = UIContext::instance())
+            ctx->setActiveView(m_docView);
+        }
+      }
+    }
+    return ui::VBox::onProcessMessage(msg);
+  }
+
+private:
+  int m_faceIndex;
+  DocView* m_docView;
+  Editor* m_editor;
+};
+
+// Checkerboard helper
+static void drawCheckerboardPattern(ui::Graphics* g, const gfx::Rect& rc)
+{
+  const int tile = 12 * ui::guiscale();
+  const gfx::Color c1 = gfx::rgba(128, 128, 128);
+  const gfx::Color c2 = gfx::rgba(192, 192, 192);
+  g->fillRect(c1, rc);
+  for (int y = rc.y; y < rc.y2(); y += tile) {
+    const int row = (y - rc.y) / tile;
+    const int h = std::min(tile, rc.y2() - y);
+    for (int x = rc.x; x < rc.x2(); x += tile) {
+      const int col = (x - rc.x) / tile;
+      if (((row + col) & 1) == 1) {
+        const int w = std::min(tile, rc.x2() - x);
+        g->fillRect(c2, gfx::Rect(x, y, w, h));
+      }
+    }
+  }
+}
+
+// 3D Preview Widget (Top of Column 4)
+class EasymetricPreviewWidget : public ui::Widget {
+public:
+  EasymetricPreviewWidget()
+    : ui::Widget(ui::kGenericWidget)
+  {
+    setExpansive(true);
+  }
+
+  obs::signal<void(int, int)> OrbitDrag;
+
+  void setSurfaces(const os::SurfaceRef& diffSurf,
+                   const os::SurfaceRef& normSurf,
+                   const os::SurfaceRef& deptSurf,
+                   int yawDeg,
+                   int pitchDeg,
+                   int pivScreenX,
+                   int pivScreenY,
+                   bool showDiff,
+                   bool showNorm,
+                   bool showDept)
+  {
+    m_diffSurf = diffSurf;
+    m_normSurf = normSurf;
+    m_deptSurf = deptSurf;
+    m_yawDeg = yawDeg;
+    m_pitchDeg = pitchDeg;
+    m_pivScreenX = pivScreenX;
+    m_pivScreenY = pivScreenY;
+    m_showDiff = showDiff;
+    m_showNorm = showNorm;
+    m_showDept = showDept;
+    invalidate();
+  }
+
+protected:
+  bool onProcessMessage(ui::Message* msg) override
+  {
+    switch (msg->type()) {
+      case ui::kMouseDownMessage: {
+        auto* mouseMsg = static_cast<ui::MouseMessage*>(msg);
+        if (mouseMsg->left()) {
+          m_dragging = true;
+          m_dragStart = mouseMsg->position();
+          m_startYaw = m_yawDeg;
+          m_startPitch = m_pitchDeg;
+          captureMouse();
+          return true;
+        }
+        break;
+      }
+      case ui::kMouseMoveMessage: {
+        if (m_dragging) {
+          auto* mouseMsg = static_cast<ui::MouseMessage*>(msg);
+          const gfx::Point pos = mouseMsg->position();
+          const int s = std::max(1, ui::guiscale());
+          const int dYaw = (pos.x - m_dragStart.x) / s;
+          const int dPitch = (pos.y - m_dragStart.y) / s;
+          int newYaw = m_startYaw + dYaw;
+          while (newYaw > 180) newYaw -= 360;
+          while (newYaw < -180) newYaw += 360;
+          int newPitch = std::clamp(m_startPitch + dPitch, -75, 75);
+          OrbitDrag(newYaw, newPitch);
+          return true;
+        }
+        break;
+      }
+      case ui::kMouseUpMessage: {
+        if (m_dragging) {
+          m_dragging = false;
+          releaseMouse();
+          return true;
+        }
+        break;
+      }
+    }
+    return ui::Widget::onProcessMessage(msg);
+  }
+
+  void onPaint(ui::PaintEvent& ev) override
+  {
+    ui::Graphics* g = ev.graphics();
+    const gfx::Rect rc = clientBounds();
+    const int s = ui::guiscale();
+
+    drawCheckerboardPattern(g, rc);
+    g->drawRect(gfx::rgba(28, 35, 43), rc);
+
+    std::vector<os::SurfaceRef> activeSurfs;
+    std::vector<const char*> activeLabels;
+    if (m_showDiff && m_diffSurf) {
+      activeSurfs.push_back(m_diffSurf);
+      activeLabels.push_back("Diffuse");
+    }
+    if (m_showNorm && m_normSurf) {
+      activeSurfs.push_back(m_normSurf);
+      activeLabels.push_back("Normal");
+    }
+    if (m_showDept && m_deptSurf) {
+      activeSurfs.push_back(m_deptSurf);
+      activeLabels.push_back("Depth");
+    }
+    if (activeSurfs.empty() && m_diffSurf) {
+      activeSurfs.push_back(m_diffSurf);
+      activeLabels.push_back("Diffuse");
+    }
+
+    if (!activeSurfs.empty()) {
+      const int count = int(activeSurfs.size());
+      const int cellW = rc.w / count;
+
+      for (int i = 0; i < count; ++i) {
+        const gfx::Rect cellRc(rc.x + i * cellW, rc.y, cellW, rc.h);
+        if (i > 0)
+          g->drawVLine(gfx::rgba(28, 35, 43, 180), cellRc.x, cellRc.y, cellRc.h);
+
+        const int sw = activeSurfs[i]->width();
+        const int sh = activeSurfs[i]->height();
+        if (sw > 0 && sh > 0) {
+          const double scaleX = double(cellRc.w - 8 * s) / double(sw);
+          const double scaleY = double(cellRc.h - 8 * s) / double(sh);
+          const double scale = std::max(0.5, std::min(scaleX, scaleY));
+          const int dw = std::max(1, int(sw * scale));
+          const int dh = std::max(1, int(sh * scale));
+          const int dx = cellRc.x + (cellRc.w - dw) / 2;
+          const int dy = cellRc.y + (cellRc.h - dh) / 2;
+
+          g->drawSurface(activeSurfs[i].get(),
+                         gfx::Rect(0, 0, sw, sh),
+                         gfx::Rect(dx, dy, dw, dh),
+                         os::Sampling(os::Sampling::Filter::Nearest),
+                         nullptr);
+
+          if (i == 0) {
+            const int px = dx + int(m_pivScreenX * scale);
+            const int py = dy + int(m_pivScreenY * scale);
+            if (cellRc.contains(gfx::Point(px, py))) {
+              const gfx::Color pivCol = gfx::rgba(250, 204, 21, 230);
+              g->drawHLine(pivCol, px - 4 * s, py, 9 * s);
+              g->drawVLine(pivCol, px, py - 4 * s, 9 * s);
+            }
+          }
+        }
+
+        const gfx::Size lblSz = g->measureText(activeLabels[i]);
+        const gfx::Rect badgeRc(cellRc.x + 3 * s, cellRc.y + 3 * s, lblSz.w + 6 * s, lblSz.h + 2 * s);
+        g->fillRect(gfx::rgba(28, 35, 43, 195), badgeRc);
+        g->drawText(activeLabels[i],
+                    gfx::rgba(255, 255, 255),
+                    gfx::ColorNone,
+                    gfx::Point(badgeRc.x + 3 * s, badgeRc.y + 1 * s));
+      }
+    }
+  }
+
+private:
+  os::SurfaceRef m_diffSurf;
+  os::SurfaceRef m_normSurf;
+  os::SurfaceRef m_deptSurf;
+  int m_yawDeg = 45;
+  int m_pitchDeg = 30;
+  int m_pivScreenX = 40;
+  int m_pivScreenY = 40;
+  bool m_showDiff = true;
+  bool m_showNorm = false;
+  bool m_showDept = false;
+  bool m_dragging = false;
+  gfx::Point m_dragStart;
+  int m_startYaw = 45;
+  int m_startPitch = 30;
+};
+
+// Sleek dark-slate container matching reference UI controls
+class FieldsPanelBox : public ui::VBox {
+public:
+  FieldsPanelBox()
+  {
+    setExpansive(true);
+  }
+protected:
+  void onPaint(ui::PaintEvent& ev) override
+  {
+    ui::Graphics* g = ev.graphics();
+    const gfx::Rect rc = clientBounds();
+    g->fillRect(gfx::rgba(45, 55, 66), rc);
+    g->drawRect(gfx::rgba(28, 35, 43), rc);
+  }
+};
+
+static void setupSixSurfacesOnDoc(Doc* doc, bool seedStarterIfBlank)
+{
+  if (!doc || !doc->sprite())
+    return;
+
+  doc::Sprite* spr = doc->sprite();
+  const int sw = spr->width() > 0 ? spr->width() : 24;
+  const int sh = spr->height() > 0 ? spr->height() : 24;
+
+  try {
+    Tx tx(doc, "Setup Easymetric 6 Surfaces (Top/Bottom | Front/Back | Right/Left)", ModifyDocument);
+    DocApi api = doc->getApi(tx);
+
+    if (spr->width() <= 0 || spr->height() <= 0) {
+      api.setSpriteSize(spr, sw, sh);
+    }
+
+    const doc::frame_t fr = doc::frame_t(0);
+    const gfx::Rect box(0, 0, sw, sh);
+
+    for (int f = 0; f < kFaceCount; ++f) {
+      const std::string layerName = std::string("Surface_") + kFaceSpecs[f].sliceName;
+      doc::LayerImage* surfLayer = findOrCreateLayer(doc, api, spr, layerName);
+      surfLayer->userData().setColor(
+        doc::rgba(kFaceSpecs[f].r, kFaceSpecs[f].g, kFaceSpecs[f].b, 255));
+
+      doc::Cel* cel = surfLayer->cel(fr);
+      doc::ImageRef img;
+      if (cel && cel->image()) {
+        img.reset(doc::Image::createCopy(cel->image()));
+        if (img->width() != sw || img->height() != sh) {
+          doc::ImageRef grown(doc::Image::create(spr->pixelFormat(), sw, sh));
+          grown->clear(0);
+          doc::copy_image(grown.get(), img.get(), cel->x(), cel->y());
+          img = grown;
+          api.setCelPosition(spr, cel, 0, 0);
+        }
+      }
+      else {
+        img.reset(doc::Image::create(spr->pixelFormat(), sw, sh));
+        img->clear(0);
+      }
+
+      doc::Slice* slice = findSliceForFace(spr, f);
+      if (!slice) {
+        slice = new doc::Slice;
+        slice->setName(kFaceSpecs[f].sliceName);
+        slice->insert(0, doc::SliceKey(box));
+        slice->userData().setColor(
+          doc::rgba(kFaceSpecs[f].r, kFaceSpecs[f].g, kFaceSpecs[f].b, 255));
+        tx(new cmd::AddSlice(spr, slice));
+      }
+      else {
+        slice->setName(kFaceSpecs[f].sliceName);
+        slice->insert(0, doc::SliceKey(box));
+        slice->userData().setColor(
+          doc::rgba(kFaceSpecs[f].r, kFaceSpecs[f].g, kFaceSpecs[f].b, 255));
+      }
+
+      if (seedStarterIfBlank && spr->pixelFormat() == doc::IMAGE_RGB) {
+        bool regionHasPixels = false;
+        for (int v = 0; v < sh && !regionHasPixels; ++v) {
+          for (int u = 0; u < sw; ++u) {
+            if (doc::rgba_geta(doc::get_pixel(img.get(), u, v)) > 16) {
+              regionHasPixels = true;
+              break;
+            }
+          }
+        }
+        if (!regionHasPixels) {
+          for (int v = 0; v < sh; ++v) {
+            for (int u = 0; u < sw; ++u) {
+              doc::put_pixel(img.get(), u, v, starterSurfacePixel(f, u, v, sw, sh));
+            }
+          }
+        }
+      }
+
+      if (cel) {
+        api.replaceImage(spr, cel->imageRef(), img);
+      }
+      else {
+        api.addCel(surfLayer, fr, img);
+      }
+    }
+
+    tx.commit();
+  }
+  catch (const std::exception& e) {
+    Console::showException(e);
+  }
+
+  doc->notifyGeneralUpdate();
+}
+
+// Integrated 4-Column 2-Row Workspace Multi-Pane Widget
+class EasymetricMultiPaneView : public ui::Widget {
+public:
+  EasymetricMultiPaneView(DocView* docView)
+    : ui::Widget(ui::kGenericWidget)
+    , m_docView(docView)
+    , m_timer(33, this)
+  {
+    setExpansive(true);
+
+    Doc* doc = m_docView->document();
+    doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+
+    // 1. Create the 6 Surface Editors (Top, Bottom, Front, Back, Right, Left)
+    for (int f = 0; f < kFaceCount; ++f) {
+      m_headers[f] = new PaneHeader(kFaceSpecs[f].displayName,
+                                    gfx::rgba(kFaceSpecs[f].r, kFaceSpecs[f].g, kFaceSpecs[f].b));
+      Editor* ed = nullptr;
+      ui::View* view = m_docView->createPaneEditorView(&ed);
+      view->hideScrollBars();
+      view->setExpansive(true);
+
+      m_editors[f] = ed;
+      m_views[f] = view;
+
+      if (spr) {
+        ed->setClipSpriteBounds(gfx::Rect(0, 0, spr->width(), spr->height()));
+        const std::string lyrName = std::string("Surface_") + kFaceSpecs[f].sliceName;
+        if (doc::LayerImage* lyr = findLayerByName(spr, lyrName))
+          ed->setLayer(lyr);
+      }
+      ed->setEditorFlags(Editor::EditorFlags((ed->editorFlags() | Editor::kShowOutside) & ~Editor::kShowSlices));
+
+      m_panes[f] = new FacePaneBox(f, m_docView, ed);
+      m_panes[f]->addChild(m_headers[f]);
+      m_panes[f]->addChild(m_views[f]);
+      addChild(m_panes[f]);
+    }
+
+    // Attach link toggle buttons to the top face header of each column (Col 0: Top, Col 1: Front, Col 2: Right)
+    for (int c = 0; c < 3; ++c) {
+      m_linkButtons[c] = new LinkToggleButton();
+      m_linkButtons[c]->Click.connect([this, c] { toggleColumnLink(c); });
+    }
+    m_headers[0]->setLinkButton(m_linkButtons[0]);
+    m_headers[2]->setLinkButton(m_linkButtons[1]);
+    m_headers[4]->setLinkButton(m_linkButtons[2]);
+
+    // 2. Column 4 Row 0: Preview Pane
+    m_headers[kFaceCount] = new PaneHeader("Preview");
+    m_previewWidget = new EasymetricPreviewWidget;
+    m_previewWidget->setExpansive(true);
+
+    m_panes[kFaceCount] = new ui::VBox;
+    m_panes[kFaceCount]->addChild(m_headers[kFaceCount]);
+    m_panes[kFaceCount]->addChild(m_previewWidget);
+    addChild(m_panes[kFaceCount]);
+
+    // 3. Column 4 Row 1: Fields Pane
+    m_headers[kFaceCount + 1] = new PaneHeader("Fields");
+    m_fieldsBox = new FieldsPanelBox;
+
+    buildFieldsControls();
+
+    m_panes[kFaceCount + 1] = new ui::VBox;
+    m_panes[kFaceCount + 1]->addChild(m_headers[kFaceCount + 1]);
+    m_panes[kFaceCount + 1]->addChild(m_fieldsBox);
+    addChild(m_panes[kFaceCount + 1]);
+
+    // Timer for real-time 3D model update
+    m_timer.Tick.connect([this] { pollAndRender(false); });
+    m_timer.start();
+
+    m_lastHash = 0;
+    pollAndRender(true);
+  }
+
+  ~EasymetricMultiPaneView() override
+  {
+    m_timer.stop();
+  }
+
+  std::vector<Editor*> surfaceEditors() const
+  {
+    return std::vector<Editor*>(m_editors.begin(), m_editors.end());
+  }
+
+  void syncOpposingCels(int srcFace, int dstFace)
+  {
+    Doc* doc = m_docView->document();
+    if (!doc || !doc->sprite()) return;
+    doc::Sprite* spr = doc->sprite();
+
+    const std::string srcName = std::string("Surface_") + kFaceSpecs[srcFace].sliceName;
+    const std::string dstName = std::string("Surface_") + kFaceSpecs[dstFace].sliceName;
+    doc::LayerImage* srcLyr = findLayerByName(spr, srcName);
+    doc::LayerImage* dstLyr = findLayerByName(spr, dstName);
+    if (!srcLyr || !dstLyr) return;
+
+    try {
+      Tx tx(doc, "Sync Opposing Faces", ModifyDocument);
+      DocApi api = doc->getApi(tx);
+
+      for (doc::frame_t fr = doc::frame_t(0); fr <= spr->lastFrame(); ++fr) {
+        doc::Cel* srcCel = srcLyr->cel(fr);
+        doc::Cel* dstCel = dstLyr->cel(fr);
+        if (srcCel && srcCel->image()) {
+          doc::ImageRef copyImg(doc::Image::createCopy(srcCel->image()));
+          if (dstCel) {
+            api.replaceImage(spr, dstCel->imageRef(), copyImg);
+            api.setCelPosition(spr, dstCel, srcCel->x(), srcCel->y());
+          }
+          else {
+            api.addCel(dstLyr, fr, copyImg);
+          }
+        }
+      }
+      tx.commit();
+      doc->notifyGeneralUpdate();
+    }
+    catch (const std::exception& e) {
+      Console::showException(e);
+    }
+  }
+
+  void syncAllLinkedCels()
+  {
+    for (int c = 0; c < 3; ++c) {
+      if (m_colLinked[c]) {
+        syncOpposingCels(c * 2, c * 2 + 1);
+      }
+    }
+  }
+
+  void toggleColumnLink(int c)
+  {
+    if (c < 0 || c >= 3) return;
+    const int topFace = c * 2;
+    const int btmFace = c * 2 + 1;
+
+    m_colLinked[c] = !m_colLinked[c];
+    const bool linked = m_colLinked[c];
+
+    if (m_linkButtons[c])
+      m_linkButtons[c]->setLinked(linked);
+
+    Doc* doc = m_docView->document();
+    doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+
+    if (linked) {
+      if (Editor::activeEditor() == m_editors[btmFace]) {
+        Editor::_setActiveEditor(m_editors[topFace]);
+      }
+      if (m_docView->editor() == m_editors[btmFace]) {
+        m_docView->setActivePaneEditor(m_editors[topFace]);
+      }
+      if (spr) {
+        const std::string topLyrName = std::string("Surface_") + kFaceSpecs[topFace].sliceName;
+        if (doc::LayerImage* lyr = findLayerByName(spr, topLyrName))
+          m_editors[topFace]->setLayer(lyr);
+      }
+
+      syncOpposingCels(topFace, btmFace);
+
+      std::string unifiedTitle;
+      switch (c) {
+        case 0: unifiedTitle = "Top / Bottom"; break;
+        case 1: unifiedTitle = "Front / Back"; break;
+        case 2: unifiedTitle = "Right / Left"; break;
+      }
+      m_headers[topFace]->setTitle(unifiedTitle);
+    }
+    else {
+      m_headers[topFace]->setTitle(kFaceSpecs[topFace].displayName);
+      m_headers[btmFace]->setTitle(kFaceSpecs[btmFace].displayName);
+      syncOpposingCels(topFace, btmFace);
+    }
+
+    layout();
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (m_editors[f] && m_panes[f]->isVisible())
+        m_editors[f]->fitClipSpriteBounds();
+    }
+    invalidate();
+    m_lastHash = 0;
+    pollAndRender(true);
+  }
+
+  void initLayersAndFraming()
+  {
+    Doc* doc = m_docView->document();
+    doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+    if (!spr) return;
+
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (m_editors[f]) {
+        const std::string lyrName = std::string("Surface_") + kFaceSpecs[f].sliceName;
+        if (doc::LayerImage* lyr = findLayerByName(spr, lyrName))
+          m_editors[f]->setLayer(lyr);
+        m_editors[f]->setClipSpriteBounds(gfx::Rect(0, 0, spr->width(), spr->height()));
+        m_editors[f]->fitClipSpriteBounds();
+      }
+    }
+  }
+
+protected:
+  void onResize(ui::ResizeEvent& ev) override
+  {
+    setBoundsQuietly(ev.bounds());
+    const gfx::Rect rc = childrenBounds();
+    const int s = ui::guiscale();
+    const int bw = 2 * s;
+    const int bh = 2 * s;
+
+    const int totalW = std::max(16, rc.w - 3 * bw);
+    const int colW0 = totalW / 4;
+    const int colW1 = totalW / 4;
+    const int colW2 = totalW / 4;
+    const int colW3 = std::max(16, totalW - (colW0 + colW1 + colW2));
+
+    const int totalH = std::max(16, rc.h - bh);
+    const int rowH0 = totalH / 2;
+    const int rowH1 = std::max(16, totalH - rowH0);
+
+    const int colX[4] = {
+      rc.x,
+      rc.x + colW0 + bw,
+      rc.x + colW0 + bw + colW1 + bw,
+      rc.x + colW0 + bw + colW1 + bw + colW2 + bw
+    };
+    const int colW[4] = { colW0, colW1, colW2, colW3 };
+    const int rowY[2] = { rc.y, rc.y + rowH0 + bh };
+    const int rowH[2] = { rowH0, rowH1 };
+
+    // Cols 0..2: Opposing face pairs
+    for (int c = 0; c < 3; ++c) {
+      const int topFace = c * 2;
+      const int btmFace = c * 2 + 1;
+      if (m_colLinked[c]) {
+        m_panes[btmFace]->setVisible(false);
+        m_panes[topFace]->setVisible(true);
+        m_panes[topFace]->setBounds(gfx::Rect(colX[c], rc.y, colW[c], totalH + bh));
+      }
+      else {
+        m_panes[topFace]->setVisible(true);
+        m_panes[btmFace]->setVisible(true);
+        m_panes[topFace]->setBounds(gfx::Rect(colX[c], rowY[0], colW[c], rowH[0]));
+        m_panes[btmFace]->setBounds(gfx::Rect(colX[c], rowY[1], colW[c], rowH[1]));
+      }
+    }
+
+    // Col 3: Preview (6), Fields (7)
+    m_panes[6]->setVisible(true);
+    m_panes[7]->setVisible(true);
+    m_panes[6]->setBounds(gfx::Rect(colX[3], rowY[0], colW[3], rowH[0]));
+    m_panes[7]->setBounds(gfx::Rect(colX[3], rowY[1], colW[3], rowH[1]));
+
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (m_editors[f] && m_panes[f]->isVisible()) {
+        m_editors[f]->fitClipSpriteBounds();
+      }
+    }
+  }
+
+  void onPaint(ui::PaintEvent& ev) override
+  {
+    ui::Graphics* g = ev.graphics();
+    const gfx::Rect rc = clientBounds();
+    const int s = ui::guiscale();
+
+    // Dark charcoal surround & separator lines
+    g->fillRect(gfx::rgba(28, 35, 43), rc);
+
+    const int bw = 2 * s;
+    const int bh = 2 * s;
+    const int totalW = std::max(16, rc.w - 3 * bw);
+    const int colW0 = totalW / 4;
+    const int colW1 = totalW / 4;
+    const int colW2 = totalW / 4;
+    const int colW3 = std::max(16, totalW - (colW0 + colW1 + colW2));
+    const int colW[4] = { colW0, colW1, colW2, colW3 };
+    const int colX[4] = {
+      rc.x,
+      rc.x + colW0 + bw,
+      rc.x + colW0 + bw + colW1 + bw,
+      rc.x + colW0 + bw + colW1 + bw + colW2 + bw
+    };
+
+    const int totalH = std::max(16, rc.h - bh);
+    const int rowH = totalH / 2;
+    const int midY = rc.y + rowH + bh / 2;
+
+    const gfx::Color sepCol = gfx::rgba(45, 55, 66);
+    const gfx::Color gripCol = gfx::rgba(80, 95, 110);
+
+    // Horizontal separators only for columns that are NOT linked (and Col 3)
+    for (int c = 0; c < 4; ++c) {
+      if (c < 3 && m_colLinked[c])
+        continue;
+      g->fillRect(sepCol, gfx::Rect(colX[c], midY - bh / 2, colW[c], bh));
+    }
+
+    // Vertical column separator grip dots
+    for (int c = 1; c < 4; ++c) {
+      const int sepX = colX[c] - bw / 2;
+      g->fillRect(gripCol, gfx::Rect(sepX - 2 * s, midY - 6 * s, 4 * s, s));
+      g->fillRect(gripCol, gfx::Rect(sepX - 2 * s, midY + 5 * s, 4 * s, s));
+    }
+  }
+
+private:
+  void buildFieldsControls()
+  {
+    const int s = ui::guiscale();
+    m_fieldsBox->setBorder(gfx::Border(4 * s));
+    m_fieldsBox->setChildSpacing(3 * s);
+
+    // Row 1: Rotation on Y-axis + Cam Angle
+    auto* rotRow = new ui::HBox;
+    rotRow->setChildSpacing(4 * s);
+    m_yawSlider = new ui::Slider(-180, 180, 45);
+    m_pitchSlider = new ui::Slider(-75, 75, 30);
+    m_yawSlider->setExpansive(true);
+    m_pitchSlider->setExpansive(true);
+    rotRow->addChild(new ui::Label("Y-Axis Rot:"));
+    rotRow->addChild(m_yawSlider);
+    rotRow->addChild(new ui::Label("Cam Angle:"));
+    rotRow->addChild(m_pitchSlider);
+    m_fieldsBox->addChild(rotRow);
+
+    // Row 2: Pivot X/Y/Z + Center + Base
+    auto* pivRow = new ui::HBox;
+    pivRow->setChildSpacing(4 * s);
+    m_pivXSlider = new ui::Slider(0, 100, 50);
+    m_pivYSlider = new ui::Slider(0, 100, 50);
+    m_pivZSlider = new ui::Slider(0, 100, 50);
+    m_pivXSlider->setExpansive(true);
+    m_pivYSlider->setExpansive(true);
+    m_pivZSlider->setExpansive(true);
+    auto* pivCenterBtn = new ui::Button("Center");
+    auto* pivBaseBtn = new ui::Button("Base");
+    pivRow->addChild(new ui::Label("Pivot X/Y/Z:"));
+    pivRow->addChild(m_pivXSlider);
+    pivRow->addChild(m_pivYSlider);
+    pivRow->addChild(m_pivZSlider);
+    pivRow->addChild(pivCenterBtn);
+    pivRow->addChild(pivBaseBtn);
+    m_fieldsBox->addChild(pivRow);
+
+    // Row 3: Tag / Angle Preset Dropdown + Save Tag
+    auto* tagRow = new ui::HBox;
+    tagRow->setChildSpacing(4 * s);
+    m_tagCombo = new ui::ComboBox;
+    m_tagCombo->setExpansive(true);
+    populateTagCombo();
+    auto* saveTagBtn = new ui::Button("Save Tag");
+    tagRow->addChild(new ui::Label("Tag / Angle:"));
+    tagRow->addChild(m_tagCombo);
+    tagRow->addChild(saveTagBtn);
+    m_fieldsBox->addChild(tagRow);
+
+    // Row 4: Maps Toggles + Render Type Dropdown
+    auto* mapRow = new ui::HBox;
+    mapRow->setChildSpacing(4 * s);
+    m_mapDiffuseCheck = new ui::CheckBox("Diffuse");
+    m_mapNormalCheck = new ui::CheckBox("Normal");
+    m_mapDepthCheck = new ui::CheckBox("Depth");
+    m_mapDiffuseCheck->setSelected(true);
+
+    m_renderTypeCombo = new ui::ComboBox;
+    m_renderTypeCombo->addItem("Render: Textured (Lit)");
+    m_renderTypeCombo->addItem("Render: Textured (Unlit)");
+    m_renderTypeCombo->addItem("Render: Colored (Faces)");
+    m_renderTypeCombo->addItem("Render: Normal Shaded");
+    m_renderTypeCombo->addItem("Render: Depth Shaded");
+    m_renderTypeCombo->addItem("Render: Wireframe + Tex");
+    m_renderTypeCombo->setSelectedItemIndex(0);
+    m_renderTypeCombo->setExpansive(true);
+
+    mapRow->addChild(new ui::Label("Maps:"));
+    mapRow->addChild(m_mapDiffuseCheck);
+    mapRow->addChild(m_mapNormalCheck);
+    mapRow->addChild(m_mapDepthCheck);
+    mapRow->addChild(m_renderTypeCombo);
+    m_fieldsBox->addChild(mapRow);
+
+    // Row 5: Stroke Outline + Cutouts + Lock Borders + Symmetry X/Y
+    auto* symRow = new ui::HBox;
+    symRow->setChildSpacing(4 * s);
+    m_strokeCheck = new ui::CheckBox("Stroke Outline");
+    m_cutoutCheck = new ui::CheckBox("Cutouts");
+    m_lockBordersCheck = new ui::CheckBox("Lock Borders");
+    m_symXCheck = new ui::CheckBox("Sym X");
+    m_symYCheck = new ui::CheckBox("Sym Y");
+    auto* centerSymBtn = new ui::Button("Center Sym");
+    m_strokeCheck->setSelected(true);
+    m_cutoutCheck->setSelected(true);
+
+    symRow->addChild(m_strokeCheck);
+    symRow->addChild(m_cutoutCheck);
+    symRow->addChild(m_lockBordersCheck);
+    symRow->addChild(m_symXCheck);
+    symRow->addChild(m_symYCheck);
+    symRow->addChild(centerSymBtn);
+    m_fieldsBox->addChild(symRow);
+
+    // Row 6: Per-Face Editable Depth Maps + Live Sync
+    auto* depthRow = new ui::HBox;
+    depthRow->setChildSpacing(4 * s);
+    auto* genFaceDepthBtn = new ui::Button("Render Face Depths (Edit)");
+    m_useFaceDepthCheck = new ui::CheckBox("Use Face Depth Layer");
+    m_liveBakeCheck = new ui::CheckBox("Live Sync");
+    m_useFaceDepthCheck->setSelected(true);
+
+    depthRow->addChild(genFaceDepthBtn);
+    depthRow->addChild(m_useFaceDepthCheck);
+    depthRow->addChild(m_liveBakeCheck);
+    m_fieldsBox->addChild(depthRow);
+
+    // Row 7: Action Buttons (Render, Export .OBJ, Exit)
+    auto* actRow = new ui::HBox;
+    actRow->setChildSpacing(4 * s);
+    auto* renderBtn = new ui::Button("&Render");
+    auto* exportObjBtn = new ui::Button("Export .&OBJ...");
+    auto* exitBtn = new ui::Button("E&xit Studio");
+    renderBtn->setExpansive(true);
+    exportObjBtn->setExpansive(true);
+
+    actRow->addChild(renderBtn);
+    actRow->addChild(exportObjBtn);
+    actRow->addChild(exitBtn);
+    m_fieldsBox->addChild(actRow);
+
+    // Event connections
+    auto onParam = [this] {
+      m_lastHash = 0;
+      pollAndRender(true);
+    };
+
+    m_yawSlider->Change.connect(onParam);
+    m_pitchSlider->Change.connect(onParam);
+    m_pivXSlider->Change.connect(onParam);
+    m_pivYSlider->Change.connect(onParam);
+    m_pivZSlider->Change.connect(onParam);
+    m_mapDiffuseCheck->Click.connect(onParam);
+    m_mapNormalCheck->Click.connect(onParam);
+    m_mapDepthCheck->Click.connect(onParam);
+    m_renderTypeCombo->Change.connect(onParam);
+    m_strokeCheck->Click.connect(onParam);
+    m_cutoutCheck->Click.connect(onParam);
+    m_useFaceDepthCheck->Click.connect(onParam);
+    m_liveBakeCheck->Click.connect(onParam);
+
+    m_previewWidget->OrbitDrag.connect([this](int newYaw, int newPitch) {
+      m_yawSlider->setValue(newYaw);
+      m_pitchSlider->setValue(newPitch);
+      m_lastHash = 0;
+      pollAndRender(true);
+    });
+
+    pivCenterBtn->Click.connect([this] {
+      m_pivXSlider->setValue(50);
+      m_pivYSlider->setValue(50);
+      m_pivZSlider->setValue(50);
+      m_lastHash = 0;
+      pollAndRender(true);
+    });
+
+    pivBaseBtn->Click.connect([this] {
+      m_pivXSlider->setValue(50);
+      m_pivYSlider->setValue(100);
+      m_pivZSlider->setValue(50);
+      m_lastHash = 0;
+      pollAndRender(true);
+    });
+
+    m_tagCombo->Change.connect([this] { onTagSelected(); });
+    saveTagBtn->Click.connect([this] { saveCurrentAngleAsTag(); });
+
+    m_lockBordersCheck->Click.connect([this] {
+      const bool locked = m_lockBordersCheck->isSelected();
+      Doc* doc = m_docView->document();
+      if (doc && doc->sprite()) {
+        for (int f = 0; f < kFaceCount; ++f) {
+          if (doc::Slice* sl = findSliceForFace(doc->sprite(), f))
+            sl->userData().setText(locked ? "locked" : "");
+        }
+        for (Editor* ed : m_editors) {
+          if (ed) ed->invalidate();
+        }
+      }
+      if (auto* sb = StatusBar::instance())
+        sb->showTip(1200, locked ? "Surface borders locked" : "Surface borders unlocked");
+    });
+
+    auto applySymmetry = [this](bool recenter) {
+      Doc* doc = m_docView->document();
+      if (!doc || !doc->sprite()) return;
+      auto& pref = Preferences::instance();
+      auto& docPref = pref.document(doc);
+      int mode = int(app::gen::SymmetryMode::NONE);
+      if (m_symXCheck->isSelected()) mode |= int(app::gen::SymmetryMode::HORIZONTAL);
+      if (m_symYCheck->isSelected()) mode |= int(app::gen::SymmetryMode::VERTICAL);
+      if (mode != int(app::gen::SymmetryMode::NONE))
+        pref.symmetryMode.enabled(true);
+      docPref.symmetry.mode(static_cast<app::gen::SymmetryMode>(mode));
+
+      Editor* curEd = m_docView->editor();
+      int activeFace = 0;
+      for (int f = 0; f < kFaceCount; ++f) {
+        if (m_editors[f] == curEd) { activeFace = f; break; }
+      }
+      const int sprW = doc->sprite()->width();
+      const int sprH = doc->sprite()->height();
+      if (recenter ||
+          docPref.symmetry.xAxis() < 0 || docPref.symmetry.xAxis() > sprW ||
+          docPref.symmetry.yAxis() < 0 || docPref.symmetry.yAxis() > sprH) {
+        docPref.symmetry.xAxis(sprW * 0.5);
+        docPref.symmetry.yAxis(sprH * 0.5);
+      }
+      for (Editor* ed : m_editors) {
+        if (ed) ed->invalidate();
+      }
+    };
+
+    m_symXCheck->Click.connect([applySymmetry] { applySymmetry(false); });
+    m_symYCheck->Click.connect([applySymmetry] { applySymmetry(false); });
+    centerSymBtn->Click.connect([applySymmetry] { applySymmetry(true); });
+
+    genFaceDepthBtn->Click.connect([this] { generateEditableFaceDepthLayer(); });
+    renderBtn->Click.connect([this] { bakeToActiveDocLayers(); });
+    exportObjBtn->Click.connect([this] { exportToWavefrontObj(); });
+    exitBtn->Click.connect([this] {
+      syncAllLinkedCels();
+      m_docView->exitMultiPaneMode();
+    });
+  }
+
+  struct PresetItem {
+    std::string label;
+    int yaw;
+    int pitch;
+    int frame;
+  };
+  std::vector<PresetItem> m_presets;
+  bool m_updatingCombo = false;
+
+  void populateTagCombo()
+  {
+    m_updatingCombo = true;
+    m_tagCombo->deleteAllItems();
+    m_presets.clear();
+
+    auto add = [&](const std::string& lbl, int yaw, int pitch, int fr = -1) {
+      m_presets.push_back({ lbl, yaw, pitch, fr });
+      m_tagCombo->addItem(lbl);
+    };
+
+    add("Fast Rotation", 45, 30);
+    add("Iso 2:1 (Yaw 45°, Cam 30°)", 45, 30);
+    add("Front View (Yaw 0°, Cam 0°)", 0, 0);
+    add("Back View (Yaw 180°, Cam 0°)", 180, 0);
+    add("Right View (Yaw -90°, Cam 0°)", -90, 0);
+    add("Left View (Yaw 90°, Cam 0°)", 90, 0);
+    add("Top View (Yaw 45°, Cam 60°)", 45, 60);
+    add("Bottom View (Yaw 45°, Cam -60°)", 45, -60);
+    add("Dimetric (Yaw 30°, Cam 26°)", 30, 26);
+    add("Trimetric (Yaw 60°, Cam 35°)", 60, 35);
+
+    Doc* doc = m_docView->document();
+    if (doc && doc->sprite()) {
+      for (const doc::Tag* tag : doc->sprite()->tags()) {
+        int ty = 45, tp = 30;
+        const std::string& udata = tag->userData().text();
+        if (std::sscanf(udata.c_str(), "easymetric:yaw=%d,pitch=%d", &ty, &tp) != 2) {
+          std::sscanf(tag->name().c_str(), "Yaw%d_Cam%d", &ty, &tp);
+        }
+        add(fmt::format("Tag: {} [f{}..{}] ({}°, {}°)",
+                        tag->name(), tag->fromFrame() + 1, tag->toFrame() + 1, ty, tp),
+            ty, tp, int(tag->fromFrame()));
+      }
+    }
+
+    m_tagCombo->setSelectedItemIndex(0);
+    m_updatingCombo = false;
+  }
+
+  void onTagSelected()
+  {
+    if (m_updatingCombo) return;
+    const int idx = m_tagCombo->getSelectedItemIndex();
+    if (idx < 0 || idx >= int(m_presets.size())) return;
+    const auto& p = m_presets[idx];
+    m_yawSlider->setValue(p.yaw);
+    m_pitchSlider->setValue(p.pitch);
+    if (p.frame >= 0 && m_docView->editor())
+      m_docView->editor()->setFrame(doc::frame_t(p.frame));
+    m_lastHash = 0;
+    pollAndRender(true);
+  }
+
+  void saveCurrentAngleAsTag()
+  {
+    Doc* doc = m_docView->document();
+    if (!doc || !doc->sprite()) return;
+    const doc::frame_t fr = (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
+    const int yaw = m_yawSlider->getValue();
+    const int pitch = m_pitchSlider->getValue();
+    const std::string tagName = fmt::format("Yaw{}_Cam{}", yaw, pitch);
+    const std::string meta = fmt::format("easymetric:yaw={},pitch={}", yaw, pitch);
+
+    try {
+      Tx tx(doc, "Save Camera Tag", ModifyDocument);
+      doc::Tag* tag = new doc::Tag(fr, fr);
+      tag->setName(tagName);
+      tag->userData().setText(meta);
+      tx(new cmd::AddTag(doc->sprite(), tag));
+      tx.commit();
+      doc->notifyGeneralUpdate();
+      populateTagCombo();
+      m_updatingCombo = true;
+      m_tagCombo->setSelectedItemIndex(int(m_presets.size()) - 1);
+      m_updatingCombo = false;
+      if (auto* sb = StatusBar::instance())
+        sb->showTip(1500, fmt::format("Saved tag '{}'", tagName));
+    }
+    catch (const std::exception& e) {
+      Console::showException(e);
+    }
+  }
+
+  void generateEditableFaceDepthLayer()
+  {
+    Doc* doc = m_docView->document();
+    if (!doc || !doc->sprite()) return;
+    doc::Sprite* spr = doc->sprite();
+    const doc::frame_t fr = (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
+
+    SixSurfaceData data;
+    extractSixSurfaces(doc, fr, data);
+
+    try {
+      Tx tx(doc, "Render Editable Face Depths", ModifyDocument);
+      DocApi api = doc->getApi(tx);
+
+      doc::LayerImage* depthLayer = findOrCreateLayer(doc, api, spr, "Surface_DEPTH");
+      depthLayer->setVisible(true);
+      depthLayer->userData().setColor(doc::rgba(148, 163, 184, 255));
+
+      doc::ImageRef depthImg(doc::Image::create(doc::IMAGE_RGB, spr->width(), spr->height()));
+      depthImg->clear(0);
+
+      for (int f = 0; f < kFaceCount; ++f) {
+        const int fw = data.w[f];
+        const int fh = data.h[f];
+        if (fw <= 0 || fh <= 0) continue;
+
+        const float cx = (fw - 1) * 0.5f;
+        const float cy = (fh - 1) * 0.5f;
+        const float maxR = std::max(1.0f, std::sqrt(cx * cx + cy * cy));
+
+        for (int v = 0; v < fh; ++v) {
+          if (v < 0 || v >= depthImg->height()) continue;
+          for (int u = 0; u < fw; ++u) {
+            if (u < 0 || u >= depthImg->width()) continue;
+            const uint32_t col = data.sample(f, u, v);
+            if (doc::rgba_geta(col) <= 16) continue;
+
+            const float luma = pixelLuma(col);
+            const float dist = std::sqrt((u - cx) * (u - cx) + (v - cy) * (v - cy)) / maxR;
+            const float dome = std::clamp(1.0f - dist * 0.35f, 0.0f, 1.0f);
+            const uint8_t hByte = clampByte((0.35f + luma * 0.45f + dome * 0.20f) * 255.0f);
+            doc::put_pixel(depthImg.get(), u, v, doc::rgba(hByte, hByte, hByte, 255));
+          }
+        }
+      }
+
+      if (doc::Cel* cel = depthLayer->cel(fr))
+        api.replaceImage(spr, cel->imageRef(), depthImg);
+      else
+        api.addCel(depthLayer, fr, depthImg);
+
+      tx.commit();
+      doc->notifyGeneralUpdate();
+      if (auto* sb = StatusBar::instance())
+        sb->showTip(2000, "Rendered face depths to 'Surface_DEPTH' layer");
+    }
+    catch (const std::exception& e) {
+      Console::showException(e);
+    }
+    m_lastHash = 0;
+    pollAndRender(true);
+  }
+
+  bool extractSixSurfaces(Doc* doc, doc::frame_t frame, SixSurfaceData& out)
+  {
+    if (!doc || !doc->sprite()) return false;
+    doc::Sprite* spr = doc->sprite();
+    const int sw = spr->width();
+    const int sh = spr->height();
+    out.init(std::max(sw, sh));
+
+    doc::ImageRef depthSrcImg;
+    if (m_useFaceDepthCheck && m_useFaceDepthCheck->isSelected()) {
+      if (doc::LayerImage* depthLyr = findLayerByName(spr, "Surface_DEPTH")) {
+        if (const doc::Cel* dCel = depthLyr->cel(frame)) {
+          if (dCel->image() && dCel->image()->pixelFormat() == doc::IMAGE_RGB) {
+            depthSrcImg.reset(doc::Image::create(doc::IMAGE_RGB, sw, sh));
+            depthSrcImg->clear(0);
+            doc::copy_image(depthSrcImg.get(), dCel->image(), dCel->x(), dCel->y());
+            out.hasCustomDepthLayer = true;
+          }
+        }
+      }
+    }
+
+    ExtraCelRef extra = doc->extraCel();
+
+    for (int f = 0; f < kFaceCount; ++f) {
+      out.bounds[f] = gfx::Rect(0, 0, sw, sh);
+      out.setFaceSize(f, sw, sh);
+      out.hasSlices = true;
+
+      const std::string layerName = std::string("Surface_") + kFaceSpecs[f].sliceName;
+      doc::LayerImage* lyr = findLayerByName(spr, layerName);
+      const doc::Cel* cel = lyr ? lyr->cel(frame) : nullptr;
+      const doc::Image* srcImg = cel ? cel->image() : nullptr;
+
+      bool hasPixels = false;
+      if (srcImg && srcImg->pixelFormat() == doc::IMAGE_RGB) {
+        const int ox = cel->x();
+        const int oy = cel->y();
+
+        for (int v = 0; v < sh; ++v) {
+          const int sy = v - oy;
+          if (sy < 0 || sy >= srcImg->height()) continue;
+          const uint32_t* __restrict sRow =
+            reinterpret_cast<const uint32_t*>(srcImg->getPixelAddress(0, sy));
+          for (int u = 0; u < sw; ++u) {
+            const int sx = u - ox;
+            if (sx < 0 || sx >= srcImg->width()) continue;
+            const uint32_t sc = sRow[sx];
+            if (doc::rgba_geta(sc) > 0) {
+              out.pixels[f][v * sw + u] = sc;
+              hasPixels = true;
+            }
+          }
+        }
+      }
+
+      // Check if extra cel applies to this face editor
+      if (extra && extra->type() != render::ExtraType::NONE &&
+          extra->purpose() != ExtraCel::Purpose::BrushPreview &&
+          extra->image() && extra->cel() &&
+          extra->image()->pixelFormat() == doc::IMAGE_RGB &&
+          lyr && m_docView->editor() && m_docView->editor()->layer() == lyr) {
+        const doc::Image* eImg = extra->image();
+        const int ox = extra->cel()->x();
+        const int oy = extra->cel()->y();
+        for (int v = 0; v < sh; ++v) {
+          const int sy = v - oy;
+          if (sy < 0 || sy >= eImg->height()) continue;
+          const uint32_t* __restrict eRow =
+            reinterpret_cast<const uint32_t*>(eImg->getPixelAddress(0, sy));
+          for (int u = 0; u < sw; ++u) {
+            const int sx = u - ox;
+            if (sx < 0 || sx >= eImg->width()) continue;
+            const uint32_t ec = eRow[sx];
+            if (doc::rgba_geta(ec) > 0) {
+              out.pixels[f][v * sw + u] = ec;
+              hasPixels = true;
+            }
+          }
+        }
+      }
+
+      // If custom depth layer is present, extract depth for this face
+      if (depthSrcImg) {
+        for (int v = 0; v < sh; ++v) {
+          const uint32_t* __restrict dRow =
+            reinterpret_cast<const uint32_t*>(depthSrcImg->getPixelAddress(0, v));
+          for (int u = 0; u < sw; ++u) {
+            const uint32_t dc = dRow[u];
+            if (doc::rgba_geta(dc) > 16) {
+              out.depthPixels[f][v * sw + u] =
+                clampByte(0.299f * doc::rgba_getr(dc) +
+                          0.587f * doc::rgba_getg(dc) +
+                          0.114f * doc::rgba_getb(dc));
+            }
+          }
+        }
+      }
+
+      // Fallback starter pixels if face is blank
+      if (!hasPixels) {
+        for (int v = 0; v < sh; ++v) {
+          for (int u = 0; u < sw; ++u) {
+            out.pixels[f][v * sw + u] = starterSurfacePixel(f, u, v, sw, sh);
+          }
+        }
+      }
+    }
+
+    // Unify linked opposing face pairs (Top/Down, Front/Back, Right/Left)
+    for (int c = 0; c < 3; ++c) {
+      out.colLinked[c] = m_colLinked[c];
+      if (m_colLinked[c]) {
+        const int topFace = c * 2;
+        const int btmFace = c * 2 + 1;
+        out.pixels[btmFace] = out.pixels[topFace];
+        out.depthPixels[btmFace] = out.depthPixels[topFace];
+        out.w[btmFace] = out.w[topFace];
+        out.h[btmFace] = out.h[topFace];
+        out.bounds[btmFace] = out.bounds[topFace];
+      }
+    }
+
+    return true;
+  }
+
+  void pollAndRender(bool force)
+  {
+    if (!isVisible()) return;
+    Doc* doc = m_docView->document();
+    const doc::frame_t frame = (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
+
+    SixSurfaceData data;
+    if (!extractSixSurfaces(doc, frame, data)) {
+      data.init(24);
+      for (int f = 0; f < kFaceCount; ++f)
+        for (int v = 0; v < 24; ++v)
+          for (int u = 0; u < 24; ++u)
+            data.pixels[f][v * 24 + u] = starterSurfacePixel(f, u, v, 24, 24);
+    }
+
+    const int yawDeg = m_yawSlider->getValue();
+    const int pitchDeg = m_pitchSlider->getValue();
+    const int pivX = m_pivXSlider->getValue();
+    const int pivY = m_pivYSlider->getValue();
+    const int pivZ = m_pivZSlider->getValue();
+    const int renderStyle = std::max(0, m_renderTypeCombo->getSelectedItemIndex());
+    const bool addOutline = m_strokeCheck->isSelected();
+    const bool allowCutouts = m_cutoutCheck->isSelected();
+    const bool showDiff = m_mapDiffuseCheck->isSelected();
+    const bool showNorm = m_mapNormalCheck->isSelected();
+    const bool showDept = m_mapDepthCheck->isSelected();
+
+    uint64_t h = 14695981039346656037ULL;
+    auto mix = [&h](uint64_t v) {
+      h ^= v;
+      h *= 1099511628211ULL;
+    };
+    mix(uint64_t(yawDeg + 360));
+    mix(uint64_t(pitchDeg + 360));
+    mix(uint64_t(pivX));
+    mix(uint64_t(pivY));
+    mix(uint64_t(pivZ));
+    mix(uint64_t(renderStyle));
+    mix(uint64_t(addOutline ? 1 : 0));
+    mix(uint64_t(allowCutouts ? 1 : 0));
+    mix(uint64_t(showDiff ? 1 : 0));
+    mix(uint64_t(showNorm ? 1 : 0));
+    mix(uint64_t(showDept ? 1 : 0));
+
+    for (int f = 0; f < kFaceCount; ++f) {
+      mix(uint64_t(data.w[f]));
+      mix(uint64_t(data.h[f]));
+      const uint32_t* p = data.pixels[f].data();
+      const size_t n = data.pixels[f].size();
+      for (size_t i = 0; i < n; ++i)
+        mix(p[i]);
+      if (data.hasCustomDepthLayer) {
+        const uint8_t* dp = data.depthPixels[f].data();
+        for (size_t i = 0; i < n; ++i)
+          mix(dp[i]);
+      }
+    }
+
+    if (!force && h == m_lastHash)
+      return;
+    m_lastHash = h;
+
+    render3DModel(data, yawDeg, pitchDeg, pivX, pivY, pivZ,
+                  renderStyle, addOutline, allowCutouts,
+                  showDiff, showNorm, showDept);
+
+    if (m_liveBakeCheck->isSelected() && doc && doc->sprite())
+      bakeToActiveDocLayers();
+  }
+
+  void render3DModel(const SixSurfaceData& data,
+                     int yawDeg,
+                     int pitchDeg,
+                     int pivX,
+                     int pivY,
+                     int pivZ,
+                     int renderStyle,
+                     bool addOutline,
+                     bool allowCutouts,
+                     bool showDiff,
+                     bool showNorm,
+                     bool showDept)
+  {
+    const float halfX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown] }) * 0.5f;
+    const float halfY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight] }) * 0.5f;
+    const float halfZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown] }) * 0.5f;
+    const int maxDim = std::max({ int(halfX * 2.0f), int(halfY * 2.0f), int(halfZ * 2.0f), 24 });
+    const int outW = maxDim * 2 + 16;
+    const int outH = maxDim * 2 + 16;
+
+    constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
+    const float yaw = yawDeg * kDegToRad;
+    const float pitch = pitchDeg * kDegToRad;
+    const float cy = std::cos(yaw), sy = std::sin(yaw);
+    const float cp = std::cos(pitch), sp = std::sin(pitch);
+
+    const float rxX = cy,      rxY = 0.0f, rzX = -sy;
+    const float ryX = sy * sp, ryY = cp,   ryZ = cy * sp;
+    const float vdX = sy * cp, vdY = -sp,  vdZ = cy * cp;
+
+    const float pivOffX = ((pivX - 50) * 0.01f) * (halfX * 2.0f);
+    const float pivOffY = ((pivY - 50) * 0.01f) * (halfY * 2.0f);
+    const float pivOffZ = ((pivZ - 50) * 0.01f) * (halfZ * 2.0f);
+
+    const float cxScreen = outW * 0.5f;
+    const float cyScreen = outH * 0.5f;
+
+    m_lastDiffImg.reset(doc::Image::create(doc::IMAGE_RGB, outW, outH));
+    m_lastNormImg.reset(doc::Image::create(doc::IMAGE_RGB, outW, outH));
+    m_lastDeptImg.reset(doc::Image::create(doc::IMAGE_RGB, outW, outH));
+    m_lastDiffImg->clear(0);
+    m_lastNormImg->clear(0);
+    m_lastDeptImg->clear(0);
+
+    SculptedVoxelVolume vol = buildSculptedVolume(data, pivX, pivY, pivZ);
+
+    std::vector<int> faceMap(outW * outH, -1);
+    const float maxDepthRange = float(maxDim) * 1.732f;
+    const float Lx = -0.45f, Ly = -0.60f, Lz = 0.66f;
+
+    for (int py = 0; py < outH; ++py) {
+      const float camY = (py - cyScreen);
+      uint32_t* __restrict diffRow =
+        reinterpret_cast<uint32_t*>(m_lastDiffImg->getPixelAddress(0, py));
+      uint32_t* __restrict normRow =
+        reinterpret_cast<uint32_t*>(m_lastNormImg->getPixelAddress(0, py));
+      uint32_t* __restrict deptRow =
+        reinterpret_cast<uint32_t*>(m_lastDeptImg->getPixelAddress(0, py));
+
+      for (int px = 0; px < outW; ++px) {
+        const float camX = (px - cxScreen);
+        const float ox = camX * rxX + camY * ryX + pivOffX;
+        const float oy = camX * rxY + camY * ryY + pivOffY;
+        const float oz = camX * rzX + camY * ryZ + pivOffZ;
+
+        float t0 = -1e9f, t1 = 1e9f;
+        auto clipAxis = [&](float orig, float dir, float bMin, float bMax) -> bool {
+          if (std::fabs(dir) > 1e-5f) {
+            float invD = 1.0f / dir;
+            float ta = (bMin - orig) * invD;
+            float tb = (bMax - orig) * invD;
+            if (ta > tb) std::swap(ta, tb);
+            if (ta > t0) t0 = ta;
+            if (tb < t1) t1 = tb;
+            return t0 <= t1;
+          }
+          return (orig >= bMin && orig <= bMax);
+        };
+
+        if (!clipAxis(ox, vdX, -halfX, halfX) ||
+            !clipAxis(oy, vdY, -halfY, halfY) ||
+            !clipAxis(oz, vdZ, -halfZ, halfZ) ||
+            t1 < 0.0f) {
+          continue;
+        }
+
+        const float stepSize = std::min({ (2.0f * halfX) / float(vol.vx),
+                                          (2.0f * halfY) / float(vol.vy),
+                                          (2.0f * halfZ) / float(vol.vz) }) * 0.45f;
+        float tStart = std::max(0.0f, t0);
+        float tHit = -1.0f;
+        int hitVx = -1, hitVy = -1, hitVz = -1;
+
+        for (float t = tStart; t <= t1; t += stepSize) {
+          const float pxW = ox + t * vdX;
+          const float pyW = oy + t * vdY;
+          const float pzW = oz + t * vdZ;
+
+          int vx = int((pxW + halfX) / (2.0f * halfX) * float(vol.vx));
+          int vy = int((pyW + halfY) / (2.0f * halfY) * float(vol.vy));
+          int vz = int((pzW + halfZ) / (2.0f * halfZ) * float(vol.vz));
+
+          if (vol.isSolid(vx, vy, vz)) {
+            float ta = t - stepSize;
+            float tb = t;
+            for (int b = 0; b < 3; ++b) {
+              float tm = (ta + tb) * 0.5f;
+              int mx = int((ox + tm * vdX + halfX) / (2.0f * halfX) * float(vol.vx));
+              int my = int((oy + tm * vdY + halfY) / (2.0f * halfY) * float(vol.vy));
+              int mz = int((oz + tm * vdZ + halfZ) / (2.0f * halfZ) * float(vol.vz));
+              if (vol.isSolid(mx, my, mz)) {
+                tb = tm;
+                vx = mx; vy = my; vz = mz;
+              }
+              else {
+                ta = tm;
+              }
+            }
+            tHit = tb;
+            hitVx = vx; hitVy = vy; hitVz = vz;
+            break;
+          }
+        }
+
+        if (tHit < 0.0f) continue;
+
+        float gX = float(vol.isSolid(hitVx - 1, hitVy, hitVz)) - float(vol.isSolid(hitVx + 1, hitVy, hitVz));
+        float gY = float(vol.isSolid(hitVx, hitVy - 1, hitVz)) - float(vol.isSolid(hitVx, hitVy + 1, hitVz));
+        float gZ = float(vol.isSolid(hitVx, hitVy, hitVz - 1)) - float(vol.isSolid(hitVx, hitVy, hitVz + 1));
+        float len = std::sqrt(gX * gX + gY * gY + gZ * gZ);
+        if (len > 1e-4f) {
+          gX /= len; gY /= len; gZ /= len;
+        }
+        else {
+          gX = (ox + tHit * vdX) / halfX;
+          gY = (oy + tHit * vdY) / halfY;
+          gZ = (oz + tHit * vdZ) / halfZ;
+          len = std::sqrt(gX * gX + gY * gY + gZ * gZ);
+          if (len > 1e-4f) { gX /= len; gY /= len; gZ /= len; }
+          else { gX = 0.0f; gY = 0.0f; gZ = 1.0f; }
+        }
+
+        int face = kFaceFront;
+        if (std::fabs(gZ) >= std::fabs(gX) && std::fabs(gZ) >= std::fabs(gY)) {
+          face = (gZ > 0.0f ? kFaceFront : kFaceBack);
+        }
+        else if (std::fabs(gY) >= std::fabs(gX) && std::fabs(gY) >= std::fabs(gZ)) {
+          face = (gY < 0.0f ? kFaceTop : kFaceDown);
+        }
+        else {
+          face = (gX > 0.0f ? kFaceRight : kFaceLeft);
+        }
+
+        const float hx = ox + tHit * vdX;
+        const float hy = oy + tHit * vdY;
+        const float hz = oz + tHit * vdZ;
+
+        const int fw = data.w[face];
+        const int fh = data.h[face];
+        int u = 0, v = 0;
+        switch (face) {
+          case kFaceFront:
+            u = std::clamp(int((hx + halfX) / (2.0f * halfX) * fw), 0, fw - 1);
+            v = std::clamp(int((hy + halfY) / (2.0f * halfY) * fh), 0, fh - 1);
+            break;
+          case kFaceBack:
+            u = std::clamp(int((halfX - hx) / (2.0f * halfX) * fw), 0, fw - 1);
+            v = std::clamp(int((hy + halfY) / (2.0f * halfY) * fh), 0, fh - 1);
+            break;
+          case kFaceLeft:
+            u = std::clamp(int((hz + halfZ) / (2.0f * halfZ) * fw), 0, fw - 1);
+            v = std::clamp(int((hy + halfY) / (2.0f * halfY) * fh), 0, fh - 1);
+            break;
+          case kFaceRight:
+            u = std::clamp(int((halfZ - hz) / (2.0f * halfZ) * fw), 0, fw - 1);
+            v = std::clamp(int((hy + halfY) / (2.0f * halfY) * fh), 0, fh - 1);
+            break;
+          case kFaceTop:
+            u = std::clamp(int((hx + halfX) / (2.0f * halfX) * fw), 0, fw - 1);
+            v = std::clamp(int((hz + halfZ) / (2.0f * halfZ) * fh), 0, fh - 1);
+            break;
+          case kFaceDown:
+            u = std::clamp(int((hx + halfX) / (2.0f * halfX) * fw), 0, fw - 1);
+            v = std::clamp(int((halfZ - hz) / (2.0f * halfZ) * fh), 0, fh - 1);
+            break;
+        }
+
+        const uint32_t texCol = data.sampleSymmetric(face, u, v);
+        const uint8_t a = doc::rgba_geta(texCol);
+        if (a <= 16 && renderStyle != kRenderColoredFaces) {
+          if (allowCutouts) continue;
+        }
+
+        const float dC = data.sampleDepthNorm(face, u, v);
+        const float dL = data.sampleDepthNorm(face, u - 1, v);
+        const float dR = data.sampleDepthNorm(face, u + 1, v);
+        const float dU = data.sampleDepthNorm(face, u, v - 1);
+        const float dD = data.sampleDepthNorm(face, u, v + 1);
+        const float gradScale = data.hasCustomDepthLayer ? 1.45f : 0.65f;
+        const float du = (dL - dR) * gradScale;
+        const float dv = (dD - dU) * gradScale;
+
+        float cnx = gX * rxX + gY * ryX + gZ * rzX + du;
+        float cny = -(gX * ryX + gY * ryY + gZ * ryZ) + dv;
+        float cnz = std::fabs(gX * vdX + gY * vdY + gZ * vdZ) + 0.15f;
+        const float nLen = std::sqrt(cnx * cnx + cny * cny + cnz * cnz);
+        if (nLen > 1e-4f) {
+          cnx /= nLen; cny /= nLen; cnz /= nLen;
+        }
+
+        const uint8_t nr = clampByte((cnx * 0.5f + 0.5f) * 255.0f);
+        const uint8_t ng = clampByte((cny * 0.5f + 0.5f) * 255.0f);
+        const uint8_t nb = clampByte((cnz * 0.5f + 0.5f) * 255.0f);
+        const uint32_t normPixel = doc::rgba(nr, ng, nb, 255);
+        normRow[px] = normPixel;
+
+        const float normZ = std::clamp((tHit + maxDepthRange * 0.5f) / maxDepthRange, 0.0f, 1.0f);
+        const float faceRelief = (dC - 0.5f) * (data.hasCustomDepthLayer ? 0.35f : 0.14f);
+        const uint8_t dByte = clampByte(35.0f + std::clamp(normZ + faceRelief, 0.0f, 1.0f) * 215.0f);
+        const uint32_t deptPixel = doc::rgba(dByte, dByte, dByte, 255);
+        deptRow[px] = deptPixel;
+
+        const float ndotl = std::max(0.0f, cnx * Lx + (-cny) * Ly + cnz * Lz);
+        const float shade = std::clamp(0.84f + ndotl * 0.16f, 0.84f, 1.0f);
+
+        switch (renderStyle) {
+          case kRenderTexturedFlat:
+            diffRow[px] = doc::rgba(doc::rgba_getr(texCol),
+                                    doc::rgba_getg(texCol),
+                                    doc::rgba_getb(texCol), 255);
+            break;
+          case kRenderColoredFaces: {
+            const auto& spec = kFaceSpecs[face];
+            const float fShade = std::clamp(0.75f + ndotl * 0.25f, 0.75f, 1.0f);
+            diffRow[px] = doc::rgba(clampByte(spec.r * fShade),
+                                    clampByte(spec.g * fShade),
+                                    clampByte(spec.b * fShade), 255);
+            break;
+          }
+          case kRenderNormalShaded:
+            diffRow[px] = normPixel;
+            break;
+          case kRenderDepthShaded:
+            diffRow[px] = deptPixel;
+            break;
+          case kRenderWireframeTex: {
+            bool isVoxelEdge = (hitVx == 0 || hitVy == 0 || hitVz == 0 ||
+                                hitVx == vol.vx - 1 || hitVy == vol.vy - 1 || hitVz == vol.vz - 1 ||
+                                !vol.isSolid(hitVx - 1, hitVy, hitVz) || !vol.isSolid(hitVx + 1, hitVy, hitVz) ||
+                                !vol.isSolid(hitVx, hitVy - 1, hitVz) || !vol.isSolid(hitVx, hitVy + 1, hitVz) ||
+                                !vol.isSolid(hitVx, hitVy, hitVz - 1) || !vol.isSolid(hitVx, hitVy, hitVz + 1));
+            if (isVoxelEdge) {
+              const auto& spec = kFaceSpecs[face];
+              diffRow[px] = doc::rgba(spec.r, spec.g, spec.b, 255);
+            }
+            else {
+              diffRow[px] = doc::rgba(clampByte(doc::rgba_getr(texCol) * shade),
+                                      clampByte(doc::rgba_getg(texCol) * shade),
+                                      clampByte(doc::rgba_getb(texCol) * shade), 255);
+            }
+            break;
+          }
+          case kRenderTexturedLit:
+          default:
+            diffRow[px] = doc::rgba(clampByte(doc::rgba_getr(texCol) * shade),
+                                    clampByte(doc::rgba_getg(texCol) * shade),
+                                    clampByte(doc::rgba_getb(texCol) * shade), 255);
+            break;
+        }
+        faceMap[py * outW + px] = face;
+      }
+    }
+
+    if (addOutline) {
+      const uint32_t outlineCol = doc::rgba(15, 23, 42, 255);
+      const uint32_t outNormCol = doc::rgba(128, 128, 255, 255);
+      const uint32_t outDeptCol = doc::rgba(28, 28, 28, 255);
+
+      for (int y = 1; y < outH - 1; ++y) {
+        uint32_t* __restrict diffRow =
+          reinterpret_cast<uint32_t*>(m_lastDiffImg->getPixelAddress(0, y));
+        uint32_t* __restrict normRow =
+          reinterpret_cast<uint32_t*>(m_lastNormImg->getPixelAddress(0, y));
+        uint32_t* __restrict deptRow =
+          reinterpret_cast<uint32_t*>(m_lastDeptImg->getPixelAddress(0, y));
+
+        for (int x = 1; x < outW - 1; ++x) {
+          const int idx = y * outW + x;
+          const int f = faceMap[idx];
+          if (f < 0) {
+            if (faceMap[idx - 1] >= 0 || faceMap[idx + 1] >= 0 ||
+                faceMap[idx - outW] >= 0 || faceMap[idx + outW] >= 0) {
+              diffRow[x] = outlineCol;
+              normRow[x] = outNormCol;
+              deptRow[x] = outDeptCol;
+            }
+          }
+          else if (f == kFaceTop &&
+                   (faceMap[idx + outW] >= 0 && faceMap[idx + outW] != kFaceTop)) {
+            const uint32_t cur = diffRow[x];
+            diffRow[x] = doc::rgba(
+              clampByte(doc::rgba_getr(cur) * 0.68f + 253.0f * 0.32f),
+              clampByte(doc::rgba_getg(cur) * 0.68f + 230.0f * 0.32f),
+              clampByte(doc::rgba_getb(cur) * 0.68f + 138.0f * 0.32f),
+              255);
+          }
+        }
+      }
+    }
+
+    auto makeSurface = [](const doc::Image* img) -> os::SurfaceRef {
+      const int w = img->width();
+      const int h = img->height();
+      os::SurfaceRef surf = os::System::instance()->makeRgbaSurface(w, h);
+      convert_image_to_surface(img, nullptr, surf.get(), 0, 0, 0, 0, w, h);
+      return surf;
+    };
+
+    m_previewWidget->setSurfaces(
+      makeSurface(m_lastDiffImg.get()),
+      makeSurface(m_lastNormImg.get()),
+      makeSurface(m_lastDeptImg.get()),
+      yawDeg,
+      pitchDeg,
+      int(cxScreen),
+      int(cyScreen),
+      showDiff,
+      showNorm,
+      showDept);
+  }
+
+  void bakeToActiveDocLayers()
+  {
+    Doc* doc = m_docView->document();
+    if (!doc || !doc->sprite() || !m_lastDiffImg || !m_lastNormImg || !m_lastDeptImg)
+      return;
+
+    doc::Sprite* spr = doc->sprite();
+    const doc::frame_t fr = (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
+
+    try {
+      Tx tx(doc, "Render Easymetric 3D + Normal + Depth Layers", ModifyDocument);
+      DocApi api = doc->getApi(tx);
+
+      auto writeLayerImg = [&](const char* layerName, const doc::Image* srcImg) {
+        doc::LayerImage* lyr = findOrCreateLayer(doc, api, spr, layerName);
+        doc::ImageRef copyImg(doc::Image::createCopy(srcImg));
+        if (doc::Cel* cel = lyr->cel(fr))
+          api.replaceImage(spr, cel->imageRef(), copyImg);
+        else
+          api.addCel(lyr, fr, copyImg);
+      };
+
+      const bool anyChecked = m_mapDiffuseCheck->isSelected() ||
+                              m_mapNormalCheck->isSelected() ||
+                              m_mapDepthCheck->isSelected();
+      if (!anyChecked || m_mapDepthCheck->isSelected())
+        writeLayerImg("Iso_Depth", m_lastDeptImg.get());
+      if (!anyChecked || m_mapNormalCheck->isSelected())
+        writeLayerImg("Iso_Normal", m_lastNormImg.get());
+      if (!anyChecked || m_mapDiffuseCheck->isSelected())
+        writeLayerImg("Iso_Diffuse", m_lastDiffImg.get());
+
+      for (int c = 0; c < 3; ++c) {
+        if (m_colLinked[c]) {
+          const int srcFace = c * 2;
+          const int dstFace = c * 2 + 1;
+          const std::string srcName = std::string("Surface_") + kFaceSpecs[srcFace].sliceName;
+          const std::string dstName = std::string("Surface_") + kFaceSpecs[dstFace].sliceName;
+          doc::LayerImage* srcLyr = findLayerByName(spr, srcName);
+          doc::LayerImage* dstLyr = findLayerByName(spr, dstName);
+          if (srcLyr && dstLyr) {
+            doc::Cel* srcCel = srcLyr->cel(fr);
+            doc::Cel* dstCel = dstLyr->cel(fr);
+            if (srcCel && srcCel->image()) {
+              doc::ImageRef copyImg(doc::Image::createCopy(srcCel->image()));
+              if (dstCel) {
+                api.replaceImage(spr, dstCel->imageRef(), copyImg);
+                api.setCelPosition(spr, dstCel, srcCel->x(), srcCel->y());
+              }
+              else {
+                api.addCel(dstLyr, fr, copyImg);
+              }
+            }
+          }
+        }
+      }
+
+      tx.commit();
+      doc->notifyGeneralUpdate();
+      if (auto* sb = StatusBar::instance())
+        sb->showTip(1500, "Rendered 3D model to Iso_Diffuse / Iso_Normal / Iso_Depth layers");
+    }
+    catch (const std::exception& e) {
+      Console::showException(e);
+    }
+  }
+
+  void exportToWavefrontObj()
+  {
+    Doc* doc = m_docView->document();
+    if (!doc || !doc->sprite()) return;
+
+    std::string defaultPath = doc->filename();
+    if (defaultPath.empty())
+      defaultPath = "easymetric_model.obj";
+    else
+      defaultPath = base::replace_extension(defaultPath, "obj");
+
+    base::paths exts = { "obj" };
+    base::paths selected;
+    if (!show_file_selector("Export Easymetric 3D Model as Wavefront .OBJ",
+                            defaultPath,
+                            exts,
+                            FileSelectorType::Save,
+                            selected) ||
+        selected.empty()) {
+      return;
+    }
+
+    const std::string objPath = base::replace_extension(selected.front(), "obj");
+    const std::string mtlPath = base::replace_extension(objPath, "mtl");
+    const std::string texPath = base::replace_extension(objPath, "png");
+    const std::string mtlFileName = base::get_file_name(mtlPath);
+    const std::string texFileName = base::get_file_name(texPath);
+
+    const doc::frame_t fr = (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
+    SixSurfaceData data;
+    extractSixSurfaces(doc, fr, data);
+
+    // Texture atlas
+    {
+      doc::FramesSequence seq;
+      seq.insert(fr);
+      std::unique_ptr<FileOp> fop(FileOp::createSaveDocumentOperation(
+        UIContext::instance(),
+        FileOpROI(doc, doc->sprite()->bounds(), "", "", seq, false),
+        texPath,
+        "",
+        false));
+      if (fop && !fop->hasError()) {
+        fop->operate();
+        fop->done();
+      }
+    }
+
+    // MTL file
+    {
+      std::ofstream mtl(mtlPath);
+      if (mtl.is_open()) {
+        mtl << "# Aseprite 2.0 Easymetric Material\n"
+            << "newmtl EasymetricMat\n"
+            << "Ka 1.000 1.000 1.000\n"
+            << "Kd 1.000 1.000 1.000\n"
+            << "Ks 0.000 0.000 0.000\n"
+            << "d 1.0\n"
+            << "illum 1\n"
+            << "map_Kd " << texFileName << "\n";
+      }
+    }
+
+    // OBJ file
+    {
+      std::ofstream obj(objPath);
+      if (!obj.is_open()) return;
+
+      const int pivX = m_pivXSlider ? m_pivXSlider->getValue() : 50;
+      const int pivY = m_pivYSlider ? m_pivYSlider->getValue() : 50;
+      const int pivZ = m_pivZSlider ? m_pivZSlider->getValue() : 50;
+      SculptedVoxelVolume vol = buildSculptedVolume(data, pivX, pivY, pivZ);
+
+      const float sprW = std::max(1.0f, float(doc->sprite()->width()));
+      const float sprH = std::max(1.0f, float(doc->sprite()->height()));
+      const float halfX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown] }) * 0.5f;
+      const float halfY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight] }) * 0.5f;
+      const float halfZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown] }) * 0.5f;
+
+      const float cellSizeX = (2.0f * halfX) / float(vol.vx);
+      const float cellSizeY = (2.0f * halfY) / float(vol.vy);
+      const float cellSizeZ = (2.0f * halfZ) / float(vol.vz);
+
+      obj << "# Aseprite 2.0 Easymetric Sculpted 3D Model\n"
+          << "mtllib " << mtlFileName << "\n"
+          << "usemtl EasymetricMat\n"
+          << "o EasymetricSculptedModel\n";
+
+      int vIdx = 1, vtIdx = 1, vnIdx = 1;
+
+      auto emitQuad = [&](float x0, float y0, float z0,
+                          float x1, float y1, float z1,
+                          float x2, float y2, float z2,
+                          float x3, float y3, float z3,
+                          float nx, float ny, float nz,
+                          float u0, float v0, float u1, float v1) {
+        obj << "v " << x0 << " " << y0 << " " << z0 << "\n"
+            << "v " << x1 << " " << y1 << " " << z1 << "\n"
+            << "v " << x2 << " " << y2 << " " << z2 << "\n"
+            << "v " << x3 << " " << y3 << " " << z3 << "\n";
+        obj << "vt " << u0 << " " << v0 << "\n"
+            << "vt " << u1 << " " << v0 << "\n"
+            << "vt " << u1 << " " << v1 << "\n"
+            << "vt " << u0 << " " << v1 << "\n";
+        obj << "vn " << nx << " " << ny << " " << nz << "\n";
+        obj << "f "
+            << (vIdx + 0) << "/" << (vtIdx + 0) << "/" << vnIdx << " "
+            << (vIdx + 1) << "/" << (vtIdx + 1) << "/" << vnIdx << " "
+            << (vIdx + 2) << "/" << (vtIdx + 2) << "/" << vnIdx << " "
+            << (vIdx + 3) << "/" << (vtIdx + 3) << "/" << vnIdx << "\n";
+        vIdx += 4;
+        vtIdx += 4;
+        vnIdx += 1;
+      };
+
+      for (int vy = 0; vy < vol.vy; ++vy) {
+        const float yMax = halfY - float(vy) * cellSizeY;
+        const float yMin = halfY - float(vy + 1) * cellSizeY;
+
+        for (int vz = 0; vz < vol.vz; ++vz) {
+          const float zMin = -halfZ + float(vz) * cellSizeZ;
+          const float zMax = -halfZ + float(vz + 1) * cellSizeZ;
+
+          for (int vx = 0; vx < vol.vx; ++vx) {
+            if (!vol.isSolid(vx, vy, vz)) continue;
+
+            const float xMin = -halfX + float(vx) * cellSizeX;
+            const float xMax = -halfX + float(vx + 1) * cellSizeX;
+
+            // 1. Front face (+Z)
+            if (vz + 1 >= vol.vz || !vol.isSolid(vx, vy, vz + 1)) {
+              const float u0 = float(vx) / float(vol.vx);
+              const float u1 = float(vx + 1) / float(vol.vx);
+              const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
+              const float v1 = 1.0f - float(vy) / float(vol.vy);
+              emitQuad(xMin, yMin, zMax,
+                       xMax, yMin, zMax,
+                       xMax, yMax, zMax,
+                       xMin, yMax, zMax,
+                       0.0f, 0.0f, 1.0f,
+                       u0, v0, u1, v1);
+            }
+
+            // 2. Back face (-Z)
+            if (vz - 1 < 0 || !vol.isSolid(vx, vy, vz - 1)) {
+              const float u0 = float(vol.vx - 1 - vx) / float(vol.vx);
+              const float u1 = float(vol.vx - vx) / float(vol.vx);
+              const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
+              const float v1 = 1.0f - float(vy) / float(vol.vy);
+              emitQuad(xMax, yMin, zMin,
+                       xMin, yMin, zMin,
+                       xMin, yMax, zMin,
+                       xMax, yMax, zMin,
+                       0.0f, 0.0f, -1.0f,
+                       u0, v0, u1, v1);
+            }
+
+            // 3. Top face (+Y)
+            if (vy - 1 < 0 || !vol.isSolid(vx, vy - 1, vz)) {
+              const float u0 = float(vx) / float(vol.vx);
+              const float u1 = float(vx + 1) / float(vol.vx);
+              const float v0 = 1.0f - float(vz + 1) / float(vol.vz);
+              const float v1 = 1.0f - float(vz) / float(vol.vz);
+              emitQuad(xMin, yMax, zMax,
+                       xMax, yMax, zMax,
+                       xMax, yMax, zMin,
+                       xMin, yMax, zMin,
+                       0.0f, 1.0f, 0.0f,
+                       u0, v0, u1, v1);
+            }
+
+            // 4. Bottom face (-Y)
+            if (vy + 1 >= vol.vy || !vol.isSolid(vx, vy + 1, vz)) {
+              const float u0 = float(vx) / float(vol.vx);
+              const float u1 = float(vx + 1) / float(vol.vx);
+              const float v0 = 1.0f - float(vol.vz - vz) / float(vol.vz);
+              const float v1 = 1.0f - float(vol.vz - 1 - vz) / float(vol.vz);
+              emitQuad(xMin, yMin, zMin,
+                       xMax, yMin, zMin,
+                       xMax, yMin, zMax,
+                       xMin, yMin, zMax,
+                       0.0f, -1.0f, 0.0f,
+                       u0, v0, u1, v1);
+            }
+
+            // 5. Right face (+X)
+            if (vx + 1 >= vol.vx || !vol.isSolid(vx + 1, vy, vz)) {
+              const float u0 = float(vol.vz - 1 - vz) / float(vol.vz);
+              const float u1 = float(vol.vz - vz) / float(vol.vz);
+              const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
+              const float v1 = 1.0f - float(vy) / float(vol.vy);
+              emitQuad(xMax, yMin, zMax,
+                       xMax, yMin, zMin,
+                       xMax, yMax, zMin,
+                       xMax, yMax, zMax,
+                       1.0f, 0.0f, 0.0f,
+                       u0, v0, u1, v1);
+            }
+
+            // 6. Left face (-X)
+            if (vx - 1 < 0 || !vol.isSolid(vx - 1, vy, vz)) {
+              const float u0 = float(vz) / float(vol.vz);
+              const float u1 = float(vz + 1) / float(vol.vz);
+              const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
+              const float v1 = 1.0f - float(vy) / float(vol.vy);
+              emitQuad(xMin, yMin, zMin,
+                       xMin, yMin, zMax,
+                       xMin, yMax, zMax,
+                       xMin, yMax, zMin,
+                       -1.0f, 0.0f, 0.0f,
+                       u0, v0, u1, v1);
+            }
+          }
+        }
+      }
+    }
+
+    if (auto* sb = StatusBar::instance())
+      sb->showTip(2500, fmt::format("Exported 3D Wavefront OBJ to {}", objPath));
+  }
+
+  DocView* m_docView;
+  std::array<PaneHeader*, 8> m_headers;
+  std::array<ui::VBox*, 8> m_panes;
+
+  // 6 Surface Editors
+  std::array<Editor*, kFaceCount> m_editors;
+  std::array<ui::View*, kFaceCount> m_views;
+  std::array<LinkToggleButton*, 3> m_linkButtons;
+  std::array<bool, 3> m_colLinked = { false, false, false };
+
+  // Preview & Fields
+  EasymetricPreviewWidget* m_previewWidget;
+  FieldsPanelBox* m_fieldsBox;
+
+  // Fields controls
+  ui::Slider* m_yawSlider;
+  ui::Slider* m_pitchSlider;
+  ui::Slider* m_pivXSlider;
+  ui::Slider* m_pivYSlider;
+  ui::Slider* m_pivZSlider;
+  ui::ComboBox* m_tagCombo;
+  ui::CheckBox* m_mapDiffuseCheck;
+  ui::CheckBox* m_mapNormalCheck;
+  ui::CheckBox* m_mapDepthCheck;
+  ui::ComboBox* m_renderTypeCombo;
+  ui::CheckBox* m_strokeCheck;
+  ui::CheckBox* m_cutoutCheck;
+  ui::CheckBox* m_lockBordersCheck;
+  ui::CheckBox* m_symXCheck;
+  ui::CheckBox* m_symYCheck;
+  ui::CheckBox* m_useFaceDepthCheck;
+  ui::CheckBox* m_liveBakeCheck;
+
+  ui::Timer m_timer;
+  uint64_t m_lastHash = 0;
+  doc::ImageRef m_lastDiffImg;
+  doc::ImageRef m_lastNormImg;
+  doc::ImageRef m_lastDeptImg;
+};
+
+class EasymetricStudioCommand : public Command {
+public:
+  EasymetricStudioCommand() : Command(CommandId::EasymetricStudio()) {}
+
+protected:
+  bool onEnabled(Context* context) override
+  {
+    return context && context->isUIAvailable() && context->activeDocument();
+  }
+
+  bool onChecked(Context* context) override
+  {
+    DocView* view = UIContext::instance()->activeView();
+    return view && view->isMultiPane();
+  }
+
+  void onExecute(Context* context) override
+  {
+    UIContext* uiCtx = UIContext::instance();
+    DocView* docView = uiCtx ? uiCtx->activeView() : nullptr;
+    if (!docView || !docView->document())
+      return;
+
+    if (docView->isMultiPane()) {
+      if (auto* multiPane = dynamic_cast<EasymetricMultiPaneView*>(docView->multiPaneLayout())) {
+        multiPane->syncAllLinkedCels();
+      }
+      docView->exitMultiPaneMode();
+      if (auto* sb = StatusBar::instance())
+        sb->showTip(1200, "Easymetric 6-Surface Studio: Switched to standard view");
+    }
+    else {
+      setupSixSurfacesOnDoc(docView->document(), true);
+      auto* multiPane = new EasymetricMultiPaneView(docView);
+      std::vector<Editor*> editors = multiPane->surfaceEditors();
+      docView->enterMultiPaneMode(multiPane, editors);
+      multiPane->initLayersAndFraming();
+      if (auto* sb = StatusBar::instance())
+        sb->showTip(1500, "Easymetric 6-Surface Studio: 4-Column Workspace Grid Active");
+    }
+  }
+};
+
+} // anonymous namespace
+
+Command* CommandFactory::createEasymetricStudioCommand()
+{
+  return new EasymetricStudioCommand;
+}
+
+} // namespace app

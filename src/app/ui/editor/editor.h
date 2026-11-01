@@ -136,6 +136,14 @@ public:
   EditorFlags editorFlags() const { return m_flags; }
   void setEditorFlags(EditorFlags flags) { m_flags = flags; }
 
+  // Aseprite 2.0: restricts the visible sprite area of this editor to a
+  // sprite-space rectangle (Easymetric multi-pane surface editors).
+  // An empty rectangle disables the clipping.
+  const gfx::Rect& clipSpriteBounds() const { return m_clipSpriteBounds; }
+  void setClipSpriteBounds(const gfx::Rect& rc);
+  // Zooms + scrolls so the clip rectangle fills the editor viewport.
+  void fitClipSpriteBounds();
+
   bool isExtraCelLocked() const { return m_flashing != Flashing::None; }
 
   Doc* document() { return m_document; }
@@ -477,6 +485,10 @@ private:
   // creates a new sprite change in the same sprite change scripting
   // event.
   bool m_leavingState = false;
+
+  // Aseprite 2.0: sprite-space clip rectangle (empty = no clip)
+  gfx::Rect m_clipSpriteBounds;
+  bool m_fittingClip = false;
 
   // Last known mouse position received by this editor when the
   // mouse button was pressed. Used for auto-scrolling. To get the

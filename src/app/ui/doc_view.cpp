@@ -55,6 +55,7 @@
   #include "app/sentry_wrapper.h"
 #endif
 
+#include <algorithm>
 #include <typeinfo>
 
 namespace app {
@@ -106,25 +107,27 @@ public:
   }
 
   // EditorObserver implementation
-  void dispose() override { m_previewDelegate->onDisposeOtherEditor(this); }
+  void dispose() override {
+    if (m_previewDelegate) m_previewDelegate->onDisposeOtherEditor(this);
+  }
 
   void onScrollChanged(Editor* editor) override
   {
-    m_previewDelegate->onScrollOtherEditor(this);
+    if (m_previewDelegate) m_previewDelegate->onScrollOtherEditor(this);
 
-    if (isActive())
+    if (isActive() && StatusBar::instance())
       StatusBar::instance()->updateFromEditor(this);
   }
 
   void onZoomChanged(Editor* editor) override
   {
-    if (isActive())
+    if (isActive() && StatusBar::instance())
       StatusBar::instance()->updateFromEditor(this);
   }
 
   void onAfterFrameChanged(Editor* editor) override
   {
-    m_previewDelegate->onPreviewOtherEditor(this);
+    if (m_previewDelegate) m_previewDelegate->onPreviewOtherEditor(this);
 
     if (isActive())
       set_current_palette(editor->sprite()->palette(editor->frame()), false);
@@ -132,7 +135,7 @@ public:
 
   void onAfterLayerChanged(Editor* editor) override
   {
-    m_previewDelegate->onPreviewOtherEditor(this);
+    if (m_previewDelegate) m_previewDelegate->onPreviewOtherEditor(this);
   }
 
   // EditorCustomizationDelegate implementation
@@ -249,13 +252,136 @@ DocView::DocView(Doc* document, Type type, DocViewPreviewDelegate* previewDelega
   m_view->setExpansive(true);
 
   m_editor->setDocView(this);
+  m_ownEditor = m_editor;
   m_document->add_observer(this);
 }
 
 DocView::~DocView()
 {
   m_document->remove_observer(this);
-  delete m_editor;
+
+  if (m_paneLayout) {
+    for (Editor* e : m_paneEditors) {
+      if (Editor::activeEditor() == e)
+        Editor::_setActiveEditor(nullptr);
+    }
+    m_editor = m_ownEditor;
+    removeChild(m_paneLayout);
+    ui::Widget* layout = m_paneLayout;
+    m_paneLayout = nullptr;
+    m_paneEditors.clear();
+    delete layout;
+  }
+
+  delete m_ownEditor;
+}
+
+template<typename F>
+void DocView::forEachShownEditor(F&& f)
+{
+  if (m_paneLayout) {
+    for (Editor* e : m_paneEditors)
+      f(e);
+  }
+  else {
+    f(m_editor);
+  }
+}
+
+ui::View* DocView::createPaneEditorView(Editor** outEditor)
+{
+  auto* view = new EditorView(EditorView::CurrentEditorMode);
+  Editor* editor = new AppEditor(m_document, m_previewDelegate);
+  view->attachToView(editor);
+  view->setExpansive(true);
+  editor->setDocView(this);
+  if (outEditor)
+    *outEditor = editor;
+  return view;
+}
+
+void DocView::enterMultiPaneMode(ui::Widget* layoutRoot, const std::vector<Editor*>& paneEditors)
+{
+  if (m_paneLayout || !layoutRoot || paneEditors.empty())
+    return;
+
+  Editor* src = m_ownEditor;
+  for (Editor* e : paneEditors) {
+    if (!e->layer())
+      e->setLayer(src->layer());
+    e->setFrame(src->frame());
+  }
+
+  m_paneEditors = paneEditors;
+  m_paneLayout = layoutRoot;
+  m_view->setVisible(false);
+  layoutRoot->setExpansive(true);
+  addChild(layoutRoot);
+
+  const bool wasActive = src->isActive();
+  m_editor = m_paneEditors.front();
+  layout();
+  invalidate();
+
+  if (wasActive)
+    UIContext::instance()->setActiveView(this);
+}
+
+void DocView::exitMultiPaneMode()
+{
+  if (!m_paneLayout)
+    return;
+
+  Editor* cur = m_editor;
+  m_ownEditor->setLayer(cur->layer());
+  m_ownEditor->setFrame(cur->frame());
+
+  bool paneWasActive = false;
+  for (Editor* e : m_paneEditors) {
+    if (Editor::activeEditor() == e)
+      paneWasActive = true;
+  }
+
+  m_editor = m_ownEditor;
+  m_view->setVisible(true);
+
+  ui::Widget* layout = m_paneLayout;
+  removeChild(layout);
+  m_paneLayout = nullptr;
+  std::vector<Editor*> old;
+  old.swap(m_paneEditors);
+
+  if (paneWasActive)
+    UIContext::instance()->setActiveView(this);
+  for (Editor* e : old) {
+    if (Editor::activeEditor() == e)
+      Editor::_setActiveEditor(m_ownEditor);
+  }
+
+  this->layout();
+  invalidate();
+
+  // Deferred deletion: we might be inside a callback of a widget owned by the layout
+  layout->deferDelete();
+}
+
+void DocView::setActivePaneEditor(Editor* editor)
+{
+  if (!m_paneLayout || !editor || editor == m_editor)
+    return;
+  if (std::find(m_paneEditors.begin(), m_paneEditors.end(), editor) == m_paneEditors.end())
+    return;
+
+  // In multi-pane mode, each editor represents a dedicated surface layer.
+  // Preserve the editor's assigned layer, only fallback if unassigned.
+  if (!editor->layer() && m_editor->layer())
+    editor->setLayer(m_editor->layer());
+  editor->setFrame(m_editor->frame());
+  m_editor = editor;
+  for (Editor* e : m_paneEditors) {
+    if (ui::View* v = ui::View::getView(e))
+      v->invalidate();
+  }
 }
 
 void DocView::getSite(Site* site) const
@@ -412,14 +538,18 @@ bool DocView::onProcessMessage(Message* msg)
 
 void DocView::onGeneralUpdate(DocEvent& ev)
 {
-  if (m_editor->isVisible())
-    m_editor->updateEditor(true);
+  forEachShownEditor([](Editor* e) {
+    if (e->isVisible())
+      e->updateEditor(true);
+  });
 }
 
 void DocView::onSpritePixelsModified(DocEvent& ev)
 {
-  if (m_editor->isVisible() && m_editor->frame() == ev.frame())
-    m_editor->drawSpriteClipped(ev.region());
+  forEachShownEditor([&ev](Editor* e) {
+    if (e->isVisible() && e->frame() == ev.frame())
+      e->drawSpriteClipped(ev.region());
+  });
 }
 
 void DocView::onLayerMergedDown(DocEvent& ev)
@@ -445,17 +575,19 @@ void DocView::onAddFrame(DocEvent& ev)
 
 void DocView::onRemoveFrame(DocEvent& ev)
 {
-  // Adjust current frame of all editors that are in a frame more
-  // advanced that the removed one.
-  if (m_editor->frame() > ev.frame()) {
-    m_editor->setFrame(m_editor->frame() - 1);
-  }
-  // If the editor was in the previous "last frame" (current value of
-  // totalFrames()), we've to adjust it to the new last frame
-  // (lastFrame())
-  else if (m_editor->frame() >= m_editor->sprite()->totalFrames()) {
-    m_editor->setFrame(m_editor->sprite()->lastFrame());
-  }
+  forEachShownEditor([&ev](Editor* e) {
+    // Adjust current frame of all editors that are in a frame more
+    // advanced that the removed one.
+    if (e->frame() > ev.frame()) {
+      e->setFrame(e->frame() - 1);
+    }
+    // If the editor was in the previous "last frame" (current value of
+    // totalFrames()), we've to adjust it to the new last frame
+    // (lastFrame())
+    else if (e->frame() >= e->sprite()->totalFrames()) {
+      e->setFrame(e->sprite()->lastFrame());
+    }
+  });
 }
 
 void DocView::onTagChange(DocEvent& ev)
@@ -482,15 +614,16 @@ void DocView::onAfterRemoveCel(DocEvent& ev)
 
 void DocView::onTotalFramesChanged(DocEvent& ev)
 {
-  if (m_editor->frame() >= m_editor->sprite()->totalFrames()) {
-    m_editor->setFrame(m_editor->sprite()->lastFrame());
-  }
+  forEachShownEditor([](Editor* e) {
+    if (e->frame() >= e->sprite()->totalFrames())
+      e->setFrame(e->sprite()->lastFrame());
+  });
 }
 
 void DocView::onLayerRestacked(DocEvent& ev)
 {
   if (hasContentInActiveFrame(ev.layer()))
-    m_editor->invalidate();
+    forEachShownEditor([](Editor* e) { e->invalidate(); });
 }
 
 void DocView::onAfterLayerVisibilityChange(DocEvent& ev)
@@ -498,7 +631,7 @@ void DocView::onAfterLayerVisibilityChange(DocEvent& ev)
   // If there is no cel for this layer in the current frame, there is
   // no need to redraw the editor
   if (hasContentInActiveFrame(ev.layer()))
-    m_editor->invalidate();
+    forEachShownEditor([](Editor* e) { e->invalidate(); });
 }
 
 void DocView::onTilesetChanged(DocEvent& ev)
@@ -508,7 +641,7 @@ void DocView::onTilesetChanged(DocEvent& ev)
   if (!ui::is_ui_thread())
     return;
 
-  m_editor->invalidate();
+  forEachShownEditor([](Editor* e) { e->invalidate(); });
 }
 
 void DocView::onNewInputPriority(InputChainElement* element, const ui::Message* msg)
@@ -521,7 +654,8 @@ bool DocView::onCanCut(Context* ctx)
   if (ctx->checkFlags(ContextFlags::ActiveDocumentIsWritable | ContextFlags::ActiveLayerIsVisible |
                       ContextFlags::ActiveLayerIsEditable | ContextFlags::HasVisibleMask |
                       ContextFlags::HasActiveImage) &&
-      !ctx->checkFlags(ContextFlags::ActiveLayerIsReference))
+      !ctx->checkFlags(ContextFlags::ActiveLayerIsReference) &&
+      !ctx->checkFlags(ContextFlags::ActiveLayerIsSmartObject))
     return true;
   else if (m_editor->isMovingPixels())
     return true;
@@ -547,7 +681,8 @@ bool DocView::onCanPaste(Context* ctx)
 {
   if (ctx->checkFlags(ContextFlags::ActiveDocumentIsWritable | ContextFlags::ActiveLayerIsVisible |
                       ContextFlags::ActiveLayerIsEditable | ContextFlags::ActiveLayerIsImage) &&
-      !ctx->checkFlags(ContextFlags::ActiveLayerIsReference)) {
+      !ctx->checkFlags(ContextFlags::ActiveLayerIsReference) &&
+      !ctx->checkFlags(ContextFlags::ActiveLayerIsSmartObject)) {
     auto format = ctx->clipboard()->format();
     if (format == ClipboardFormat::Image) {
       return true;
@@ -570,7 +705,8 @@ bool DocView::onCanClear(Context* ctx)
 {
   if (ctx->checkFlags(ContextFlags::ActiveDocumentIsWritable | ContextFlags::ActiveLayerIsVisible |
                       ContextFlags::ActiveLayerIsEditable | ContextFlags::ActiveLayerIsImage) &&
-      !ctx->checkFlags(ContextFlags::ActiveLayerIsReference)) {
+      !ctx->checkFlags(ContextFlags::ActiveLayerIsReference) &&
+      !ctx->checkFlags(ContextFlags::ActiveLayerIsSmartObject)) {
     return true;
   }
   else if (m_editor->isMovingPixels()) {

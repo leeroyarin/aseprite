@@ -15,6 +15,8 @@
 #include "app/ui/workspace_view.h"
 #include "ui/box.h"
 
+#include <vector>
+
 namespace doc {
 class Layer;
 }
@@ -54,6 +56,18 @@ public:
   void getSite(Site* site) const;
 
   bool isPreview() { return m_type == Preview; }
+
+  // Aseprite 2.0: multi-pane mode. Several editors of the same document
+  // are laid out inside this DocView (e.g. Easymetric surface panes).
+  // editor() returns the pane editor that was used last.
+  ui::View* createPaneEditorView(Editor** outEditor);
+  void enterMultiPaneMode(ui::Widget* layoutRoot, const std::vector<Editor*>& paneEditors);
+  void exitMultiPaneMode();
+  bool isMultiPane() const { return m_paneLayout != nullptr; }
+  ui::Widget* multiPaneLayout() const { return m_paneLayout; }
+  const std::vector<Editor*>& paneEditors() const { return m_paneEditors; }
+  Editor* primaryEditor() const { return m_ownEditor; }
+  void setActivePaneEditor(Editor* editor);
 
   // Preferred timeline scroll
   const gfx::Point& timelineScroll() { return m_timelineScroll; }
@@ -113,6 +127,13 @@ private:
   DocViewPreviewDelegate* m_previewDelegate;
   Editor* m_editor;
   gfx::Point m_timelineScroll;
+
+  // Aseprite 2.0 multi-pane support
+  Editor* m_ownEditor = nullptr;
+  ui::Widget* m_paneLayout = nullptr;
+  std::vector<Editor*> m_paneEditors;
+  template<typename F>
+  void forEachShownEditor(F&& f);
 };
 
 } // namespace app

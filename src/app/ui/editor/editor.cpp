@@ -598,6 +598,51 @@ void Editor::updateEditor(const bool restoreScrollPos)
   View::getView(this)->updateView(restoreScrollPos);
 }
 
+void Editor::setClipSpriteBounds(const gfx::Rect& rc)
+{
+  if (m_clipSpriteBounds == rc)
+    return;
+  m_clipSpriteBounds = rc;
+  invalidate();
+}
+
+void Editor::fitClipSpriteBounds()
+{
+  if (m_fittingClip || m_clipSpriteBounds.isEmpty() || !m_sprite)
+    return;
+  View* view = View::getView(this);
+  if (!view || !view->manager())
+    return;
+  const gfx::Rect vp = view->viewportBounds();
+  if (vp.w < 8 || vp.h < 8)
+    return;
+
+  m_fittingClip = true;
+
+  const int margin = 10 * guiscale();
+  const double sx = double(std::max(1, vp.w - margin * 2)) / double(m_clipSpriteBounds.w);
+  const double sy = double(std::max(1, vp.h - margin * 2)) / double(m_clipSpriteBounds.h);
+  double sc = std::max(0.25, std::min(sx, sy));
+  if (sc >= 1.0)
+    sc = std::floor(sc); // Pixel-perfect integer zoom
+
+  const render::Zoom z = render::Zoom::fromScale(sc);
+  if (z.scale() != m_proj.zoom().scale()) {
+    m_proj.setZoom(z);
+    notifyZoomChanged();
+  }
+  m_padding = calcExtraPadding(m_proj);
+
+  const gfx::PointF centerPt(m_clipSpriteBounds.x + m_clipSpriteBounds.w * 0.5,
+                             m_clipSpriteBounds.y + m_clipSpriteBounds.h * 0.5);
+  gfx::Point scroll(m_padding.x - (vp.w / 2) + m_proj.applyX(centerPt.x),
+                    m_padding.y - (vp.h / 2) + m_proj.applyY(centerPt.y));
+  view->setViewScroll(scroll);
+  invalidate();
+
+  m_fittingClip = false;
+}
+
 void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g,
                                         const gfx::Rect& spriteRectToDraw,
                                         int dx,
@@ -1078,6 +1123,17 @@ void Editor::drawSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& _rc)
     EditorPostRenderImpl postRender(this, g);
     m_decorator->postRenderDecorator(&postRender);
   }
+
+  // Aseprite 2.0: Easymetric pane clipping (hide everything outside the surface box)
+  if (!m_clipSpriteBounds.isEmpty() && m_sprite && m_clipSpriteBounds != m_sprite->bounds()) {
+    auto theme = SkinTheme::get(this);
+    gfx::Rect clipRc = editorToScreen(m_clipSpriteBounds);
+    clipRc.offset(-bounds().origin());
+    clipRc.enlarge(5 * guiscale());
+    gfx::Region outside(clientBounds());
+    outside.createSubtraction(outside, gfx::Region(clipRc));
+    g->fillRegion(theme->colors.editorFace(), outside);
+  }
 }
 
 void Editor::drawSpriteClipped(const gfx::Region& updateRegion)
@@ -1295,6 +1351,102 @@ void Editor::drawSlices(ui::Graphics* g)
     }
     else {
       g->drawRect(color, out);
+    }
+
+    if (!slice->name().empty() && out.w >= 16) {
+      const int s = ui::guiscale();
+      bool isLocked = (slice->userData().text() == "locked");
+      if (!isLocked && m_sprite) {
+        const std::string lyrName = "Surface_" + slice->name();
+        for (const auto* lyr : m_sprite->allLayers()) {
+          if (lyr->name() == lyrName && !lyr->isEditable()) {
+            isLocked = true;
+            break;
+          }
+        }
+      }
+
+      // Draw internal symmetry center guide lines inside surface border
+      const gfx::Color symCol =
+        gfx::rgba(gfx::getr(color), gfx::getg(color), gfx::getb(color), 95);
+      const int midX = out.x + out.w / 2;
+      const int midY = out.y + out.h / 2;
+      if (out.h > 4)
+        g->drawVLine(symCol, midX, out.y + 1, out.h - 2);
+      if (out.w > 4)
+        g->drawHLine(symCol, out.x + 1, midY, out.w - 2);
+
+      // Draw 8 draggable resize handles when surface border is unlocked
+      if (!isLocked) {
+        const int hs = 2 * s;
+        const int d = 4 * s + 1;
+        auto drawHandle = [&](int hx, int hy) {
+          gfx::Rect hrc(hx - hs, hy - hs, d, d);
+          g->fillRect(gfx::rgba(255, 255, 255, 235), hrc);
+          g->drawRect(color, hrc);
+        };
+        drawHandle(out.x, out.y);
+        drawHandle(midX, out.y);
+        drawHandle(out.x2() - 1, out.y);
+        drawHandle(out.x, midY);
+        drawHandle(out.x2() - 1, midY);
+        drawHandle(out.x, out.y2() - 1);
+        drawHandle(midX, out.y2() - 1);
+        drawHandle(out.x2() - 1, out.y2() - 1);
+      }
+
+      // Map canonical slice name to display title ("Top", "Bottom", "Front", "Back", "Right", "Left")
+      std::string niceTitle = slice->name();
+      if (niceTitle == "TOP") niceTitle = "Top";
+      else if (niceTitle == "DOWN" || niceTitle == "BOTTOM") niceTitle = "Bottom";
+      else if (niceTitle == "FRONT") niceTitle = "Front";
+      else if (niceTitle == "BACK") niceTitle = "Back";
+      else if (niceTitle == "RIGHT") niceTitle = "Right";
+      else if (niceTitle == "LEFT") niceTitle = "Left";
+
+      const std::string label = niceTitle + " " +
+                                std::to_string(key->bounds().w) + "x" +
+                                std::to_string(key->bounds().h) +
+                                (isLocked ? " [LOCK]" : "");
+      const gfx::Size textSz = g->measureText(label);
+      const int textW = textSz.w;
+      const int textH = textSz.h;
+      const int padX = 5 * s;
+      const int padY = 2 * s;
+      const int tabW = std::min(out.w, std::max(textW + padX * 2 + 8 * s, 48 * s));
+      const int pillH = textH + padY * 2;
+      const int pillY = (out.y >= pillH + 1) ? (out.y - pillH) : out.y;
+
+      // Draw full-width slate-blue header bar + raised folder-tab ear matching reference UI
+      const gfx::Rect barRc(out.x, pillY, out.w, pillH);
+      const gfx::Rect tabRc(out.x, pillY, tabW, pillH);
+      g->fillRect(gfx::rgba(92, 108, 122, 235), barRc);
+      g->fillRect(gfx::rgba(105, 122, 138, 250), tabRc);
+      g->drawRect(gfx::rgba(28, 35, 43, 255), barRc);
+
+      // Colored surface indicator bar along the left edge of the folder tab
+      g->fillRect(gfx::rgba(gfx::getr(color), gfx::getg(color), gfx::getb(color), 255),
+                  gfx::Rect(tabRc.x + 1, tabRc.y + 1, 3 * s, tabRc.h - 2));
+
+      // Draw ":::" splitter grip dots in the header bar if wide enough
+      if (out.w > tabW + 24 * s) {
+        const int gx = out.x + tabW + (out.w - tabW) / 2 - 4 * s;
+        const int gy = pillY + pillH / 2 - 1 * s;
+        const gfx::Color dotCol = gfx::rgba(52, 63, 74, 230);
+        for (int dx = 0; dx < 3; ++dx) {
+          g->fillRect(dotCol, gfx::Rect(gx + dx * 3 * s, gy, s, s));
+          g->fillRect(dotCol, gfx::Rect(gx + dx * 3 * s, gy + 2 * s, s, s));
+        }
+      }
+
+      // Draw outer dark frame around the surface viewport
+      g->drawRect(gfx::rgba(28, 35, 43, 255),
+                  gfx::Rect(out.x - 1, out.y - 1, out.w + 2, out.h + 2));
+
+      g->drawText(label,
+                  gfx::rgba(255, 255, 255, 255),
+                  gfx::ColorNone,
+                  gfx::Point(tabRc.x + 4 * s + 2 * s, tabRc.y + padY));
     }
   }
 }
@@ -2426,6 +2578,9 @@ void Editor::onResize(ui::ResizeEvent& ev)
   Widget::onResize(ev);
   m_padding = calcExtraPadding(m_proj);
 
+  if (!m_clipSpriteBounds.isEmpty())
+    fitClipSpriteBounds();
+
   if (m_state)
     m_state->onEditorResize(this);
 }
@@ -2681,7 +2836,8 @@ void Editor::setCursor(const gfx::Point& mouseDisplayPos)
 bool Editor::canDraw()
 {
   return (m_layer != NULL && m_layer->isImage() && m_layer->isVisibleHierarchy() &&
-          m_layer->isEditableHierarchy() && !m_layer->isReference() && !m_document->isReadOnly());
+          m_layer->isEditableHierarchy() && !m_layer->isReference() &&
+          !m_layer->isSmartObject() && !m_document->isReadOnly());
 }
 
 bool Editor::isInsideSelection()
@@ -2699,6 +2855,7 @@ bool Editor::isInsideSelection()
 bool Editor::canStartMovingSelectionPixels()
 {
   return isInsideSelection() &&
+         m_layer && m_layer->canEditPixels() &&
          // We cannot move the selection when add/subtract modes are
          // enabled (we prefer to modify the selection on those modes
          // instead of moving pixels).
@@ -2725,67 +2882,97 @@ EditorHit Editor::calcHit(const gfx::Point& mouseScreenPos)
 {
   tools::Ink* ink = getCurrentEditorInk();
 
-  if (ink) {
-    // Check if we can transform slices
-    if (ink->isSlice()) {
-      if (m_docPref.show.slices()) {
-        gfx::Point mainOffset(mainTilePosition());
+  if (ink && m_sprite) {
+    // Allow dragging/resizing unlocked surface borders directly even when painting tools are active
+    if (ink->isSlice() || ((m_flags & kShowSlices) != 0) || m_docPref.show.slices()) {
+      gfx::Point mainOffset(mainTilePosition());
+      const int s = guiscale();
+      const int tol = 4 * s;
 
-        for (auto slice : m_sprite->slices()) {
-          auto key = slice->getByFrame(m_frame);
-          if (key) {
-            gfx::Rect bounds = key->bounds();
-            bounds.offset(mainOffset);
-            bounds = editorToScreen(bounds);
-
-            gfx::Rect center = key->center();
-
-            // Move bounds
-            if (bounds.contains(mouseScreenPos) &&
-                !bounds.shrink(5 * guiscale()).contains(mouseScreenPos)) {
-              int border = (mouseScreenPos.x <= bounds.x ? LEFT : 0) |
-                           (mouseScreenPos.y <= bounds.y ? TOP : 0) |
-                           (mouseScreenPos.x >= bounds.x2() ? RIGHT : 0) |
-                           (mouseScreenPos.y >= bounds.y2() ? BOTTOM : 0);
-
-              EditorHit hit(EditorHit::SliceBounds);
-              hit.setBorder(border);
-              hit.setSlice(slice);
-              return hit;
+      for (auto slice : m_sprite->slices()) {
+        bool isLocked = (slice->userData().text() == "locked");
+        if (!isLocked) {
+          const std::string lyrName = "Surface_" + slice->name();
+          for (const auto* lyr : m_sprite->allLayers()) {
+            if (lyr->name() == lyrName && !lyr->isEditable()) {
+              isLocked = true;
+              break;
             }
+          }
+        }
+        if (isLocked && !ink->isSlice())
+          continue;
 
-            // Move center
-            if (!center.isEmpty()) {
-              center = editorToScreen(center.offset(key->bounds().origin()));
+        auto key = slice->getByFrame(m_frame);
+        if (key) {
+          gfx::Rect bounds = key->bounds();
+          bounds.offset(mainOffset);
+          bounds = editorToScreen(bounds);
 
-              bool horz1 = gfx::Rect(bounds.x, center.y - 2 * guiscale(), bounds.w, 5 * guiscale())
-                             .contains(mouseScreenPos);
-              bool horz2 =
-                gfx::Rect(bounds.x, center.y2() - 2 * guiscale(), bounds.w, 5 * guiscale())
-                  .contains(mouseScreenPos);
-              bool vert1 = gfx::Rect(center.x - 2 * guiscale(), bounds.y, 5 * guiscale(), bounds.h)
-                             .contains(mouseScreenPos);
-              bool vert2 =
-                gfx::Rect(center.x2() - 2 * guiscale(), bounds.y, 5 * guiscale(), bounds.h)
-                  .contains(mouseScreenPos);
+          gfx::Rect center = key->center();
 
-              if (horz1 || horz2 || vert1 || vert2) {
-                int border = (horz1 ? TOP : 0) | (horz2 ? BOTTOM : 0) | (vert1 ? LEFT : 0) |
-                             (vert2 ? RIGHT : 0);
-                EditorHit hit(EditorHit::SliceCenter);
-                hit.setBorder(border);
-                hit.setSlice(slice);
-                return hit;
-              }
-            }
-
-            // Move all the slice
-            if (bounds.contains(mouseScreenPos)) {
+          // Drag header pill above border to move the entire surface box
+          if (!slice->name().empty() && !isLocked) {
+            const int pillH = 14 * s;
+            const int pillY = (bounds.y >= pillH + 2) ? (bounds.y - pillH) : bounds.y;
+            const gfx::Rect pillRc(bounds.x, pillY, std::max(bounds.w, 64 * s), pillH);
+            if (pillRc.contains(mouseScreenPos)) {
               EditorHit hit(EditorHit::SliceBounds);
               hit.setBorder(CENTER | MIDDLE);
               hit.setSlice(slice);
               return hit;
             }
+          }
+
+          // Resize surface border edges and 8 corner/edge handles
+          gfx::Rect outerBounds = bounds;
+          outerBounds.enlarge(tol);
+          gfx::Rect innerBounds = bounds;
+          innerBounds.shrink(tol);
+          if (outerBounds.contains(mouseScreenPos) && !innerBounds.contains(mouseScreenPos)) {
+            int border = (mouseScreenPos.x < bounds.x + tol ? LEFT : 0) |
+                         (mouseScreenPos.y < bounds.y + tol ? TOP : 0) |
+                         (mouseScreenPos.x >= bounds.x2() - tol ? RIGHT : 0) |
+                         (mouseScreenPos.y >= bounds.y2() - tol ? BOTTOM : 0);
+            if (border != 0) {
+              EditorHit hit(EditorHit::SliceBounds);
+              hit.setBorder(border);
+              hit.setSlice(slice);
+              return hit;
+            }
+          }
+
+          // Move center
+          if (!center.isEmpty() && ink->isSlice()) {
+            center = editorToScreen(center.offset(key->bounds().origin()));
+
+            bool horz1 = gfx::Rect(bounds.x, center.y - 2 * s, bounds.w, 5 * s)
+                           .contains(mouseScreenPos);
+            bool horz2 =
+              gfx::Rect(bounds.x, center.y2() - 2 * s, bounds.w, 5 * s)
+                .contains(mouseScreenPos);
+            bool vert1 = gfx::Rect(center.x - 2 * s, bounds.y, 5 * s, bounds.h)
+                           .contains(mouseScreenPos);
+            bool vert2 =
+              gfx::Rect(center.x2() - 2 * s, bounds.y, 5 * s, bounds.h)
+                .contains(mouseScreenPos);
+
+            if (horz1 || horz2 || vert1 || vert2) {
+              int border = (horz1 ? TOP : 0) | (horz2 ? BOTTOM : 0) | (vert1 ? LEFT : 0) |
+                           (vert2 ? RIGHT : 0);
+              EditorHit hit(EditorHit::SliceCenter);
+              hit.setBorder(border);
+              hit.setSlice(slice);
+              return hit;
+            }
+          }
+
+          // Move all the slice when Slice tool is active
+          if (ink->isSlice() && bounds.contains(mouseScreenPos)) {
+            EditorHit hit(EditorHit::SliceBounds);
+            hit.setBorder(CENTER | MIDDLE);
+            hit.setSlice(slice);
+            return hit;
           }
         }
       }

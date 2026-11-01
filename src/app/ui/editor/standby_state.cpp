@@ -126,6 +126,8 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
   Layer* layer = site.layer();
 
   // When an editor is clicked the current view is changed.
+  if (DocView* dv = editor->getDocView())
+    dv->setActivePaneEditor(editor);
   context->setActiveView(editor->getDocView());
 
   // Move symmetry
@@ -218,14 +220,13 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
     return true;
   }
 
-  // Handle Slice tool
-  if (clickedInk->isSlice()) {
+  // Handle Slice tool or unlocked Easymetric surface border drag/resize
+  {
     EditorHit hit = editor->calcHit(msg->position());
     switch (hit.type()) {
       case EditorHit::SliceBounds:
       case EditorHit::SliceCenter:
         if (msg->left()) {
-          // If we click outside all slices, we clear the selection of slices.
           if (!hit.slice() || !site.selectedSlices().contains(hit.slice()->id())) {
             editor->clearSlicesSelection();
             editor->selectSlice(hit.slice());
@@ -237,23 +238,49 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
           MovingSliceState* newState =
             new MovingSliceState(editor, msg, hit, site.selectedSlices());
           editor->setState(EditorStatePtr(newState));
+          return true;
         }
-        else {
+        else if (clickedInk->isSlice()) {
           Menu* popupMenu = AppMenus::instance()->getSlicePopupMenu();
           if (popupMenu) {
             Params params;
-            // When the editor doesn't have a set of selected slices,
-            // we set the specific clicked slice for the commands (in
-            // other case, those commands will get the selected set of
-            // slices from Site::selectedSlices() field).
             if (!editor->hasSelectedSlices())
               params.set("id", base::convert_to<std::string>(hit.slice()->id()).c_str());
             AppMenuItem::setContextParams(params);
             popupMenu->showPopup(msg->position(), editor->display());
             AppMenuItem::setContextParams(Params());
           }
+          return true;
         }
-        return true;
+        break;
+    }
+
+    // When clicking inside a named surface border to paint, auto-align symmetry axes & surface layer
+    if (msg->left() && editor->sprite() && ((editor->editorFlags() & Editor::kShowSlices) != 0)) {
+      const gfx::Point sprPt = editor->screenToEditor(msg->position());
+      for (auto* slice : editor->sprite()->slices()) {
+        if (slice->name().empty())
+          continue;
+        const auto* key = slice->getByFrame(editor->frame());
+        if (key && key->bounds().contains(sprPt)) {
+          const gfx::Rect b = key->bounds();
+          auto& sym = Preferences::instance().document(editor->document()).symmetry;
+          if (sym.xAxis() < b.x || sym.xAxis() > b.x2())
+            sym.xAxis(b.x + b.w * 0.5);
+          if (sym.yAxis() < b.y || sym.yAxis() > b.y2())
+            sym.yAxis(b.y + b.h * 0.5);
+
+          const std::string surfLyrName = "Surface_" + slice->name();
+          for (auto* lyr : editor->sprite()->allLayers()) {
+            if (lyr->isImage() && lyr->isVisible() && lyr->isEditable() &&
+                lyr->name() == surfLyrName && editor->layer() != lyr) {
+              editor->setLayer(lyr);
+              break;
+            }
+          }
+          break;
+        }
+      }
     }
   }
 
@@ -405,6 +432,25 @@ bool StandbyState::onSetCursor(Editor* editor, const gfx::Point& mouseScreenPos)
   auto theme = skin::SkinTheme::get(editor);
 
   if (ink) {
+    // Show resize/move cursor when hovering over unlocked surface border handles
+    {
+      EditorHit hit = editor->calcHit(mouseScreenPos);
+      if (hit.type() == EditorHit::SliceBounds || hit.type() == EditorHit::SliceCenter) {
+        switch (hit.border()) {
+          case CENTER | MIDDLE: editor->showMouseCursor(kMoveCursor); break;
+          case TOP | LEFT:      editor->showMouseCursor(kSizeNWCursor); break;
+          case TOP:             editor->showMouseCursor(kSizeNCursor); break;
+          case TOP | RIGHT:     editor->showMouseCursor(kSizeNECursor); break;
+          case LEFT:            editor->showMouseCursor(kSizeWCursor); break;
+          case RIGHT:           editor->showMouseCursor(kSizeECursor); break;
+          case BOTTOM | LEFT:   editor->showMouseCursor(kSizeSWCursor); break;
+          case BOTTOM:          editor->showMouseCursor(kSizeSCursor); break;
+          case BOTTOM | RIGHT:  editor->showMouseCursor(kSizeSECursor); break;
+        }
+        return true;
+      }
+    }
+
     // If the current tool change selection (e.g. rectangular marquee, etc.)
     if (ink->isSelection()) {
       if (overSelectionEdges(editor, mouseScreenPos)) {

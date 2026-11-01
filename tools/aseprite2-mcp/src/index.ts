@@ -444,6 +444,54 @@ const TOOLS: Tool[] = [
       },
       required: ["texturePath"]
     }
+  },
+  {
+    name: "surface_normals_depth",
+    description: "Generate pixel-art Z-Depth (_DepthMap), OpenGL/Unity Tangent-Space Normal Map (_NormalMap), and optional 2.5D Studio Relit Preview (_LitPreview) using 2-pass Chamfer SDF bevel + luminance slope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        layer: { type: "string", description: "Optional source layer name (defaults to all visible diffuse layers)" },
+        frame: { type: "number", description: "1-based frame number (default 1)" },
+        bevelRadius: { type: "number", description: "Silhouette dome bevel radius in pixels (default 6.0)" },
+        reliefWeight: { type: "number", description: "Luminance relief weight 0.0-1.0 (default 0.45)" },
+        normalStrength: { type: "number", description: "Normal slope strength (default 3.2)" },
+        generateLitPreview: { type: "boolean", description: "Also generate _LitPreview studio relighted layer (default false)" }
+      }
+    }
+  },
+  {
+    name: "easymetric_template",
+    description: "Create 4 orthographic surface template layers (Surface_Top, Surface_Left, Surface_Right, Surface_Front) in the active sprite for Easymetric isometric projection.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        boxSize: { type: "number", description: "Base footprint width/depth in pixels (default 24)" },
+        boxHeight: { type: "number", description: "Extrusion height in pixels (default 28)" },
+        frame: { type: "number", description: "1-based frame number (default 1)" }
+      }
+    }
+  },
+  {
+    name: "easymetric_project",
+    description: "Project 4 flat orthographic surfaces (Top, Left, Right, Front) into a 2:1 isometric pixel-art model with auto-outline, bevel highlight, Bayer dithering, Tangent-Space Normal Map (Iso_Normal), and Z-Depth Map (Iso_Depth).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        topLayer: { type: "string", description: "Top surface layer name (default 'Surface_Top')" },
+        leftLayer: { type: "string", description: "Left surface layer name (default 'Surface_Left')" },
+        rightLayer: { type: "string", description: "Right surface layer name (default 'Surface_Right')" },
+        frontLayer: { type: "string", description: "Front overlay layer name (default 'Surface_Front')" },
+        boxSize: { type: "number", description: "Base footprint width/depth in pixels (default 24)" },
+        boxHeight: { type: "number", description: "Extrusion height in pixels (default 28)" },
+        bumpStrength: { type: "number", description: "Per-pixel surface relief normal perturbation strength (default 2.0)" },
+        generateNormal: { type: "boolean", description: "Generate Iso_Normal layer (default true)" },
+        generateDepth: { type: "boolean", description: "Generate Iso_Depth layer (default true)" },
+        autoOutline: { type: "boolean", description: "Add 1px selective outer outline + top ridge highlight (default true)" },
+        ditherSides: { type: "boolean", description: "Apply Bayer 2x2 side-plane shading dither (default true)" },
+        hideSourceLayers: { type: "boolean", description: "Hide flat source layers after projection (default false)" }
+      }
+    }
   }
 ];
 
@@ -543,7 +591,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       pixellab_status: "pixellab.status",
       pixellab_run: "pixellab.run",
       run_command: "app.run_command",
-      exec_lua: "lua.exec"
+      exec_lua: "lua.exec",
+      surface_normals_depth: "surface.generate_normals_depth",
+      easymetric_template: "easymetric.create_template",
+      easymetric_project: "easymetric.project_4surfaces"
     };
 
     const bridgeMethod = methodMap[name];

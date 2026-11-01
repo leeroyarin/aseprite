@@ -96,7 +96,11 @@ void UIContext::setActiveView(DocView* docView)
 
   // Do nothing cases: 1) the view is already selected, or 2) the view
   // is the a preview.
-  if (m_lastSelectedView == docView || (docView && docView->isPreview()))
+  // Aseprite 2.0: in multi-pane DocViews the active editor can change
+  // inside the same view, so compare the editor too.
+  if ((m_lastSelectedView == docView &&
+       (!docView || Editor::activeEditor() == docView->editor())) ||
+      (docView && docView->isPreview()))
     return;
 
   Editor* editor = nullptr;
