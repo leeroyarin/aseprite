@@ -18,3 +18,7 @@ build
 .build
 .deps
 CMakeSettings.json
+
+graphify-out/
+.agents/teamwork/
+

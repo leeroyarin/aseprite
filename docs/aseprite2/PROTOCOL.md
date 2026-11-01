@@ -135,3 +135,10 @@ Server may also read `manifest.json` directly for `version.list` when bridge off
 | method | params | result |
 |---|---|---|
 | `lua.exec` | `{code}` | `{result: <json-serializable return value>, output: "<captured print output>"}` |
+
+### easymetric & 2.5D surface maps (needs capabilities `easymetric`, `normals_depth`)
+| method | params | result |
+|---|---|---|
+| `surface.generate_normals_depth` | `{sprite?, layer?, frame?=1, bevelRadius?=6.0, reliefWeight?=0.45, normalStrength?=3.2, generateLitPreview?=false}` | `{ok, width, height, depthLayer, normalLayer, litLayer?}` |
+| `easymetric.create_template` | `{sprite?, frame?=1, boxSize?=24, boxHeight?=28}` | `{ok, boxSize, boxHeight, layers}` |
+| `easymetric.project_4surfaces` | `{sprite?, frame?=1, topLayer?, leftLayer?, rightLayer?, frontLayer?, boxSize?=24, boxHeight?=28, bumpStrength?=2.0, generateNormal?=true, generateDepth?=true, autoOutline?=true, ditherSides?=true, hideSourceLayers?=false}` | `{ok, width, height, boxSize, boxHeight, diffuseLayer, normalLayer?, depthLayer?}` |

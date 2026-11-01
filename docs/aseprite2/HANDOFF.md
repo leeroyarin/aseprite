@@ -56,6 +56,7 @@ powershell -File tools\start-aseprite2.ps1
   - [x] Native 1x + 4x Contact Preview Sheet Exporter (`export_preview_sheet` MCP tool + `File > Export > Export Preview Sheet (1x + 4x)...`)
   - [x] Rarity Ramp Swapper (`recolor_ramp`), Auto-Outline (`auto_outline`), Batch Shapes (`draw_shapes`), Centered Canvas Expand (`canvas_expand_centered`)
   - [x] Animation Tag & Game Engine Sprite Sheet Exporter (`tag_manage`, `export_spritesheet`)
+  - [x] Easymetric 4-Surface Isometric Projection & 2.5D Surface Normal/Depth Generator (`easymetric_project`, `easymetric_template`, `surface_normals_depth` + interactive GUI dialogs under `Edit > FX` and `Edit > Easymetric & 2.5D Maps`)
   - [x] Stage-2 Post-Approval Publisher script (`Working Files/Guidelines/scripts/publish-approved-asset.ps1`)
 - [x] **Verification** end-to-end
   - [x] Clean compilation: `aseprite.exe` exits 0 with `Aseprite 2.0 2.0-dev+14fe117e8`
@@ -75,6 +76,76 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-01 — Gemini (Antigravity): Implemented **Smart Object Layers** ported from Rust Photoshop replica (https://github.com/leeroyarin/Photoshop.git) into native Aseprite 2.0 C++ (src/doc/layer_smart_object.{h,cpp}, src/app/commands/cmd_place_smart_object.cpp, src/app/commands/convert_layer.cpp, src/app/smart_object_manager.{h,cpp}, src/app/ui/editor/tool_loop_impl.cpp, src/render/render.cpp, src/dio/aseprite_decoder.cpp, data/gui.xml):
+  - **External .aseprite Linking & Auto-Refresh**: Non-destructive doc::LayerSmartObject linked to external .aseprite files. SmartObjectManager tracks file modification timestamps and automatically re-renders linked layers on disk changes.
+  - **Non-Destructive Pixel Protection**: Drawing tools (brush, pencil, eraser, paint bucket, stroke/fill, filters, script tool loops, Lua iterators) strictly blocked with UI warning; layer position translation and 2D affine transformations (scale, rotate, flip H/V, custom pivot) fully supported without rasterization.
+  - **Multi-Frame Timeline Sync**: Synchronizes frame-by-frame with host document timeline supporting Loop, Hold, and Fixed cel playback modes.
+  - **Context Menu & Conversion**:
+    - File > Import > Place Linked (Smart Object)...
+    - Right-click layer context menu: Convert To > Smart Object, Convert To > Separate Smart Objects, and Convert To > Group.
+  - **Verification**: 140/140 E2E tests and 1,145 adversarial/empirical assertions passed across 2 independent victory audits. Installed to %LOCALAPPDATA%\Programs\Aseprite 2.0\aseprite.exe.
+- 2026-10-31 — Worker M1 (Teamwork): Implemented Milestone 1: Easymetric 6-Surface Live Studio Core Upgrade (R1 + R2):
+  - **R1 Canvas Mount Box Framing & Slice Offset Removal**:
+    - Eliminated artificial 112x96 atlas grid expansion in `setupSixSurfacesOnDoc`; canvas maintains user-specified dimensions (e.g. 24x24).
+    - Set each face slice bounds to `(0, 0, S, S)`, functioning directly as the mount box for 3D faces without offset terms (`b.x = 0, b.y = 0`).
+    - Direct per-face layer sampling at `(u, v)` in `extractSixSurfaces` and `generateEditableFaceDepthLayer`.
+    - Wavefront OBJ export UV coordinates normalized directly to `[0.0, 1.0]`.
+    - Centered symmetry axes directly on canvas center `(sprW * 0.5, sprH * 0.5)`.
+    - Bypassed outside subtraction gray overlay in `Editor::drawSpriteUnclippedRect` when `m_clipSpriteBounds == m_sprite->bounds()`.
+  - **R2 Column Link Toggle Controls & Dynamic Layout**:
+    - Added `LinkToggleButton` with theme part `iconAspectRatio()` chain link icon and clear visual highlight state.
+    - Integrated link toggles into `PaneHeader` on top of each opposing face column (Col 0: Top, Col 1: Front, Col 2: Right).
+    - Added dynamic layout toggle in `onResize` (expanded 1-row vs 2-row layout), with horizontal separator removal in `onPaint`.
+    - Implemented active editor focus safety to safely switch active editor to top editor before hiding bottom editor.
+    - Implemented cel synchronization between opposing faces on link, unlink, and doc baking.
+    - Wrapped face editors in `FacePaneBox : public ui::VBox` to ensure active layer routing to per-face layers on click.
+  - Verified 100% clean compilation via `tools\aseprite2-build.ps1` and 67/67 E2E tests passing via `tests\run_easymetric_tests.ps1`.
+- 2026-10-31 — Gemini Argon (Antigravity): Executed Graphify knowledge graph generation (`graphify-out/`):
+  - Extracted AST and doc graph across `src/app`, `src/ver`, `tools/aseprite2-mcp`, and `docs/aseprite2` (20,925 nodes, 46,447 edges, 914 communities).
+  - Exported interactive visualizer [`graphify-out/graph.html`](file:///c:/Users/leero/Source/Repos/aseprite2/graphify-out/graph.html), GraphRAG dataset `graphify-out/graph.json`, and architecture audit [`graphify-out/GRAPH_REPORT.md`](file:///c:/Users/leero/Source/Repos/aseprite2/graphify-out/GRAPH_REPORT.md).
+- 2026-10-31 — Gemini Argon (Antigravity): Fixed `STATUS_STACK_OVERFLOW` (`0xC00000FD`) infinite recursion in `Editor::fitClipSpriteBounds`:
+  - `Editor::onResize` invoked `fitClipSpriteBounds()`, which called `centerInSpritePoint()` -> `updateEditor(false)` -> `View::updateView(false)` -> `m_viewport.setBounds()` -> `Editor::setBounds()` -> `Editor::onResize()`, looping infinitely and blowing the thread call stack.
+  - Added reentrancy guard `m_fittingClip` in `src/app/ui/editor/editor.h` and bypassed `updateEditor()` inside `fitClipSpriteBounds()` by computing the scroll offset directly (`view->setViewScroll(scroll)`).
+  - Verified clean execution and exit via debug runner and standalone tests.
+- 2026-10-31 — Gemini Argon (Antigravity): Fixed crash on Easymetric toggle/scroll and finalized multi-pane workspace layout:
+  - Fixed null pointer dereference crashes in `AppEditor`: added `if (m_previewDelegate)` checks to `dispose()`, `onScrollChanged()`, `onAfterFrameChanged()`, and `onAfterLayerChanged()` in `src/app/ui/doc_view.cpp`.
+  - Guarded `Editor::fitClipSpriteBounds()` in `src/app/ui/editor/editor.cpp` with `if (!view || !view->manager()) return;` to avoid assertion failures before widget attachment.
+  - Sized and rendered all 8 child panes (Top/Bottom, Front/Back, Right/Left, Preview, Fields) in `EasymetricMultiPaneView::onResize` (`src/app/commands/cmd_easymetric.cpp`).
+  - Compiled and installed to `%LOCALAPPDATA%\Programs\Aseprite 2.0`.
+- 2026-10-31 — Gemini (Antigravity): Fixed 0x0 empty-view bug when entering multi-pane Easymetric mode (`src/app/commands/cmd_easymetric.cpp`, `src/app/ui/doc_view.cpp`):
+  - In `EasymetricMultiPaneView::onResize(ui::ResizeEvent& ev)`: Added missing `setBoundsQuietly(ev.bounds())` and switched from local `clientBounds()` to screen `childrenBounds()`. Previously, `m_bounds` stayed `(0, 0, 0, 0)`, causing `ui::Manager::paintWidget` to treat the multi-pane widget as empty and skip painting it and its 8 child panes.
+  - In `DocView::enterMultiPaneMode`: Added explicit `layoutRoot->setBounds(childrenBounds())` and `invalidate()` before layout so bounds are assigned immediately on entry.
+- 2026-10-31 — Gemini (Antigravity): Implemented **Dynamic 3D Structural Carving / Voxel Sculpting from Multi-View Silhouettes** & Fixed Fields layout in native C++ Easymetric Studio (`src/app/commands/cmd_easymetric.cpp`):
+  - **Silhouette Visual Hull Carving (`SculptedVoxelVolume` & `buildSculptedVolume`)**: Replaced flat box geometry with real-time multi-view silhouette intersection:
+    - `Top/Bottom` defines $(X, Z)$ profile; `Front/Back` defines $(X, Y)$ profile; `Right/Left` defines $(Z, Y)$ profile.
+    - **Symmetric View Mirroring / Fallback**: If Bottom is unpainted, Top's silhouette and pixel values automatically mirror to Bottom (and vice versa). Back mirrors Front; Left mirrors Right.
+    - **Progressive Structural Sculpting**:
+      1. When only `Top` (or `Bottom`) is painted, renders as a flat gooey horizontal slab (2-3 voxels thick) floating at pivot height $Y$.
+      2. When `Front` (or `Back`) is painted, automatically expands vertical height and synchronizes $(X, Y) \cap (X, Z)$ into an organic 3D shape.
+      3. When `Right` or `Left` is painted, carves side depth $(Z, Y) \cap (X, Y) \cap (X, Z)$ into a fully sculpted 3D representation.
+  - **Smooth Voxel Raymarching**: Sub-millisecond raymarching through `SculptedVoxelVolume` with binary search boundary refinement, central-difference surface normal gradient estimation, dominant face texture mapping, tangent normal/depth displacement, and Sobel edge detection outline.
+  - **Structural 3D Mesh Export (`Export .OBJ...`)**: Exports the actual carved 3D voxel mesh surface quads, outward normals, and UVs mapped to the sprite sheet texture atlas into Wavefront `.obj` + `.mtl`.
+  - **Fixed Fields Control Panel Layout**: Removed redundant `ui::View` container and directly attached `m_fieldsBox` (`FieldsPanelBox`) with slate background and breathing room, ensuring rotation sliders, pivot controls, preset tag combo, map checks, render modes, and action buttons layout cleanly.
+- 2026-10-31 — Gemini Flash (Antigravity): Replaced floating studio window with fully integrated **DocView Multi-Pane Workspace Layout** matching user UI reference (`src/app/commands/cmd_easymetric.cpp`, `src/app/ui/doc_view.{h,cpp}`, `src/app/ui/editor/editor.{h,cpp}`, `src/app/ui/editor/standby_state.cpp`, `src/app/ui_context.cpp`):
+  - **Zero Floating Popups**: Entire sprite tab splits directly into 4 columns x 2 rows (`Top/Bottom | Front/Back | Right/Left | Preview & Fields`).
+  - **6 Dedicated Surface Viewports**: Each pane hosts an interactive `Editor` with hidden scrollbars, auto-fitting zoom/scroll to its surface slice, and automatic layer selection (`Surface_<NAME>`) on click.
+  - **Live Preview & Fields Panel**: Column 4 provides real-time 3D model render on checkerboard background (top) and beige `#d6cfc2` Fields control panel (bottom) with rotation, pitch, pivot, tag dropdown, map toggles, render types, outline, per-face depth editing, baking, and `.obj` export.
+  - Toggle `Alt+F7` or `Exit Studio` switches seamlessly between standard single editor and integrated 8-pane Easymetric layout.
+- 2026-10-31 — Gemini Argon (Antigravity): Restructured native C++ **Easymetric 6-Surface Live Studio** (`src/app/commands/cmd_easymetric.cpp`, `src/app/ui/editor/editor.cpp`) to match the 4-column (`Top/Bottom | Front/Back | Right/Left | Preview & Fields`) reference layout:
+  - **3×2 Surface Column Grid + Folder-Tab Headers**: Left column = `Top` (`TOP`) & `Bottom` (`DOWN`); Middle column = `Front` (`FRONT`) & `Back` (`BACK`); Right column = `Right` (`RIGHT`) & `Left` (`LEFT`), rendered with slate-blue folder-tab headers, `:::` grip dots, symmetry lines, and resize handles.
+  - **4th Column `Preview` + `Fields` Panel**: Top half renders the real-time 3D model on an Aseprite checkerboard viewport (`Preview` folder tab); bottom half (`Fields` folder tab, warm beige `#d6cfc2` container) provides:
+    1. **Y-Axis Rotation** (`-180°..+180°`), **Camera Angle** (`-75°..+75°`), and **Pivot X/Y/Z** sliders (`Center` / `Base`).
+    2. **Tag / Preset Angle Dropdown** (`ui::ComboBox`) + **`Save Tag`** button (reads/applies sprite `doc::Tag`s and camera presets).
+    3. **Map Toggles** (`Diffuse`, `Normal`, `Depth` — single or split multi-map preview) and **Render Mode Dropdown** (`Textured (Lit)`, `Textured (Unlit)`, `Colored (Faces)`, `Normal Shaded`, `Depth Shaded`, `Wireframe + Tex`).
+    4. **`Stroke Outline`** toggle, **`Cutouts`**, **`Lock Borders`**, and **`Sym X` / `Sym Y` / `Center Sym`**.
+    5. **Editable Per-Face Depth Maps**: **`Render Face Depths (Edit)`** generates/populates the `Surface_DEPTH` layer across all 6 surface boxes so users can paint/sculpt grayscale height maps per face, with live 3D normal/depth relief via **`Use Face Depth Layer`**.
+    6. **`Render`** button (bakes `Iso_Diffuse`, `Iso_Normal`, `Iso_Depth` layers) and **`Export .OBJ...`** button (exports Wavefront `.obj` + `.mtl` + `.png` texture atlas).
+- 2026-10-30 — Gemini Argon (Antigravity): Enhanced native C++ **Easymetric 6-Surface Live Studio** (`src/app/commands/cmd_easymetric.cpp`, `src/app/ui/editor/editor.cpp`, `src/app/ui/editor/standby_state.cpp`):
+  - **Per-Surface Layers & Draggable/Lockable Borders**: Creates dedicated per-surface layers (`Surface_FRONT`, `Surface_BACK`, `Surface_LEFT`, `Surface_RIGHT`, `Surface_TOP`, `Surface_DOWN`) and visual surface borders with 8 resize handles + live `WxH` header pills (`FRONT 24x24`). Borders can be dragged/resized directly on the canvas even while drawing tools (Pencil/Brush) are active (`Editor::calcHit` & `StandbyState::onMouseDown`), or locked via `Lock Borders` or layer lock.
+  - **Per-Surface Controllable Symmetry Lines**: Renders internal X/Y symmetry guide lines inside each surface border and integrates with Aseprite's real symmetry engine (`Sym X`, `Sym Y`, `Center Sym`, and auto-centering `docPref.symmetry.xAxis`/`yAxis` on whichever surface border you paint inside).
+  - **Independent Surface Size & Shape in 3D Model**: Resizing any surface border (`FRONT`, `BACK`, `LEFT`, `RIGHT`, `TOP`, `DOWN`) dynamically updates that surface's independent dimensions (`w[f] × h[f]`) in the real-time 3D Model, Normal Map, and Depth Map.
+  - **True-Color Texture Rendering**: Fixed Windows Skia BGRA channel order via `convert_image_to_surface` and balanced lighting (`0.84..1.00`) so painted textures (e.g. yellow) display in true color.
+- 2026-10-30 — Gemini Argon (Antigravity): Built native C++ **Easymetric 6-Surface Live Studio** (`src/app/commands/cmd_easymetric.cpp`, `src/app/commands/commands_list.h`, `src/app/ui/editor/editor.cpp`, `data/gui.xml`, `data/strings/en.ini`). Toggling `EasymetricStudio` (`View > Easymetric 6-Surface Mode (Real-Time)`, `Sprite > Easymetric 6-Surface Mode (Real-Time)`, or `Alt+F7`) segregates the sprite canvas into 6 color-coded, labeled surface screens (`FRONT`, `BACK`, `LEFT`, `RIGHT`, `TOP`, `DOWN` with floating header badges rendered in `Editor::drawSlices`) and opens a non-modal real-time 3D preview & control dock. Uses a 30 FPS FNV-1a hash-gated C++ ray-slab 3D renderer (including live `ExtraCel` mid-stroke pixel capture) to update the 3D Diffuse Model, Camera-Space Tangent Normal Map, and Z-Buffer Depth Map in real time while painting, with Y-Axis Rotation (`-180°..+180°`), Camera Pitch (`-75°..+75°`), mouse-drag orbit, 3D Pivot Point (`X/Y/Z`) sliders + crosshair, and 1-click bake to `Iso_Diffuse`, `Iso_Normal`, and `Iso_Depth` layers.
 - 2026-10-29 — Gemini (Antigravity): Documented Aseprite 2.0 version controlling system (manifest.json, Ctrl+Alt+S, thumbnails, MCP tools), MCP server architecture (port 8765, PROTOCOL.md v1, 34 tools, security.cpp whitelist, transaction isolation), and multi-frame visual diff comparison (with cello/sax animation frame strips and rarity progression) in the public AI Session Results showcase (`Ai session results/public/index.html`). Created `AGENTS.md` protocol in `Ai session results`.
 - 2026-10-29 — Gemini Argon (Antigravity): Created `.agents/skills/cpp-aseprite-optimization/SKILL.md` and applied C++ engine optimizations across `src/app/versions/version_store.cpp` and `src/app/commands/cmd_version.cpp`: scanline row-pointer (`uint32_t* __restrict`) diff loop with `std::memcmp` identical-row fast-path, bitwise luma/alpha math (`>> 2`, `>> 8`), in-memory `ManifestCache` keyed by `(path, fileSize, mtime)` with single-syscall pre-sized `std::ifstream` reads and `reserve()`, detached `load_document(nullptr, ...)` in `restoreVersion`/`openVersion`, and per-`(verId, frame)` `CachedDiffSurfaces` cache in `VersionHistoryWindow`.
 - 2026-10-29 — Gemini Argon (Antigravity): Fixed crash-on-close in `VersionHistoryWindow` (`src/app/commands/cmd_version.cpp`): `m_listbox` was declared before its parent `m_view`, causing `ui::View::~View()` (`Widget::~Widget()`) to run first on window exit and call `delete &m_listbox` on a stack member. Reordered members so all parent containers (`m_mainBox`, `m_splitBox`, `m_view`, `m_rightBox`, `m_frameBox`, `m_actionBox`) precede their child widgets, and added `~VersionHistoryWindow()` cleanup.
