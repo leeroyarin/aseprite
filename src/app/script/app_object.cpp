@@ -481,6 +481,14 @@ int App_useTool(lua_State* L)
     return 1;
   }
 
+  // Reject drawing tools when targeting a smart object layer or non-editable layer
+  if (params.ink->isPaint() && site.layer()) {
+    if (site.layer()->isSmartObject())
+      return luaL_error(L, "cannot draw on a smart object layer");
+    if (!site.layer()->canEditPixels())
+      return luaL_error(L, "cannot draw on the active layer");
+  }
+
   // Do the tool loop for other tools
   InlineCommandExecution inlineCmd(ctx);
 

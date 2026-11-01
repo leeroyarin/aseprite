@@ -183,7 +183,7 @@ void Doc::resetUndoHistory()
 
 bool Doc::isUndoing() const
 {
-  return m_undo->isUndoing();
+  return m_undo && (m_undo->isUndoing() || m_undo->isRedoing());
 }
 
 color_t Doc::bgColor() const

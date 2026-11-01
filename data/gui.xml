@@ -144,6 +144,7 @@
       <!-- View -->
       <key command="Refresh" shortcut="F5" />
       <key command="TogglePreview" shortcut="F7" />
+      <key command="EasymetricStudio" shortcut="Alt+F7" />
       <key command="FullscreenPreview" shortcut="F8" />
       <key command="FullscreenMode" shortcut="F11" mac="Cmd+Ctrl+F" />
       <key command="ShowGrid" shortcut="Ctrl+'" mac="Cmd+'" />
@@ -728,6 +729,7 @@
         </menu>
         <menu text="@.file_import" group="file_import">
           <item command="ImportSpriteSheet" text="@.file_import_sprite_sheet" group="file_import_1" />
+          <item command="PlaceSmartObject" text="@.file_import_smart_object" group="file_import_2" />
         </menu>
         <separator id="scripts_menu_separator" />
         <menu id="scripts_menu" text="@.file_scripts" group="file_scripts">
@@ -841,6 +843,7 @@
       </menu>
       <menu text="@.sprite" id="sprite_menu">
         <item command="SpriteProperties" text="@.sprite_properties" group="sprite_properties" />
+        <item command="EasymetricStudio" text="@.view_easymetric_studio" />
         <menu text="@.sprite_color_mode" group="sprite_color">
           <item command="ChangePixelFormat" text="@.sprite_color_mode_rgb">
             <param name="format" value="rgb" />
@@ -925,6 +928,16 @@
           <separator />
           <item command="ConvertLayer" text="@.layer_convert_to_tilemap">
             <param name="to" value="tilemap" />
+          </item>
+          <separator />
+          <item command="ConvertLayer" text="@.layer_convert_to_smart_object">
+            <param name="to" value="smartobject" />
+          </item>
+          <item command="ConvertLayer" text="@.layer_convert_to_separate_smart_objects">
+            <param name="to" value="separatesmartobjects" />
+          </item>
+          <item command="ConvertLayer" text="@.layer_convert_to_group">
+            <param name="to" value="group" />
           </item>
         </menu>
         <separator />
@@ -1053,6 +1066,7 @@
           </item>
         </menu>
         <item command="SymmetryMode" text="@.view_symmetry_options" group="view_canvas_helpers" />
+        <item command="EasymetricStudio" text="@.view_easymetric_studio" />
         <separator />
         <item command="SetLoopSection" text="@.view_set_loop_section" />
         <item command="ShowOnionSkin" text="@.view_show_onion_skin" group="view_animation_helpers" />
@@ -1161,6 +1175,16 @@
         <separator />
         <item command="ConvertLayer" text="@main_menu.layer_convert_to_tilemap">
           <param name="to" value="tilemap" />
+        </item>
+        <separator />
+        <item command="ConvertLayer" text="@main_menu.layer_convert_to_smart_object">
+          <param name="to" value="smartobject" />
+        </item>
+        <item command="ConvertLayer" text="@main_menu.layer_convert_to_separate_smart_objects">
+          <param name="to" value="separatesmartobjects" />
+        </item>
+        <item command="ConvertLayer" text="@main_menu.layer_convert_to_group">
+          <param name="to" value="group" />
         </item>
       </menu>
       <separator />

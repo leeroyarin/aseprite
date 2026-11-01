@@ -49,6 +49,7 @@ add_library(doc-lib
   layer.cpp
   layer_io.cpp
   layer_list.cpp
+  layer_smart_object.cpp
   layer_tilemap.cpp
   mask.cpp
   mask_boundaries.cpp

@@ -20,6 +20,7 @@
 #include "app/script/luacpp.h"
 #include "app/script/userdata.h"
 #include "doc/cel.h"
+#include "doc/layer.h"
 #include "doc/sprite.h"
 
 namespace app { namespace script {
@@ -110,6 +111,9 @@ int Cel_set_frame(lua_State* L)
   if (cel->frame() == frame)
     return 0;
 
+  if (cel->layer() && (cel->layer()->isSmartObject() || !cel->layer()->canEditPixels()))
+    return luaL_error(L, "cannot move cel on a smart object layer");
+
   Doc* doc = static_cast<Doc*>(cel->document());
   Tx tx(doc);
   DocApi api = doc->getApi(tx);
@@ -121,6 +125,9 @@ int Cel_set_frame(lua_State* L)
 int Cel_set_image(lua_State* L)
 {
   auto cel = get_docobj<Cel>(L, 1);
+  if (cel->layer() && (cel->layer()->isSmartObject() || !cel->layer()->canEditPixels()))
+    return luaL_error(L, "cannot modify cel image on a smart object layer");
+
   Tx tx(cel->sprite());
   if (may_get_obj<Image>(L, 2)) {
     const auto* srcImage = get_image_from_arg(L, 2);

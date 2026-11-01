@@ -20,6 +20,8 @@ public:
   Document();
   ~Document();
 
+  virtual bool isUndoing() const { return false; }
+
   const Sprites& sprites() const { return m_sprites; }
   Sprites& sprites() { return m_sprites; }
 

@@ -944,6 +944,13 @@ tools::ToolLoop* create_tool_loop(Editor* editor,
         Strings::statusbar_tips_unmodifiable_reference_layer(layer->name()));
       return nullptr;
     }
+    // If the active layer is smart object.
+    else if (layer->isSmartObject()) {
+      StatusBar::instance()->showTip(
+        1000,
+        Strings::statusbar_tips_unmodifiable_smart_object_layer(layer->name()));
+      return nullptr;
+    }
   }
 
   // Get fg/bg colors
@@ -1016,6 +1023,11 @@ tools::ToolLoop* create_tool_loop_for_script(Context* context,
   ASSERT(params.ink);
   if (!site.layer())
     return nullptr;
+
+  if (params.ink->isPaint() &&
+      (site.layer()->isSmartObject() || !site.layer()->canEditPixels())) {
+    return nullptr;
+  }
 
   try {
     // If we don't have the UI available, we reset the tools
@@ -1126,7 +1138,7 @@ tools::ToolLoop* create_tool_loop_preview(Editor* editor,
 
   Layer* layer = editor->layer();
   if (!layer || !layer->isVisibleHierarchy() || !layer->isEditableHierarchy() ||
-      layer->isReference()) {
+      layer->isReference() || layer->isSmartObject()) {
     return nullptr;
   }
 

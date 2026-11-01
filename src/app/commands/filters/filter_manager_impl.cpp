@@ -70,7 +70,7 @@ FilterManagerImpl::FilterManagerImpl(Context* context, Filter* filter)
 {
   int x, y;
   Image* image = m_site.image(&x, &y);
-  if (!image || (m_site.layer() && m_site.layer()->isReference()))
+  if (!image || (m_site.layer() && (m_site.layer()->isReference() || m_site.layer()->isSmartObject())))
     throw NoImageException();
 
   init(m_site.cel());

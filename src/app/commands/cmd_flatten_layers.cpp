@@ -48,7 +48,43 @@ void FlattenLayersCommand::onLoadParams(const Params& params)
 
 bool FlattenLayersCommand::onEnabled(Context* context)
 {
-  return context->checkFlags(ContextFlags::ActiveDocumentIsWritable);
+  if (!context->checkFlags(ContextFlags::ActiveDocumentIsWritable))
+    return false;
+
+  const ContextReader reader(context);
+  const Sprite* sprite = reader.sprite();
+  if (!sprite)
+    return false;
+
+  const Site& site = context->activeSite();
+  const DocRange& range = site.range();
+
+  if (m_visibleOnly) {
+    for (const Layer* layer : sprite->allVisibleLayers()) {
+      if (layer->isSmartObject())
+        return false;
+    }
+  }
+  else if (range.enabled() && range.selectedLayers().size() > 1) {
+    for (const Layer* layer : range.selectedLayers()) {
+      if (layer->isSmartObject())
+        return false;
+      LayerList childLayers;
+      layer->allLayers(childLayers);
+      for (const Layer* child : childLayers) {
+        if (child->isSmartObject())
+          return false;
+      }
+    }
+  }
+  else {
+    for (const Layer* layer : sprite->allLayers()) {
+      if (layer->isSmartObject())
+        return false;
+    }
+  }
+
+  return true;
 }
 
 void FlattenLayersCommand::onExecute(Context* context)
@@ -77,6 +113,18 @@ void FlattenLayersCommand::onExecute(Context* context)
           range.selectLayer(layer);
       }
     }
+
+    for (Layer* layer : range.selectedLayers()) {
+      if (layer->isSmartObject())
+        return;
+      LayerList childLayers;
+      layer->allLayers(childLayers);
+      for (Layer* child : childLayers) {
+        if (child->isSmartObject())
+          return;
+      }
+    }
+
     const bool newBlend = Preferences::instance().experimental.newBlend();
     cmd::FlattenLayers::Options options;
     options.newBlendMethod = newBlend;

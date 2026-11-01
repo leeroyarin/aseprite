@@ -27,11 +27,13 @@ template<typename ImageTraits>
 struct ImageIteratorObj {
   typename doc::LockImageBits<ImageTraits> bits;
   typename doc::LockImageBits<ImageTraits>::iterator begin, next, end;
-  ImageIteratorObj(const doc::Image* image, const gfx::Rect& bounds)
+  bool readOnly;
+  ImageIteratorObj(const doc::Image* image, const gfx::Rect& bounds, bool readOnly = false)
     : bits(image, bounds)
     , begin(bits.begin())
     , next(begin)
     , end(bits.end())
+    , readOnly(readOnly)
   {
   }
   ImageIteratorObj(const ImageIteratorObj&) = delete;
@@ -61,6 +63,8 @@ int ImageIterator_call(lua_State* L)
   }
   // Set value
   else {
+    if (obj->readOnly)
+      return luaL_error(L, "cannot modify pixels on a smart object layer");
     *obj->begin = lua_tointeger(L, 2);
     return 1;
   }
@@ -136,7 +140,7 @@ static int image_iterator_do_nothing(lua_State* L)
   return 1;
 }
 
-int push_image_iterator_function(lua_State* L, const doc::Image* image, int extraArgIndex)
+int push_image_iterator_function(lua_State* L, const doc::Image* image, int extraArgIndex, bool readOnly)
 {
   gfx::Rect bounds = image->bounds();
 
@@ -153,19 +157,19 @@ int push_image_iterator_function(lua_State* L, const doc::Image* image, int extr
 
   switch (image->pixelFormat()) {
     case IMAGE_RGB:
-      push_new<RgbImageIterator>(L, image, bounds);
+      push_new<RgbImageIterator>(L, image, bounds, readOnly);
       lua_pushcclosure(L, image_iterator_step_closure<doc::RgbTraits>, 1);
       return 1;
     case IMAGE_GRAYSCALE:
-      push_new<GrayscaleImageIterator>(L, image, bounds);
+      push_new<GrayscaleImageIterator>(L, image, bounds, readOnly);
       lua_pushcclosure(L, image_iterator_step_closure<doc::GrayscaleTraits>, 1);
       return 1;
     case IMAGE_INDEXED:
-      push_new<IndexedImageIterator>(L, image, bounds);
+      push_new<IndexedImageIterator>(L, image, bounds, readOnly);
       lua_pushcclosure(L, image_iterator_step_closure<doc::IndexedTraits>, 1);
       return 1;
     case IMAGE_TILEMAP:
-      push_new<TilemapImageIterator>(L, image, bounds);
+      push_new<TilemapImageIterator>(L, image, bounds, readOnly);
       lua_pushcclosure(L, image_iterator_step_closure<doc::TilemapTraits>, 1);
       return 1;
     default: return 0;

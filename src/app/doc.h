@@ -103,7 +103,7 @@ public:
   DocUndo* undoHistory() { return m_undo.get(); }
   void resetUndoHistory();
 
-  bool isUndoing() const;
+  bool isUndoing() const override;
 
   color_t bgColor() const;
   color_t bgColor(Layer* layer) const;

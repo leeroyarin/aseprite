@@ -22,6 +22,7 @@
 #include "dio/file_interface.h"
 #include "dio/pixel_io.h"
 #include "doc/doc.h"
+#include "doc/layer_smart_object.h"
 #include "doc/util.h"
 #include "fixmath/fixmath.h"
 #include "fmt/format.h"
@@ -265,7 +266,7 @@ bool AsepriteDecoder::decode()
                   else
                     last_object_with_user_data = nullptr;
                   break;
-                case ObjectType::Tileset:
+                case ObjectType::Tileset: {
                   // Read tiles user datas.
                   // TODO: Should we refactor how tile user data is handled so we can actually
                   // decode this user data chunks the same way as the user data chunks for
@@ -274,6 +275,11 @@ bool AsepriteDecoder::decode()
                   readTilesData(tileset, extFiles);
                   last_object_with_user_data = nullptr;
                   break;
+                }
+                case ObjectType::LayerSmartObject: {
+                  static_cast<LayerSmartObject*>(last_object_with_user_data)->readPropertiesFromUserData();
+                  break;
+                }
               }
             }
             break;
@@ -560,7 +566,12 @@ Layer* AsepriteDecoder::readLayerChunk(AsepriteHeader* header,
 
   Layer* layer = nullptr;
   switch (layer_type) {
-    case ASE_FILE_LAYER_IMAGE:   layer = new LayerImage(sprite); break;
+    case ASE_FILE_LAYER_IMAGE:
+      if (flags & static_cast<int>(doc::LayerFlags::SmartObject))
+        layer = new doc::LayerSmartObject(sprite, "");
+      else
+        layer = new LayerImage(sprite);
+      break;
 
     case ASE_FILE_LAYER_GROUP:   layer = new LayerGroup(sprite); break;
 

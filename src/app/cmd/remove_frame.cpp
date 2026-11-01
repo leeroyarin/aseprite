@@ -14,6 +14,7 @@
 #include "app/doc.h"
 #include "app/doc_event.h"
 #include "doc/cels_range.h"
+#include "doc/layer.h"
 #include "doc/sprite.h"
 
 namespace app { namespace cmd {
@@ -27,8 +28,11 @@ RemoveFrame::RemoveFrame(Sprite* sprite, frame_t frame)
   , m_frameRemoved(false)
 {
   m_frameDuration = sprite->frameDuration(frame);
-  for (Cel* cel : sprite->cels(m_frame))
+  for (Cel* cel : sprite->cels(m_frame)) {
+    if (cel->layer() && cel->layer()->isSmartObject())
+      continue;
     m_seq.add(new cmd::RemoveCel(cel));
+  }
 }
 
 void RemoveFrame::onExecute()

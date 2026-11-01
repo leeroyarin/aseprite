@@ -38,6 +38,7 @@
 #include "doc/cel.h"
 #include "doc/image.h"
 #include "doc/image_ref.h"
+#include "doc/layer.h"
 #include "doc/primitives.h"
 #include "doc/sprite.h"
 #include "render/render.h"
@@ -217,6 +218,21 @@ int Image_gc(lua_State* L)
   return 0;
 }
 
+bool can_image_be_mutated(lua_State* L, ImageObj* obj)
+{
+  if (auto cel = obj->cel(L)) {
+    if (cel->layer() && (cel->layer()->isSmartObject() || !cel->layer()->canEditPixels()))
+      return false;
+  }
+  return true;
+}
+
+void check_image_can_be_mutated(lua_State* L, ImageObj* obj)
+{
+  if (!can_image_be_mutated(L, obj))
+    luaL_error(L, "cannot modify pixels on a smart object layer");
+}
+
 int Image_eq(lua_State* L)
 {
   const auto a = get_obj<ImageObj>(L, 1);
@@ -228,6 +244,7 @@ int Image_eq(lua_State* L)
 int Image_clear(lua_State* L)
 {
   auto obj = get_obj<ImageObj>(L, 1);
+  check_image_can_be_mutated(L, obj);
   auto img = obj->image(L);
   doc::color_t color;
   gfx::Rect rc;
@@ -263,6 +280,7 @@ int Image_clear(lua_State* L)
 int Image_drawPixel(lua_State* L)
 {
   auto obj = get_obj<ImageObj>(L, 1);
+  check_image_can_be_mutated(L, obj);
   auto img = obj->image(L);
   const int x = lua_tointeger(L, 2);
   const int y = lua_tointeger(L, 3);
@@ -286,6 +304,7 @@ int Image_drawPixel(lua_State* L)
 int Image_drawImage(lua_State* L)
 {
   auto obj = get_obj<ImageObj>(L, 1);
+  check_image_can_be_mutated(L, obj);
   auto sprite = get_obj<ImageObj>(L, 2);
   gfx::Point pos = convert_args_into_point(L, 3);
 
@@ -356,6 +375,7 @@ int Image_drawImage(lua_State* L)
 int Image_drawSprite(lua_State* L)
 {
   auto obj = get_obj<ImageObj>(L, 1);
+  check_image_can_be_mutated(L, obj);
   const auto sprite = get_docobj<Sprite>(L, 2);
   doc::frame_t frame = get_frame_number_from_arg(L, 3);
   gfx::Point pos = convert_args_into_point(L, 4);
@@ -390,7 +410,7 @@ int Image_drawSprite(lua_State* L)
 int Image_pixels(lua_State* L)
 {
   auto obj = get_obj<ImageObj>(L, 1);
-  push_image_iterator_function(L, obj->image(L), 2);
+  push_image_iterator_function(L, obj->image(L), 2, !can_image_be_mutated(L, obj));
   return 1;
 }
 
@@ -520,6 +540,7 @@ int Image_saveAs(lua_State* L)
 int Image_resize(lua_State* L)
 {
   auto obj = get_obj<ImageObj>(L, 1);
+  check_image_can_be_mutated(L, obj);
   doc::Image* img = obj->image(L);
   Cel* cel = obj->cel(L);
   ASSERT(img);
@@ -628,6 +649,7 @@ int Image_shrinkBounds(lua_State* L)
 int Image_flip(lua_State* L)
 {
   auto obj = get_obj<ImageObj>(L, 1);
+  check_image_can_be_mutated(L, obj);
   doc::Image* img = obj->image(L);
   doc::algorithm::FlipType flipType = doc::algorithm::FlipType::FlipHorizontal;
   if (lua_isinteger(L, 2))
@@ -681,7 +703,9 @@ int Image_get_bytes(lua_State* L)
 
 int Image_set_bytes(lua_State* L)
 {
-  const auto img = get_obj<ImageObj>(L, 1)->image(L);
+  auto obj = get_obj<ImageObj>(L, 1);
+  check_image_can_be_mutated(L, obj);
+  const auto img = obj->image(L);
   size_t bytes_size, bytes_needed = img->rowBytes() * img->height();
   const char* bytes = lua_tolstring(L, 2, &bytes_size);
 
@@ -742,6 +766,7 @@ int Image_get_context(lua_State* L)
 {
 #if LAF_SKIA
   auto* obj = get_obj<ImageObj>(L, 1);
+  check_image_can_be_mutated(L, obj);
 
   if (!obj->context) {
     auto surface = wrap_docimage_in_surface(obj->image(L));

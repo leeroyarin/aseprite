@@ -223,7 +223,8 @@ bool Layer::canEditPixels() const
   const Layer* layer = this;
   while (layer) {
     if (!layer->isVisible() || !layer->isEditable() ||
-        layer->isReference()) { // Cannot edit pixels from reference layers
+        layer->isReference() ||
+        layer->isSmartObject()) { // Cannot edit pixels from reference layers or smart objects
       return false;
     }
     layer = layer->parent();
@@ -347,6 +348,12 @@ void Layer::removeCel(Cel* cel)
   ASSERT(cel);
   CelIterator it = findCelIterator(cel->frame());
   ASSERT(it != m_cels.end());
+  while (it != m_cels.end() && (*it)->frame() == cel->frame()) {
+    if (*it == cel)
+      break;
+    ++it;
+  }
+  ASSERT(it != m_cels.end() && *it == cel);
 
   m_cels.erase(it);
 

@@ -44,6 +44,7 @@ enum class LayerFlags {
   Continuous = 16, // Prefer to link cels when the user copy them
   Collapsed = 32,  // Prefer to show this group layer collapsed
   Reference = 64,  // Is a reference layer
+  SmartObject = 128, // Is a smart object layer (0x80)
 
   PersistentFlagsMask = 0xffff,
   Internal_WasVisible = 0x10000, // Was visible in the alternative state (Alt+click)
@@ -52,7 +53,7 @@ enum class LayerFlags {
 
   // Flags that change the modified flag of the document
   // (e.g. created by undoable actions).
-  StructuralFlagsMask = Background | Reference,
+  StructuralFlagsMask = Background | Reference | SmartObject,
 };
 LAF_ENUM_FLAGS(LayerFlags);
 
@@ -91,11 +92,17 @@ public:
 
   bool isImage() const
   {
-    return (type() == ObjectType::LayerImage || type() == ObjectType::LayerTilemap);
+    return (type() == ObjectType::LayerImage ||
+            type() == ObjectType::LayerTilemap ||
+            type() == ObjectType::LayerSmartObject);
   }
   bool hasSublayers() const { return !m_layers.empty(); }
   bool isGroup() const { return type() == ObjectType::LayerGroup; }
   bool isTilemap() const { return type() == ObjectType::LayerTilemap; }
+  bool isSmartObject() const
+  {
+    return (type() == ObjectType::LayerSmartObject || hasFlags(LayerFlags::SmartObject));
+  }
   bool isBrowsable() const { return isExpanded() && !m_layers.empty(); }
   bool isBackground() const { return hasFlags(LayerFlags::Background); }
   bool isTransparent() const { return !hasFlags(LayerFlags::Background); }
@@ -113,6 +120,8 @@ public:
   bool hasAncestor(const Layer* ancestor) const;
   bool acceptCels() const { return !isGroup(); }
 
+  void setUserData(const UserData& userData) override { WithUserData::setUserData(userData); }
+
   void setBackground(bool state) { switchFlags(LayerFlags::Background, state); }
   void setVisible(bool state) { switchFlags(LayerFlags::Visible, state); }
   void setEditable(bool state) { switchFlags(LayerFlags::Editable, state); }
@@ -120,6 +129,7 @@ public:
   void setContinuous(bool state) { switchFlags(LayerFlags::Continuous, state); }
   void setCollapsed(bool state) { switchFlags(LayerFlags::Collapsed, state); }
   void setReference(bool state) { switchFlags(LayerFlags::Reference, state); }
+  void setSmartObject(bool state) { switchFlags(LayerFlags::SmartObject, state); }
 
   LayerFlags flags() const { return m_flags; }
 
@@ -158,7 +168,7 @@ public:
 
   // Cels management
 
-  void addCel(Cel* cel);
+  virtual void addCel(Cel* cel);
   void removeCel(Cel* cel);
   void moveCel(Cel* cel, frame_t frame);
 

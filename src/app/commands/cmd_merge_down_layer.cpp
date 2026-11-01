@@ -46,13 +46,13 @@ bool MergeDownLayerCommand::onEnabled(Context* context)
     return false;
 
   const Layer* src_layer = reader.layer();
-  if (!src_layer || !src_layer->isImage() || src_layer->isTilemap()) // TODO Add support to merge
-                                                                     // tilemaps (and groups!)
+  if (!src_layer || !src_layer->isImage() || src_layer->isTilemap() ||
+      src_layer->isSmartObject() || src_layer->isReference())
     return false;
 
   const Layer* dst_layer = src_layer->getPrevious();
-  if (!dst_layer || !dst_layer->isImage() || dst_layer->isTilemap()) // TODO Add support to merge
-                                                                     // tilemaps
+  if (!dst_layer || !dst_layer->isImage() || dst_layer->isTilemap() ||
+      dst_layer->isSmartObject() || dst_layer->isReference())
     return false;
 
   return true;
@@ -63,8 +63,18 @@ void MergeDownLayerCommand::onExecute(Context* context)
   ContextWriter writer(context);
   Doc* document(writer.document());
   Sprite* sprite(writer.sprite());
+  if (!writer.layer() || !writer.layer()->isImage())
+    return;
+
   LayerImage* src_layer = static_cast<LayerImage*>(writer.layer());
   Layer* dst_layer = src_layer->getPrevious();
+  if (!dst_layer || !dst_layer->isImage())
+    return;
+
+  if (src_layer->isSmartObject() || dst_layer->isSmartObject() ||
+      src_layer->isTilemap() || dst_layer->isTilemap() ||
+      src_layer->isReference() || dst_layer->isReference())
+    return;
 
   Tx tx(writer, friendlyName(), ModifyDocument);
 

@@ -17,6 +17,8 @@
 #include "app/doc.h"
 #include "app/doc_api.h"
 #include "app/pref/preferences.h"
+#include "app/file/file.h"
+#include "app/modules/gui.h"
 #include "app/script/blend_mode.h"
 #include "app/script/docobj.h"
 #include "app/script/engine.h"
@@ -24,11 +26,17 @@
 #include "app/script/userdata.h"
 #include "app/tx.h"
 #include "app/ui/timeline/timeline.h"
+#include "base/fs.h"
+#include "base/string.h"
 #include "doc/layer.h"
+#include "doc/layer_smart_object.h"
 #include "doc/layer_tilemap.h"
 #include "doc/sprite.h"
 #include "doc/tileset.h"
 #include "doc/tilesets.h"
+#include "render/dithering.h"
+#include "render/quantization.h"
+#include "render/render.h"
 
 namespace app { namespace script {
 
@@ -258,6 +266,608 @@ int Layer_get_isReference(lua_State* L)
   return 1;
 }
 
+int Layer_get_isSmartObject(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  lua_pushboolean(L, layer->isSmartObject());
+  return 1;
+}
+
+void notify_layer_update(Layer* layer)
+{
+  if (layer && layer->sprite() && layer->sprite()->document()) {
+    Doc* doc = static_cast<Doc*>(layer->sprite()->document());
+    doc->notifyGeneralUpdate();
+  }
+}
+
+gfx::PointF get_point_f(lua_State* L, int index, const gfx::PointF& def = gfx::PointF(0.0, 0.0))
+{
+  gfx::PointF pt = def;
+  if (lua_istable(L, index)) {
+    int type = lua_getfield(L, index, "x");
+    if (VALID_LUATYPE(type) && !lua_isnil(L, -1)) {
+      pt.x = lua_tonumber(L, -1);
+      lua_pop(L, 1);
+      lua_getfield(L, index, "y");
+      if (!lua_isnil(L, -1))
+        pt.y = lua_tonumber(L, -1);
+      lua_pop(L, 1);
+    }
+    else {
+      lua_pop(L, 1);
+      lua_geti(L, index, 1);
+      if (!lua_isnil(L, -1))
+        pt.x = lua_tonumber(L, -1);
+      lua_pop(L, 1);
+      lua_geti(L, index, 2);
+      if (!lua_isnil(L, -1))
+        pt.y = lua_tonumber(L, -1);
+      lua_pop(L, 1);
+    }
+  }
+  else if (lua_isnumber(L, index)) {
+    pt.x = lua_tonumber(L, index);
+    if (lua_isnumber(L, index + 1))
+      pt.y = lua_tonumber(L, index + 1);
+    else
+      pt.y = pt.x;
+  }
+  return pt;
+}
+
+void push_point_f(lua_State* L, const gfx::PointF& pt)
+{
+  lua_createtable(L, 2, 2);
+  lua_pushnumber(L, pt.x);
+  lua_setfield(L, -2, "x");
+  lua_pushnumber(L, pt.y);
+  lua_setfield(L, -2, "y");
+  lua_pushnumber(L, pt.x);
+  lua_rawseti(L, -2, 1);
+  lua_pushnumber(L, pt.y);
+  lua_rawseti(L, -2, 2);
+}
+
+int Layer_get_scale(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject()) {
+    auto sm = static_cast<LayerSmartObject*>(layer);
+    push_point_f(L, sm->scale());
+  }
+  else {
+    push_point_f(L, gfx::PointF(1.0, 1.0));
+  }
+  return 1;
+}
+
+int Layer_set_scale(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject()) {
+    auto sm = static_cast<LayerSmartObject*>(layer);
+    gfx::PointF sc = get_point_f(L, 2, sm->scale());
+    sm->setScale(sc);
+    sm->renderAllCels();
+    notify_layer_update(layer);
+  }
+  return 0;
+}
+
+int Layer_get_angle(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject())
+    lua_pushnumber(L, static_cast<LayerSmartObject*>(layer)->angle());
+  else
+    lua_pushnumber(L, 0.0);
+  return 1;
+}
+
+int Layer_set_angle(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject()) {
+    auto sm = static_cast<LayerSmartObject*>(layer);
+    sm->setAngle(lua_tonumber(L, 2));
+    sm->renderAllCels();
+    notify_layer_update(layer);
+  }
+  return 0;
+}
+
+int Layer_get_flipH(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject())
+    lua_pushboolean(L, static_cast<LayerSmartObject*>(layer)->flipH());
+  else
+    lua_pushboolean(L, false);
+  return 1;
+}
+
+int Layer_set_flipH(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject()) {
+    auto sm = static_cast<LayerSmartObject*>(layer);
+    sm->setFlipH(lua_toboolean(L, 2));
+    sm->renderAllCels();
+    notify_layer_update(layer);
+  }
+  return 0;
+}
+
+int Layer_get_flipV(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject())
+    lua_pushboolean(L, static_cast<LayerSmartObject*>(layer)->flipV());
+  else
+    lua_pushboolean(L, false);
+  return 1;
+}
+
+int Layer_set_flipV(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject()) {
+    auto sm = static_cast<LayerSmartObject*>(layer);
+    sm->setFlipV(lua_toboolean(L, 2));
+    sm->renderAllCels();
+    notify_layer_update(layer);
+  }
+  return 0;
+}
+
+int Layer_get_pivot(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject()) {
+    auto sm = static_cast<LayerSmartObject*>(layer);
+    push_point_f(L, sm->pivot());
+  }
+  else {
+    push_point_f(L, gfx::PointF(0.5, 0.5));
+  }
+  return 1;
+}
+
+int Layer_set_pivot(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject()) {
+    auto sm = static_cast<LayerSmartObject*>(layer);
+    gfx::PointF p = get_point_f(L, 2, sm->pivot());
+    sm->setPivot(p);
+    sm->renderAllCels();
+    notify_layer_update(layer);
+  }
+  return 0;
+}
+
+int Layer_get_smartObjectFilepath(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject())
+    lua_pushstring(L, static_cast<LayerSmartObject*>(layer)->filepath().c_str());
+  else
+    lua_pushnil(L);
+  return 1;
+}
+
+int Layer_set_smartObjectFilepath(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return luaL_error(L, "Cannot set smartObjectFilepath on non-smart layer");
+
+  const char* str = luaL_checkstring(L, 2);
+  if (!str || !*str)
+    return luaL_error(L, "Filepath cannot be empty");
+
+  std::string newPath = base::get_canonical_path(str);
+  if (!base::is_file(newPath))
+    newPath = str;
+
+  // Prevent linking document to itself
+  Doc* doc = (layer->sprite() ? static_cast<Doc*>(layer->sprite()->document()) : nullptr);
+  if (doc && !doc->filename().empty()) {
+    std::string hostCanon = base::get_canonical_path(doc->filename());
+    std::string targetCanon = base::get_canonical_path(str);
+    if (hostCanon == targetCanon || hostCanon == newPath) {
+      return luaL_error(L, "Cannot link smart object to its own host document");
+    }
+  }
+
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  if (sm->filepath() != newPath) {
+    sm->setFilepath(newPath);
+    sm->reloadSource(true);
+    notify_layer_update(layer);
+  }
+  return 0;
+}
+
+int Layer_get_smartObjectLastModified(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isSmartObject())
+    lua_pushinteger(L, static_cast<LayerSmartObject*>(layer)->lastModifiedTime());
+  else
+    lua_pushinteger(L, 0);
+  return 1;
+}
+
+int Layer_set_smartObjectLastModified(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return luaL_error(L, "Cannot set smartObjectLastModified on non-smart layer");
+
+  uint64_t t = static_cast<uint64_t>(luaL_checkinteger(L, 2));
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  sm->setLastModifiedTime(t);
+  return 0;
+}
+
+int Layer_get_smartObjectTimelineMapping(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return lua_pushnil(L), 1;
+
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  switch (sm->timelineMapping()) {
+    case TimelineMapping::Hold:  lua_pushstring(L, "hold"); break;
+    case TimelineMapping::Fixed: lua_pushstring(L, "fixed"); break;
+    case TimelineMapping::Loop:
+    default:                     lua_pushstring(L, "loop"); break;
+  }
+  return 1;
+}
+
+int Layer_set_smartObjectTimelineMapping(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return luaL_error(L, "Cannot set smartObjectTimelineMapping on non-smart layer");
+
+  const char* str = luaL_checkstring(L, 2);
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  if (base::utf8_icmp(str, "hold") == 0)
+    sm->setTimelineMapping(TimelineMapping::Hold);
+  else if (base::utf8_icmp(str, "fixed") == 0)
+    sm->setTimelineMapping(TimelineMapping::Fixed);
+  else
+    sm->setTimelineMapping(TimelineMapping::Loop);
+
+  notify_layer_update(layer);
+  return 0;
+}
+
+int Layer_refreshSmartObject(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject()) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "Layer is not a smart object");
+    return 2;
+  }
+
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  bool force = false;
+  if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
+    force = lua_toboolean(L, 2);
+  }
+
+  bool updated = sm->reloadSource(force);
+  if (updated) {
+    notify_layer_update(layer);
+    lua_pushboolean(L, true);
+    return 1;
+  }
+  else {
+    lua_pushboolean(L, false);
+    if (!base::is_file(sm->filepath()))
+      lua_pushstring(L, "Linked file missing on disk");
+    else
+      lua_pushstring(L, "No changes detected on disk");
+    return 2;
+  }
+}
+
+int Layer_get_linkStatus(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject()) {
+    lua_pushnil(L);
+    return 1;
+  }
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  switch (sm->linkStatus()) {
+    case SmartObjectStatus::Linked:
+      lua_pushstring(L, "Linked");
+      break;
+    case SmartObjectStatus::Outdated:
+      lua_pushstring(L, "Outdated");
+      break;
+    case SmartObjectStatus::Missing:
+      lua_pushstring(L, "Missing");
+      break;
+    case SmartObjectStatus::Broken:
+    default:
+      lua_pushstring(L, "Broken");
+      break;
+  }
+  return 1;
+}
+
+int Layer_get_isDiskFileNewer(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject()) {
+    lua_pushboolean(L, false);
+    return 1;
+  }
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  lua_pushboolean(L, sm->isDiskFileNewer());
+  return 1;
+}
+
+int Layer_get_linkedFrameCount(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject()) {
+    lua_pushinteger(L, 0);
+    return 1;
+  }
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  lua_pushinteger(L, sm->linkedFrameCount());
+  return 1;
+}
+
+int Layer_get_timelineMapping(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return lua_pushnil(L), 1;
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  switch (sm->timelineMapping()) {
+    case TimelineMapping::Hold:
+      lua_pushstring(L, "Hold");
+      break;
+    case TimelineMapping::Fixed:
+      lua_pushstring(L, "Fixed");
+      break;
+    case TimelineMapping::Loop:
+    default:
+      lua_pushstring(L, "Loop");
+      break;
+  }
+  return 1;
+}
+
+int Layer_set_timelineMapping(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return 0;
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  const char* str = lua_tostring(L, 2);
+  if (!str)
+    return 0;
+
+  if (base::utf8_icmp(str, "Hold") == 0)
+    sm->setTimelineMapping(TimelineMapping::Hold);
+  else if (base::utf8_icmp(str, "Fixed") == 0)
+    sm->setTimelineMapping(TimelineMapping::Fixed);
+  else
+    sm->setTimelineMapping(TimelineMapping::Loop);
+
+  notify_layer_update(layer);
+  return 0;
+}
+
+int Layer_get_transform(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  lua_newtable(L);
+  if (layer->isSmartObject()) {
+    auto sm = static_cast<LayerSmartObject*>(layer);
+    lua_pushnumber(L, sm->position().x);
+    lua_setfield(L, -2, "x");
+    lua_pushnumber(L, sm->position().y);
+    lua_setfield(L, -2, "y");
+    lua_pushnumber(L, sm->scale().x);
+    lua_setfield(L, -2, "scaleX");
+    lua_pushnumber(L, sm->scale().y);
+    lua_setfield(L, -2, "scaleY");
+    lua_pushnumber(L, sm->angle());
+    lua_setfield(L, -2, "angle");
+    lua_pushboolean(L, sm->flipH());
+    lua_setfield(L, -2, "flipH");
+    lua_pushboolean(L, sm->flipV());
+    lua_setfield(L, -2, "flipV");
+    lua_pushnumber(L, sm->pivot().x);
+    lua_setfield(L, -2, "pivotX");
+    lua_pushnumber(L, sm->pivot().y);
+    lua_setfield(L, -2, "pivotY");
+  }
+  else {
+    lua_pushnumber(L, 0.0);
+    lua_setfield(L, -2, "x");
+    lua_pushnumber(L, 0.0);
+    lua_setfield(L, -2, "y");
+    lua_pushnumber(L, 1.0);
+    lua_setfield(L, -2, "scaleX");
+    lua_pushnumber(L, 1.0);
+    lua_setfield(L, -2, "scaleY");
+    lua_pushnumber(L, 0.0);
+    lua_setfield(L, -2, "angle");
+    lua_pushboolean(L, false);
+    lua_setfield(L, -2, "flipH");
+    lua_pushboolean(L, false);
+    lua_setfield(L, -2, "flipV");
+    lua_pushnumber(L, 0.5);
+    lua_setfield(L, -2, "pivotX");
+    lua_pushnumber(L, 0.5);
+    lua_setfield(L, -2, "pivotY");
+  }
+  return 1;
+}
+
+int Layer_setTransform(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return 0;
+
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  const int top = lua_gettop(L);
+
+  gfx::PointF pos = sm->position();
+  gfx::PointF scale = sm->scale();
+  double angle = sm->angle();
+  bool flipH = sm->flipH();
+  bool flipV = sm->flipV();
+  gfx::PointF pivot = sm->pivot();
+
+  if (top >= 5 && (lua_isboolean(L, 5) || (top >= 6 && lua_isboolean(L, 6)))) {
+    // Form: (scaleX, scaleY, angle, flipH, flipV, [pivot])
+    if (!lua_isnil(L, 2)) scale.x = lua_tonumber(L, 2);
+    if (top >= 3 && !lua_isnil(L, 3)) scale.y = lua_tonumber(L, 3);
+    if (top >= 4 && !lua_isnil(L, 4)) angle = lua_tonumber(L, 4);
+    if (top >= 5 && !lua_isnil(L, 5)) flipH = lua_toboolean(L, 5);
+    if (top >= 6 && !lua_isnil(L, 6)) flipV = lua_toboolean(L, 6);
+    if (top >= 7 && !lua_isnil(L, 7)) {
+      if (lua_istable(L, 7)) {
+        pivot = get_point_f(L, 7, pivot);
+      }
+      else {
+        pivot.x = lua_tonumber(L, 7);
+        if (top >= 8 && !lua_isnil(L, 8))
+          pivot.y = lua_tonumber(L, 8);
+      }
+    }
+  }
+  else {
+    // Form: (x, y, scaleX, scaleY, angle, flipH, flipV, [pivotX, pivotY] / [pivotTable])
+    if (!lua_isnil(L, 2)) pos.x = lua_tonumber(L, 2);
+    if (top >= 3 && !lua_isnil(L, 3)) pos.y = lua_tonumber(L, 3);
+    if (top >= 4 && !lua_isnil(L, 4)) scale.x = lua_tonumber(L, 4);
+    if (top >= 5 && !lua_isnil(L, 5)) scale.y = lua_tonumber(L, 5);
+    if (top >= 6 && !lua_isnil(L, 6)) angle = lua_tonumber(L, 6);
+    if (top >= 7 && !lua_isnil(L, 7)) flipH = lua_toboolean(L, 7);
+    if (top >= 8 && !lua_isnil(L, 8)) flipV = lua_toboolean(L, 8);
+    if (top >= 9 && !lua_isnil(L, 9)) {
+      if (lua_istable(L, 9)) {
+        pivot = get_point_f(L, 9, pivot);
+      }
+      else {
+        pivot.x = lua_tonumber(L, 9);
+        if (top >= 10 && !lua_isnil(L, 10))
+          pivot.y = lua_tonumber(L, 10);
+      }
+    }
+  }
+
+  sm->setTransform(pos, scale, angle, flipH, flipV, pivot);
+  notify_layer_update(layer);
+  return 0;
+}
+
+int Layer_resetTransform(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return 0;
+
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  sm->resetTransform();
+  notify_layer_update(layer);
+  return 0;
+}
+
+int Layer_translate(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return 0;
+
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  double dx = lua_tonumber(L, 2);
+  double dy = lua_tonumber(L, 3);
+  sm->setPosition(sm->position().x + dx, sm->position().y + dy);
+  sm->renderAllCels();
+  notify_layer_update(layer);
+  return 0;
+}
+
+int Layer_renderCel(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return 0;
+
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  frame_t hf = (lua_gettop(L) >= 2 ? get_frame_number_from_arg(L, 2) : frame_t(0));
+  frame_t lf = (lua_gettop(L) >= 3 ? get_frame_number_from_arg(L, 3) : sm->mapTimelineFrame(hf));
+  bool res = sm->renderCel(hf, lf);
+  notify_layer_update(layer);
+  lua_pushboolean(L, res);
+  return 1;
+}
+
+int Layer_renderAllCels(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return 0;
+
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  sm->renderAllCels();
+  notify_layer_update(layer);
+  return 0;
+}
+
+int Layer_syncTimeline(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return 0;
+
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  if (lua_isstring(L, 2)) {
+    const char* str = lua_tostring(L, 2);
+    if (base::utf8_icmp(str, "Hold") == 0)
+      sm->setTimelineMapping(TimelineMapping::Hold);
+    else if (base::utf8_icmp(str, "Fixed") == 0)
+      sm->setTimelineMapping(TimelineMapping::Fixed);
+    else
+      sm->setTimelineMapping(TimelineMapping::Loop);
+  }
+
+  sm->syncFrames();
+  notify_layer_update(layer);
+  lua_pushinteger(L, sm->cels().size());
+  return 1;
+}
+
+int Layer_mapTimelineFrame(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return 0;
+
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  frame_t hf = get_frame_number_from_arg(L, 2);
+  frame_t lf = sm->mapTimelineFrame(hf);
+  lua_pushinteger(L, lf + 1); // 1-based for Lua
+  return 1;
+}
+
 int Layer_get_cels(lua_State* L)
 {
   auto layer = get_docobj<Layer>(L, 1);
@@ -477,40 +1087,63 @@ int Layer_set_tileset(lua_State* L)
 }
 
 const luaL_Reg Layer_methods[] = {
-  { "__eq",  Layer_eq  },
-  { "cel",   Layer_cel },
-  { nullptr, nullptr   }
+  { "__eq",             Layer_eq               },
+  { "cel",              Layer_cel              },
+  { "setTransform",     Layer_setTransform     },
+  { "resetTransform",   Layer_resetTransform   },
+  { "translate",        Layer_translate        },
+  { "renderCel",        Layer_renderCel        },
+  { "renderAllCels",    Layer_renderAllCels    },
+  { "syncTimeline",     Layer_syncTimeline     },
+  { "mapTimelineFrame",   Layer_mapTimelineFrame   },
+  { "refreshSmartObject", Layer_refreshSmartObject },
+  { nullptr,              nullptr                  }
 };
 
 const Property Layer_properties[] = {
-  { "id",            Layer_get_id,                   nullptr                        },
-  { "sprite",        Layer_get_sprite,               nullptr                        },
-  { "parent",        Layer_get_parent,               Layer_set_parent               },
-  { "layers",        Layer_get_layers,               nullptr                        },
-  { "stackIndex",    Layer_get_stackIndex,           Layer_set_stackIndex           },
-  { "previous",      Layer_get_previous,             nullptr                        },
-  { "next",          Layer_get_next,                 nullptr                        },
-  { "name",          Layer_get_name,                 Layer_set_name                 },
-  { "opacity",       Layer_get_opacity,              Layer_set_opacity              },
-  { "blendMode",     Layer_get_blendMode,            Layer_set_blendMode            },
-  { "isImage",       Layer_get_isImage,              nullptr                        },
-  { "isGroup",       Layer_get_isGroup,              nullptr                        },
-  { "isTilemap",     Layer_get_isTilemap,            nullptr                        },
-  { "isTransparent", Layer_get_isTransparent,        nullptr                        },
-  { "isBackground",  Layer_get_isBackground,         nullptr                        },
-  { "isEditable",    Layer_get_isEditable,           Layer_set_isEditable           },
-  { "isVisible",     Layer_get_isVisible,            Layer_set_isVisible            },
-  { "isContinuous",  Layer_get_isContinuous,         Layer_set_isContinuous         },
-  { "isCollapsed",   Layer_get_isCollapsed,          Layer_set_isCollapsed          },
-  { "isExpanded",    Layer_get_isExpanded,           Layer_set_isExpanded           },
-  { "isReference",   Layer_get_isReference,          nullptr                        },
-  { "cels",          Layer_get_cels,                 nullptr                        },
-  { "color",         UserData_get_color<Layer>,      UserData_set_color<Layer>      },
-  { "data",          UserData_get_text<Layer>,       UserData_set_text<Layer>       },
-  { "properties",    UserData_get_properties<Layer>, UserData_set_properties<Layer> },
-  { "tileset",       Layer_get_tileset,              Layer_set_tileset              },
-  { "uuid",          Layer_get_uuid,                 nullptr                        },
-  { nullptr,         nullptr,                        nullptr                        }
+  { "id",               Layer_get_id,                   nullptr                        },
+  { "sprite",           Layer_get_sprite,               nullptr                        },
+  { "parent",           Layer_get_parent,               Layer_set_parent               },
+  { "layers",           Layer_get_layers,               nullptr                        },
+  { "stackIndex",       Layer_get_stackIndex,           Layer_set_stackIndex           },
+  { "previous",         Layer_get_previous,             nullptr                        },
+  { "next",             Layer_get_next,                 nullptr                        },
+  { "name",             Layer_get_name,                 Layer_set_name                 },
+  { "opacity",          Layer_get_opacity,              Layer_set_opacity              },
+  { "blendMode",        Layer_get_blendMode,            Layer_set_blendMode            },
+  { "isImage",          Layer_get_isImage,              nullptr                        },
+  { "isGroup",          Layer_get_isGroup,              nullptr                        },
+  { "isTilemap",        Layer_get_isTilemap,            nullptr                        },
+  { "isTransparent",    Layer_get_isTransparent,        nullptr                        },
+  { "isBackground",     Layer_get_isBackground,         nullptr                        },
+  { "isEditable",       Layer_get_isEditable,           Layer_set_isEditable           },
+  { "isVisible",        Layer_get_isVisible,            Layer_set_isVisible            },
+  { "isContinuous",     Layer_get_isContinuous,         Layer_set_isContinuous         },
+  { "isCollapsed",      Layer_get_isCollapsed,          Layer_set_isCollapsed          },
+  { "isExpanded",       Layer_get_isExpanded,           Layer_set_isExpanded           },
+  { "isReference",      Layer_get_isReference,          nullptr                        },
+  { "isSmartObject",    Layer_get_isSmartObject,        nullptr                        },
+  { "scale",            Layer_get_scale,                Layer_set_scale                },
+  { "angle",            Layer_get_angle,                Layer_set_angle                },
+  { "flipH",            Layer_get_flipH,                Layer_set_flipH                },
+  { "flipV",            Layer_get_flipV,                Layer_set_flipV                },
+  { "pivot",            Layer_get_pivot,                Layer_set_pivot                },
+  { "smartObjectTimelineMapping", Layer_get_smartObjectTimelineMapping, Layer_set_smartObjectTimelineMapping },
+  { "timelineMapping",  Layer_get_timelineMapping,      Layer_set_timelineMapping      },
+  { "linkedFrameCount", Layer_get_linkedFrameCount,     nullptr                        },
+  { "smartObjectFilepath", Layer_get_smartObjectFilepath, Layer_set_smartObjectFilepath },
+  { "sourcePath",       Layer_get_smartObjectFilepath,  Layer_set_smartObjectFilepath  },
+  { "smartObjectLastModified", Layer_get_smartObjectLastModified, Layer_set_smartObjectLastModified },
+  { "linkStatus",       Layer_get_linkStatus,           nullptr                        },
+  { "isDiskFileNewer",  Layer_get_isDiskFileNewer,      nullptr                        },
+  { "transform",        Layer_get_transform,            nullptr                        },
+  { "cels",             Layer_get_cels,                 nullptr                        },
+  { "color",            UserData_get_color<Layer>,      UserData_set_color<Layer>      },
+  { "data",             UserData_get_text<Layer>,       UserData_set_text<Layer>       },
+  { "properties",       UserData_get_properties<Layer>, UserData_set_properties<Layer> },
+  { "tileset",          Layer_get_tileset,              Layer_set_tileset              },
+  { "uuid",             Layer_get_uuid,                 nullptr                        },
+  { nullptr,            nullptr,                        nullptr                        }
 };
 
 } // anonymous namespace
@@ -522,6 +1155,41 @@ void register_layer_class(lua_State* L)
   using Layer = doc::Layer;
   REG_CLASS(L, Layer);
   REG_CLASS_PROPERTIES(L, Layer);
+
+  static bool s_smartHooksInitialized = false;
+  if (!s_smartHooksInitialized) {
+    s_smartHooksInitialized = true;
+    doc::LayerSmartObject::setSourceDocLoader([](const std::string& path) -> doc::Document* {
+      return load_document(nullptr, path);
+    });
+    doc::LayerSmartObject::setCompositeRenderer([](doc::Document* srcDoc, frame_t linkedFrame, const doc::Sprite* hostSprite) -> doc::ImageRef {
+      if (!srcDoc || !srcDoc->sprite())
+        return nullptr;
+      doc::Sprite* spr = srcDoc->sprite();
+      render::Render r;
+      r.setNewBlend(true);
+      r.setBgOptions(render::BgOptions::MakeNone());
+      doc::ImageRef img(doc::Image::create(spr->pixelFormat(), spr->width(), spr->height()));
+      doc::clear_image(img.get(), spr->transparentColor());
+      r.renderSprite(img.get(), spr, linkedFrame);
+
+      if (hostSprite && (hostSprite->pixelFormat() != spr->pixelFormat() ||
+                         hostSprite->pixelFormat() == IMAGE_INDEXED)) {
+        doc::ImageRef converted(
+          render::convert_pixel_format(img.get(),
+                                       nullptr,
+                                       hostSprite->pixelFormat(),
+                                       render::Dithering(),
+                                       hostSprite->rgbMap(linkedFrame),
+                                       spr->palette(linkedFrame),
+                                       (spr->backgroundLayer() ? true : false),
+                                       hostSprite->transparentColor()));
+        if (converted)
+          img = converted;
+      }
+      return img;
+    });
+  }
 }
 
 }} // namespace app::script

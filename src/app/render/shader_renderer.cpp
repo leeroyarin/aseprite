@@ -232,7 +232,8 @@ void ShaderRenderer::renderPlan(SkCanvas* canvas,
     const Layer* layer = item.layer;
 
     switch (layer->type()) {
-      case doc::ObjectType::LayerImage: {
+      case doc::ObjectType::LayerImage:
+      case doc::ObjectType::LayerSmartObject: {
         auto imgLayer = static_cast<const LayerImage*>(layer);
 
         if (cel) {

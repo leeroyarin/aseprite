@@ -141,7 +141,7 @@ private:
 void push_app_events(lua_State* L);
 void push_app_theme(lua_State* L, int uiscale = 1);
 void push_app_clipboard(lua_State* L);
-int push_image_iterator_function(lua_State* L, const doc::Image* image, int extraArgIndex);
+int push_image_iterator_function(lua_State* L, const doc::Image* image, int extraArgIndex, bool readOnly = false);
 void push_brush(lua_State* L, const doc::BrushRef& brush);
 void push_cel_image(lua_State* L, doc::Cel* cel);
 void push_cel_images(lua_State* L, const doc::ObjectIds& cels);

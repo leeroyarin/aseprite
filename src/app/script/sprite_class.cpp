@@ -328,6 +328,10 @@ int Sprite_convertColorSpace(lua_State* L)
 int Sprite_flatten(lua_State* L)
 {
   auto sprite = get_docobj<Sprite>(L, 1);
+  for (auto layer : sprite->allLayers()) {
+    if (layer->isSmartObject())
+      return luaL_error(L, "cannot flatten a sprite containing smart object layers without explicit rasterization");
+  }
 
   DocRange range;
   for (auto layer : sprite->root()->layers())
@@ -458,6 +462,8 @@ int Sprite_newCel(lua_State* L)
   auto layer = get_docobj<Layer>(L, 2);
   if (!layer->acceptCels())
     return luaL_error(L, "unexpected kind of layer in Sprite:newCel()");
+  if (layer->isSmartObject() || !layer->canEditPixels())
+    return luaL_error(L, "cannot create new cel on a smart object layer");
 
   frame_t frame = get_frame_number_from_arg(L, 3);
   if (frame < 0 || frame > sprite->lastFrame())
@@ -523,6 +529,9 @@ int Sprite_deleteCel(lua_State* L)
   }
 
   if (cel) {
+    if (cel->layer() && (cel->layer()->isSmartObject() || !cel->layer()->canEditPixels()))
+      return luaL_error(L, "cannot delete cel on a smart object layer");
+
     Tx tx(sprite);
     tx(new cmd::ClearCel(cel));
     tx.commit();

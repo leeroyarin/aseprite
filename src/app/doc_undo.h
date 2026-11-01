@@ -97,6 +97,7 @@ public:
   const undo::UndoState* currentState() const { return m_undoHistory.currentState(); }
 
   bool isUndoing() const { return m_undoing; }
+  bool isRedoing() const { return m_undoing; }
 
   void moveToState(const undo::UndoState* state);
 

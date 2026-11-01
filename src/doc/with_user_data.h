@@ -20,7 +20,7 @@ public:
   const UserData& userData() const { return m_userData; }
   UserData& userData() { return m_userData; }
 
-  void setUserData(const UserData& userData) { m_userData = userData; }
+  virtual void setUserData(const UserData& userData) { m_userData = userData; }
 
 private:
   UserData m_userData;

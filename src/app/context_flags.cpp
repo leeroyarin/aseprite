@@ -93,6 +93,9 @@ void ContextFlags::updateFlagsFromSite(const Site& site)
   if (layer->isReference())
     m_flags |= ActiveLayerIsReference;
 
+  if (layer->isSmartObject())
+    m_flags |= ActiveLayerIsSmartObject;
+
   if (layer->isTilemap())
     m_flags |= ActiveLayerIsTilemap;
 

@@ -54,6 +54,7 @@
 #include "doc/algorithm/flip_image.h"
 #include "doc/algorithm/shrink_bounds.h"
 #include "doc/cel.h"
+#include "doc/layer.h"
 #include "doc/layer_tilemap.h"
 #include "doc/mask.h"
 #include "doc/palette.h"
@@ -359,8 +360,11 @@ void DocApi::copyFrame(Sprite* sprite,
   if (fromFrame >= newFrame)
     ++fromFrame;
 
-  for (Layer* layer : sprite->allLayers())
+  for (Layer* layer : sprite->allLayers()) {
+    if (layer->isSmartObject())
+      continue;
     copyCel(layer, fromFrame, layer, newFrame);
+  }
 
   adjustTags(sprite, newFrame0, +1, dropFramePlace, tagsHandling);
 }
@@ -439,7 +443,8 @@ void DocApi::moveFrameLayer(Layer* layer, frame_t frame, frame_t beforeFrame)
 
   switch (layer->type()) {
     case ObjectType::LayerImage:
-    case ObjectType::LayerTilemap: {
+    case ObjectType::LayerTilemap:
+    case ObjectType::LayerSmartObject: {
       LayerImage* imglayer = static_cast<LayerImage*>(layer);
 
       CelList cels;
@@ -571,6 +576,13 @@ void DocApi::copyCel(Layer* srcLayer,
   ASSERT(srcLayer != dstLayer || srcFrame != dstFrame);
   if (srcLayer == dstLayer && srcFrame == dstFrame)
     return; // Nothing to be done
+
+  if (srcLayer->isSmartObject() || dstLayer->isSmartObject()) {
+    if (dstLayer->isSmartObject() && dstFrame >= dstLayer->sprite()->totalFrames()) {
+      addEmptyFramesTo(dstLayer->sprite(), dstFrame);
+    }
+    return;
+  }
 
   HandleLinkedCels handleLinkedCels(*this, srcLayer, srcFrame, dstLayer, dstFrame);
   if (handleLinkedCels.linkWasCreated())

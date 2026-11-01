@@ -457,6 +457,7 @@ target_sources(app-lib PRIVATE
   commands/cmd_paste.cpp
   commands/cmd_paste_text.cpp
   commands/cmd_pixel_perfect_mode.cpp
+  commands/cmd_place_smart_object.cpp
   commands/cmd_play_animation.cpp
   commands/cmd_refresh.cpp
   commands/cmd_remove_frame.cpp
@@ -473,6 +474,7 @@ target_sources(app-lib PRIVATE
   commands/cmd_save_mask.cpp
   commands/cmd_save_palette.cpp
   commands/cmd_version.cpp
+  commands/cmd_easymetric.cpp
   versions/version_store.cpp
   commands/cmd_scroll.cpp
   commands/cmd_scroll_center.cpp
@@ -585,6 +587,7 @@ target_sources(app-lib PRIVATE
   restore_visible_layers.cpp
   shade.cpp
   site.cpp
+  smart_object_manager.cpp
   snap_to_grid.cpp
   sprite_job.cpp
   task.cpp

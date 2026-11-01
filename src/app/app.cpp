@@ -41,6 +41,7 @@
 #include "app/resource_finder.h"
 #include "app/send_crash.h"
 #include "app/site.h"
+#include "app/smart_object_manager.h"
 #include "app/tools/active_tool.h"
 #include "app/tools/tool_box.h"
 #include "app/ui/backup_indicator.h"
@@ -348,6 +349,9 @@ int App::initialize(const AppOptions& options)
   m_appMenus = std::make_unique<AppMenus>(recentFiles());
   m_brushes = std::make_unique<AppBrushes>();
 
+  // Initialize SmartObjectManager for monitoring and auto-refresh
+  SmartObjectManager::instance();
+
   // Data recovery is enabled only in GUI mode
   if (isGui() && pref.general.dataRecovery())
     m_modules->createDataRecovery(context());
@@ -646,6 +650,9 @@ App::~App()
 
     // Delete file formats.
     FileFormatsManager::destroyInstance();
+
+    // Destroy smart object manager.
+    SmartObjectManager::destroyInstance();
 
     // Fire App Exit signal.
     App::instance()->Exit();

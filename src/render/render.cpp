@@ -1022,7 +1022,8 @@ void Render::renderPlan(RenderPlan& plan,
 
     switch (layer->type()) {
       case ObjectType::LayerImage:
-      case ObjectType::LayerTilemap: {
+      case ObjectType::LayerTilemap:
+      case ObjectType::LayerSmartObject: {
         if ((!render_background && layer->isBackground()) ||
             (!render_transparent && !layer->isBackground()))
           break;

@@ -40,6 +40,8 @@ bool BackgroundFromLayerCommand::onEnabled(Context* context)
          !context->checkFlags(ContextFlags::HasBackgroundLayer) &&
          // Isn't a reference layer
          !context->checkFlags(ContextFlags::ActiveLayerIsReference) &&
+         // Isn't a smart object layer
+         !context->checkFlags(ContextFlags::ActiveLayerIsSmartObject) &&
          // Isn't a tilemap layer
          // TODO support background tilemaps
          !context->checkFlags(ContextFlags::ActiveLayerIsTilemap);
@@ -49,10 +51,13 @@ void BackgroundFromLayerCommand::onExecute(Context* context)
 {
   ContextWriter writer(context);
   Doc* document(writer.document());
+  Layer* layer = writer.layer();
+  if (!layer || !layer->isImage() || layer->isSmartObject() || layer->isReference())
+    return;
 
   {
     Tx tx(writer, friendlyName());
-    tx(new cmd::BackgroundFromLayer(static_cast<LayerImage*>(writer.layer())));
+    tx(new cmd::BackgroundFromLayer(static_cast<LayerImage*>(layer)));
     tx.commit();
   }
 

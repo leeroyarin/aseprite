@@ -123,6 +123,8 @@ void NewFrameCommand::onExecute(Context* context)
                                 site.selectedFrames().firstFrame() + 1);
 
           for (Layer* layer : selLayers) {
+            if (layer->isSmartObject())
+              continue;
             for (frame_t srcFrame : site.selectedFrames().reversed()) {
               frame_t dstFrame = srcFrame + frameRange;
               api.copyCel(layer, srcFrame, layer, dstFrame, continuous.get());
@@ -134,9 +136,10 @@ void NewFrameCommand::onExecute(Context* context)
             timeline->moveRange(range);
         }
         else if (Layer* layer = writer.layer()) {
-          api.copyCel(layer, writer.frame(), layer, writer.frame() + 1, continuous.get());
-
-          context->setActiveFrame(writer.frame() + 1);
+          if (!layer->isSmartObject()) {
+            api.copyCel(layer, writer.frame(), layer, writer.frame() + 1, continuous.get());
+            context->setActiveFrame(writer.frame() + 1);
+          }
         }
         break;
       }

@@ -37,6 +37,7 @@ enum class ObjectType : uint16_t {
   LayerTilemap = 14,
   Tileset = 15,
   Tilesets = 16,
+  LayerSmartObject = 17,
 };
 
 } // namespace doc

@@ -22,6 +22,7 @@
 #include "app/util/expand_cel_canvas.h"
 #include "doc/algorithm/fill_selection.h"
 #include "doc/algorithm/stroke_selection.h"
+#include "doc/layer.h"
 #include "doc/mask.h"
 
 namespace app {
@@ -48,7 +49,9 @@ FillCommand::FillCommand(Type type)
 bool FillCommand::onEnabled(Context* ctx)
 {
   if (ctx->checkFlags(ContextFlags::ActiveDocumentIsWritable | ContextFlags::ActiveLayerIsVisible |
-                      ContextFlags::ActiveLayerIsEditable | ContextFlags::ActiveLayerIsImage)) {
+                      ContextFlags::ActiveLayerIsEditable | ContextFlags::ActiveLayerIsImage) &&
+      !ctx->checkFlags(ContextFlags::ActiveLayerIsReference) &&
+      !ctx->checkFlags(ContextFlags::ActiveLayerIsSmartObject)) {
     return true;
   }
   auto* editor = Editor::activeEditor();
@@ -66,7 +69,9 @@ void FillCommand::onExecute(Context* ctx)
   Sprite* sprite = site.sprite();
   Layer* layer = site.layer();
   Mask* mask = doc->mask();
-  if (!doc || !sprite || !layer || !layer->isImage() || !mask || !doc->isMaskVisible())
+  if (!doc || !sprite || !layer || !layer->isImage() ||
+      layer->isSmartObject() || !layer->canEditPixels() ||
+      !mask || !doc->isMaskVisible())
     return;
 
   Preferences& pref = Preferences::instance();

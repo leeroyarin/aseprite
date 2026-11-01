@@ -39,12 +39,14 @@ void ScriptInputChain::onNewInputPriority(InputChainElement* element, const ui::
 
 bool ScriptInputChain::onCanCut(Context* ctx)
 {
-  return ctx->activeDocument() && ctx->activeDocument()->isMaskVisible();
+  auto layer = ctx->activeSite().layer();
+  return ctx->activeDocument() && ctx->activeDocument()->isMaskVisible() &&
+         layer && layer->canEditPixels();
 }
 
 bool ScriptInputChain::onCanCopy(Context* ctx)
 {
-  return onCanCut(ctx);
+  return ctx->activeDocument() && ctx->activeDocument()->isMaskVisible();
 }
 
 bool ScriptInputChain::onCanPaste(Context* ctx)
@@ -52,8 +54,9 @@ bool ScriptInputChain::onCanPaste(Context* ctx)
   const Clipboard* clipboard(ctx->clipboard());
   if (!clipboard)
     return false;
-  return clipboard->format() == ClipboardFormat::Image && ctx->activeSite().layer() &&
-         ctx->activeSite().layer()->type() == ObjectType::LayerImage;
+  auto layer = ctx->activeSite().layer();
+  return clipboard->format() == ClipboardFormat::Image && layer &&
+         layer->type() == ObjectType::LayerImage && layer->canEditPixels();
 }
 
 bool ScriptInputChain::onCanClear(Context* ctx)
@@ -105,12 +108,11 @@ bool ScriptInputChain::onClear(Context* ctx)
   ContextWriter writer(ctx);
   Doc* document = ctx->activeDocument();
   if (writer.document()) {
-    ctx->clipboard()->clearContent();
-    CelList cels;
     const Site site = ctx->activeSite();
-    cels.push_back(site.cel());
+    CelList cels = site.selectedUniqueCelsToEditPixels();
     if (cels.empty()) // No cels to modify
       return false;
+    ctx->clipboard()->clearContent();
     Tx tx(writer, Strings::commands_Clear());
     ctx->clipboard()->clearMaskFromCels(tx, document, site, cels, true);
     tx.commit();

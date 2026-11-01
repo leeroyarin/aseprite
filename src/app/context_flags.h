@@ -36,6 +36,7 @@ public:
     ActiveLayerIsTilemap = 1 << 14,
     HasSelectedColors = 1 << 15,
     HasSelectedTiles = 1 << 16,
+    ActiveLayerIsSmartObject = 1 << 17,
   };
 
   ContextFlags();

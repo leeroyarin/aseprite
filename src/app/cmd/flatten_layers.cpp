@@ -64,6 +64,14 @@ void FlattenLayers::onExecute()
   for (auto layerId : m_layerIds) {
     doc::Layer* layer = doc::get<doc::Layer>(layerId);
     ASSERT(layer);
+    if (!layer || layer->isSmartObject())
+      return;
+    LayerList childLayers;
+    layer->allLayers(childLayers);
+    for (Layer* child : childLayers) {
+      if (child->isSmartObject())
+        return;
+    }
     layers.insert(layer);
     if (layer->isBackground())
       backgroundIsSel = true;
