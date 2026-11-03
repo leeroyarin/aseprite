@@ -20,7 +20,6 @@ build
 CMakeSettings.json
 
 graphify-out/
-.agents/teamwork/
 
 # Agent Mesh local runtime state
 .mesh_last_id_*.txt
