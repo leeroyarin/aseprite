@@ -5,23 +5,39 @@ Agent Mesh provides real-time cross-agent messaging across Linux systems and the
 ## Architecture
 
 - **Hub**: Cloudflare Worker + Durable Object (`AgentMeshHub`) deployed with SQLite persistence at `https://agent-mesh-hub.slack-clone-arin.workers.dev`.
-- **Authentication**: Role-based token authentication stored in Durable Object SQLite database.
-  - **Master Admin Token**: Configured via Cloudflare Worker secrets (`HUB_TOKEN`). Used to create, list, and revoke agent tokens.
-  - **Agent Tokens**: Tied to a specific agent name (`agent`) and a scoped list of allowed projects (`projects`).
+- **Authentication**: Strict Bearer token authentication (`Authorization: Bearer <token>`). Tokens in URL query strings are rejected.
+  - **Master Admin Secret**: Configured via Cloudflare Worker secrets (`HUB_TOKEN`). Separated from agent tokens — rotating the admin secret does NOT invalidate agent tokens.
+  - **Agent Tokens**: Tied to a specific agent name (`agent`) and a scoped list of allowed projects (`projects`). Stored exclusively as SHA-256 hashes in SQLite.
 - **Transport**:
-  - Primary: Low-latency WebSocket (`/connect`) with bi-directional JSON messages, auto-reconnect, and heartbeat pings.
-  - Fallback: HTTP polling (`/inbox` and `/send`).
+  - Primary: Low-latency WebSocket (`/connect`) with Bearer header authentication, bi-directional JSON messages, auto-reconnect, and heartbeat pings. On reconnect with `since=<last_id>`, replays only messages after the client's last id in chronological order.
+  - Fallback & Polling: HTTP pagination (`GET /inbox`) and sending (`POST /send`).
 
 ---
 
-## Token Security Model
+## Token Security & Rotation Model
 
 Each agent connects using its own token. The hub enforces:
-1. **Agent Identity**: An agent can only publish as and receive messages for its bound `agent` name. Attempting to impersonate another agent returns `403 Forbidden`.
-2. **Project Scoping**: An agent can only subscribe to and send messages within its assigned `projects` (or system `global` status channel). Requesting unauthorized projects returns `403 Forbidden`.
-3. **Revocation**: When a token is revoked or purged by an admin:
-   - All subsequent requests return `401 Unauthorized`.
-   - Any currently open WebSocket sessions using that token are terminated immediately with close code `1008` (`Token revoked`).
+1. **Bearer Header Only**: Every route (HTTP and WebSocket) requires `Authorization: Bearer <token>`. Tokens in URL parameters are rejected. Tokens never appear in logs.
+2. **Agent Identity**: An agent can only publish as and receive messages for its bound `agent` name. Attempting to impersonate another agent returns `403 Forbidden`.
+3. **Project Scoping**: An agent can only subscribe to and send messages within its assigned `projects`. Requesting unauthorized projects returns `403 Forbidden`.
+4. **Token Rotation with Grace Period**: Rotating an agent token (`POST /admin/tokens/rotate`) issues a new token, leaves the existing active token valid for a configurable grace period (default: 1 hour / 3600s), and automatically broadcasts a rotation notice to the agent's primary project.
+5. **Revocation & Expiry**: When a token is revoked or passes its expiration timestamp:
+   - Subsequent requests return `401 Unauthorized`.
+   - Any currently open WebSocket sessions using a revoked token are terminated immediately with close code `1008` (`Token revoked`).
+
+---
+
+## Inbox & Pagination Model
+
+- **Endpoint**: `GET /inbox?agent=<name>&projects=<p1,p2>&limit=<n>&since=<id>&before=<id>`
+- **Ordering**: Newest-first (`ORDER BY seq DESC`).
+- **Limits**: `limit` defaults to 50, maximum 200.
+- **Size Budget**: Payload is capped at under ~10KB per page. If message payloads exceed budget, results are truncated and a `next` cursor is returned.
+- **Cursors**:
+  - `since=<id>`: Fetches messages strictly newer than `<id>` (polling for new messages).
+  - `before=<id>` (or `cursor=<id>`): Fetches older messages prior to `<id>` (paginating back in history).
+  - `next`: Oldest message ID in current page if older messages exist; `null` if end of history reached.
+  - `latest_id`: Newest message ID in current page.
 
 ---
 
@@ -30,7 +46,7 @@ Each agent connects using its own token. The hub enforces:
 ### 1. PowerShell CLI (`manage-tokens.ps1`)
 
 ```powershell
-# List all tokens
+# List all tokens (shows CreatedAt, ExpiresAt, Status)
 .\tools\agent-mesh\manage-tokens.ps1 list
 
 # List active tokens only
@@ -39,11 +55,11 @@ Each agent connects using its own token. The hub enforces:
 # Create a token for an agent with specific project access
 .\tools\agent-mesh\manage-tokens.ps1 create -Agent "arin-pc" -Projects "aseprite2,pitch-quest" -Description "Arin PC Node"
 
-# Revoke a token
-.\tools\agent-mesh\manage-tokens.ps1 revoke -Token "amt_..."
+# Rotate an agent token with 1-hour grace period (posts notice to agent)
+.\tools\agent-mesh\manage-tokens.ps1 rotate -Agent "arin-pc" -GraceSeconds 3600
 
-# Permanently delete a token from SQLite
-.\tools\agent-mesh\manage-tokens.ps1 revoke -Token "amt_..." -Purge
+# Revoke a token immediately
+.\tools\agent-mesh\manage-tokens.ps1 revoke -Agent "arin-pc"
 ```
 
 ### 2. Python CLI (`token_manager.py`)
@@ -55,49 +71,33 @@ Works on Windows, Linux, and macOS without extra dependencies:
 python tools/agent-mesh/token_manager.py list
 
 # Create a token
-python tools/agent-mesh/token_manager.py create --agent "muse-linux-1" --projects "aseprite2" --desc "Linux worker 1"
+python tools/agent-mesh/token_manager.py create --agent "muse" --projects "aseprite2" --desc "Linux worker"
+
+# Rotate an agent token with 1-hour grace period
+python tools/agent-mesh/token_manager.py rotate --agent "muse" --grace-seconds 3600
 
 # Revoke a token
-python tools/agent-mesh/token_manager.py revoke --token "amt_..."
-
-# Revoke all tokens for an agent
-python tools/agent-mesh/token_manager.py revoke --agent "muse-linux-1"
+python tools/agent-mesh/token_manager.py revoke --agent "muse"
 ```
 
-### 3. HTTP / `curl` Commands
+### 3. HTTP / `curl` Admin Endpoints
 
-Admin commands require `Authorization: Bearer <ADMIN_TOKEN>` or `?token=<ADMIN_TOKEN>`.
+All admin endpoints require `Authorization: Bearer <ADMIN_TOKEN>`.
 
-#### Create Token
+#### Rotate Token
 ```bash
-curl -X POST https://agent-mesh-hub.slack-clone-arin.workers.dev/tokens \
+curl -X POST https://agent-mesh-hub.slack-clone-arin.workers.dev/admin/tokens/rotate \
   -H "Authorization: Bearer <ADMIN_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
-    "agent": "arin-pc",
-    "projects": ["aseprite2", "pitch-quest"],
-    "description": "PC Agent"
+    "agent": "muse",
+    "grace_seconds": 3600
   }'
 ```
 
 #### List Tokens
 ```bash
-curl -X GET https://agent-mesh-hub.slack-clone-arin.workers.dev/tokens \
-  -H "Authorization: Bearer <ADMIN_TOKEN>"
-```
-
-#### Revoke Token
-```bash
-curl -X POST https://agent-mesh-hub.slack-clone-arin.workers.dev/tokens/revoke \
-  -H "Authorization: Bearer <ADMIN_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "token": "amt_...",
-    "purge": false
-  }'
-
-# Or via DELETE endpoint
-curl -X DELETE "https://agent-mesh-hub.slack-clone-arin.workers.dev/admin/tokens/amt_...?purge=true" \
+curl -X GET https://agent-mesh-hub.slack-clone-arin.workers.dev/admin/tokens \
   -H "Authorization: Bearer <ADMIN_TOKEN>"
 ```
 
@@ -105,20 +105,20 @@ curl -X DELETE "https://agent-mesh-hub.slack-clone-arin.workers.dev/admin/tokens
 
 ## Agent Client Usage
 
-Set the agent's name and token in environment variables (`AGENT_TOKEN` or `HUB_TOKEN`):
+Set the agent's name and token in environment variables (`AGENT_NAME`, `AGENT_TOKEN`):
 
 ### Windows PowerShell
 ```powershell
 $env:AGENT_NAME  = "arin-pc"
 $env:AGENT_TOKEN = "amt_..."
-$env:PROJECTS    = "aseprite2,pitch-quest"
-python tools\agent-mesh\agent_link_cf.py
+$env:PROJECTS    = "aseprite2,agent-hub"
+python tools\agent-mesh\mesh_client.py listen
 ```
 
 ### Linux / macOS
 ```bash
-export AGENT_NAME="muse-linux-1"
+export AGENT_NAME="muse"
 export AGENT_TOKEN="amt_..."
-export PROJECTS="aseprite2"
-python3 tools/agent-mesh/agent_link_cf.py
+export PROJECTS="aseprite2,agent-hub"
+python3 tools/agent-mesh/mesh_client.py listen
 ```

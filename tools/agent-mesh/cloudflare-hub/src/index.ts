@@ -24,7 +24,11 @@ export interface AgentTokenRecord {
   agent: string;
   projects: string[];
   created_at: string;
+  created?: string;
+  expires_at: string | null;
+  expiry?: string | null;
   revoked_at: string | null;
+  revoked?: string | null;
   description?: string;
 }
 
@@ -42,6 +46,7 @@ interface AgentTokenRow extends Record<string, SqlStorageValue> {
   agent: string;
   projects: string;
   created_at: string;
+  expires_at: string | null;
   revoked_at: string | null;
   description: string | null;
 }
@@ -120,11 +125,16 @@ export class AgentMeshHub {
         "  projects TEXT NOT NULL," +
         "  created_at TEXT NOT NULL," +
         "  revoked_at TEXT," +
-        "  description TEXT" +
+        "  description TEXT," +
+        "  expires_at TEXT" +
         ")"
       );
+      try {
+        this.sql.exec("ALTER TABLE agent_tokens ADD COLUMN expires_at TEXT");
+      } catch (_) {}
       this.sql.exec("CREATE INDEX IF NOT EXISTS idx_agent_tokens_agent ON agent_tokens(agent)");
       this.sql.exec("CREATE INDEX IF NOT EXISTS idx_agent_tokens_revoked ON agent_tokens(revoked_at)");
+      this.sql.exec("CREATE INDEX IF NOT EXISTS idx_agent_tokens_expires ON agent_tokens(expires_at)");
 
       // 2. Table for messages
       this.sql.exec(
@@ -232,13 +242,13 @@ export class AgentMeshHub {
   }
 
   private extractToken(request: Request): string {
-    const url = new URL(request.url);
     const authHeader = request.headers.get("Authorization");
-    const bearerToken = authHeader?.toLowerCase().startsWith("bearer ")
-      ? authHeader.slice(7).trim()
-      : "";
-    const queryToken = (url.searchParams.get("token") || "").trim();
-    return bearerToken || queryToken;
+    if (!authHeader) return "";
+    const trimmed = authHeader.trim();
+    if (trimmed.toLowerCase().startsWith("bearer ")) {
+      return trimmed.slice(7).trim();
+    }
+    return "";
   }
 
   private getTokenByHash(tokenHash: string): AgentTokenRecord | null {
@@ -264,7 +274,11 @@ export class AgentMeshHub {
         agent: row.agent,
         projects,
         created_at: row.created_at,
+        created: row.created_at,
+        expires_at: row.expires_at || null,
+        expiry: row.expires_at || null,
         revoked_at: row.revoked_at,
+        revoked: row.revoked_at,
         description: row.description || undefined,
       };
     } catch (err) {
@@ -284,7 +298,8 @@ export class AgentMeshHub {
         params.push(agentFilter);
       }
       if (activeOnly) {
-        whereClauses.push("revoked_at IS NULL");
+        whereClauses.push("revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)");
+        params.push(new Date().toISOString());
       }
       if (whereClauses.length > 0) {
         query += " WHERE " + whereClauses.join(" AND ");
@@ -306,7 +321,11 @@ export class AgentMeshHub {
           agent: row.agent,
           projects,
           created_at: row.created_at,
+          created: row.created_at,
+          expires_at: row.expires_at || null,
+          expiry: row.expires_at || null,
           revoked_at: row.revoked_at,
+          revoked: row.revoked_at,
           description: row.description || undefined,
         };
       });
@@ -373,7 +392,8 @@ export class AgentMeshHub {
     agent: string,
     projects: string[],
     customToken?: string,
-    description?: string
+    description?: string,
+    expiresAt?: string | null
   ): Promise<{ plainToken: string; record: AgentTokenRecord }> {
     if (!this.sql) {
       throw new Error("SQLite storage not available");
@@ -392,12 +412,13 @@ export class AgentMeshHub {
     }
 
     this.sql.exec(
-      "INSERT INTO agent_tokens (token_hash, agent, projects, created_at, revoked_at, description) VALUES (?, ?, ?, ?, NULL, ?)",
+      "INSERT INTO agent_tokens (token_hash, agent, projects, created_at, revoked_at, description, expires_at) VALUES (?, ?, ?, ?, NULL, ?, ?)",
       tokenHash,
       agent,
       projectsJson,
       now,
-      description || null
+      description || null,
+      expiresAt || null
     );
 
     const record: AgentTokenRecord = {
@@ -406,7 +427,11 @@ export class AgentMeshHub {
       agent,
       projects,
       created_at: now,
+      created: now,
+      expires_at: expiresAt || null,
+      expiry: expiresAt || null,
       revoked_at: null,
+      revoked: null,
       description: description || undefined,
     };
 
@@ -539,6 +564,18 @@ export class AgentMeshHub {
       };
     }
 
+    if (record.expires_at) {
+      const expiresMs = new Date(record.expires_at).getTime();
+      if (Date.now() >= expiresMs) {
+        return {
+          isValid: false,
+          isAdmin: false,
+          error: `Unauthorized: Token expired at ${record.expires_at}`,
+          status: 401,
+        };
+      }
+    }
+
     return {
       isValid: true,
       isAdmin: false,
@@ -660,13 +697,123 @@ export class AgentMeshHub {
             token_hash_prefix: record.token_hash_prefix,
             agent: record.agent,
             projects: record.projects,
+            created: record.created_at,
             created_at: record.created_at,
+            expiry: record.expires_at,
+            expires_at: record.expires_at,
             description: record.description,
           },
         }, { status: 201 });
       } catch (err: any) {
         const status = err.message?.includes("already exists") ? 409 : 400;
         return Response.json({ error: err.message || "Failed to create token" }, { status });
+      }
+    }
+
+    // Route: Token Management: Rotate Token (POST /tokens/rotate or POST /admin/tokens/rotate)
+    if (
+      (path === "/tokens/rotate" || path === "/admin/tokens/rotate") &&
+      request.method === "POST"
+    ) {
+      const auth = await this.authenticate(request);
+      if (!auth.isValid) {
+        return Response.json({ error: auth.error }, { status: auth.status });
+      }
+      if (!auth.isAdmin) {
+        return Response.json(
+          { error: "Forbidden: Admin token required for token rotation" },
+          { status: 403 }
+        );
+      }
+
+      try {
+        const body = (await request.json()) as any;
+        const agent = (body.agent || "").trim();
+        if (!agent) {
+          return Response.json({ error: "Missing required field: agent" }, { status: 400 });
+        }
+
+        const graceSeconds = Math.max(
+          parseInt(body.grace_seconds || body.grace || "3600", 10) || 3600,
+          1
+        );
+
+        // Find active tokens for this agent
+        const activeTokens = this.listTokens(agent, true);
+        if (activeTokens.length === 0) {
+          return Response.json(
+            { error: `No active tokens found for agent '${agent}'` },
+            { status: 404 }
+          );
+        }
+
+        let projects: string[] = [];
+        if (Array.isArray(body.projects)) {
+          projects = body.projects.map((p: any) => String(p).trim()).filter(Boolean);
+        } else if (typeof body.projects === "string") {
+          projects = body.projects.split(",").map((p: string) => p.trim()).filter(Boolean);
+        }
+        if (projects.length === 0) {
+          projects = activeTokens[0].projects;
+        }
+
+        const now = new Date();
+        const expiryIso = new Date(now.getTime() + graceSeconds * 1000).toISOString();
+
+        // Set expiration on old active token(s)
+        if (this.sql) {
+          for (const tok of activeTokens) {
+            this.sql.exec(
+              "UPDATE agent_tokens SET expires_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
+              expiryIso,
+              tok.token_hash
+            );
+          }
+        }
+
+        // Issue new token without expiration
+        const customToken = typeof body.token === "string" ? body.token.trim() : undefined;
+        const desc = typeof body.description === "string" ? body.description.trim() : undefined;
+        const { plainToken, record: newRecord } = await this.createToken(
+          agent,
+          projects,
+          customToken,
+          desc || `Rotated on ${now.toISOString()}`
+        );
+
+        // Post notice to that agent in primary project
+        const primaryProject = projects[0] || "agent-hub";
+        const graceMin = Math.round(graceSeconds / 60);
+        const noticeMsg: AgentMessage = {
+          id: crypto.randomUUID(),
+          project: primaryProject,
+          from: "system",
+          to: agent,
+          type: "token_rotated",
+          subject: `proj.${primaryProject}.token_rotated`,
+          body: `Token for agent '${agent}' rotated. Old token remains valid for ${graceMin} minutes (expires at ${expiryIso}). Update AGENT_TOKEN now.`,
+          timestamp: now.toISOString(),
+        };
+        await this.persistAndBroadcast(noticeMsg);
+
+        return Response.json(
+          {
+            ok: true,
+            agent,
+            new_token: plainToken,
+            token_hash_prefix: newRecord.token_hash_prefix,
+            projects,
+            created: newRecord.created_at,
+            created_at: newRecord.created_at,
+            expiry: expiryIso,
+            expires_at: expiryIso,
+            grace_seconds: graceSeconds,
+            old_tokens_rotated: activeTokens.length,
+          },
+          { status: 201 }
+        );
+      } catch (err: any) {
+        return Response.json({ error: err.message || "Failed to rotate token" }, { status: 400 });
       }
     }
 
@@ -865,10 +1012,10 @@ export class AgentMeshHub {
 
       await this.ensureAlarmScheduled();
 
-      // Backlog replay if since parameter provided
+      // Backlog replay if since parameter provided (only messages after client's last id, chronological order)
       const sinceParam = url.searchParams.get("since");
-      if (sinceParam !== null) {
-        const backlog = await this.queryMessages(sessionProjects, agent, sinceParam, 1000);
+      if (sinceParam !== null && sinceParam.trim() !== "") {
+        const backlog = await this.queryMessages(sessionProjects, agent, sinceParam, 200, undefined, "asc", 50000);
         for (const msg of backlog.messages) {
           try {
             server.send(JSON.stringify(msg));
@@ -993,12 +1140,14 @@ export class AgentMeshHub {
       }
 
       const since = url.searchParams.get("since") || "";
+      const before = url.searchParams.get("before") || url.searchParams.get("cursor") || "";
       const limitParam = url.searchParams.get("limit");
+      // Default 50, clamp min 1 max 200
       const limit = limitParam
-        ? Math.min(Math.max(parseInt(limitParam, 10) || 50, 1), 1000)
-        : 1000;
+        ? Math.min(Math.max(parseInt(limitParam, 10) || 50, 1), 200)
+        : 50;
 
-      const queryResult = await this.queryMessages(targetProjects, agent, since, limit);
+      const queryResult = await this.queryMessages(targetProjects, agent, since, limit, before, "desc", 9500);
       return Response.json(queryResult);
     }
 
@@ -1335,15 +1484,17 @@ export class AgentMeshHub {
     targetProjects: string[],
     agent: string,
     since: string,
-    limit: number
-  ): Promise<{ messages: AgentMessage[]; latest_id: string | null }> {
+    limit: number,
+    before?: string,
+    order: "desc" | "asc" = "desc",
+    maxBytes: number = 9500
+  ): Promise<{ ok: boolean; count: number; messages: AgentMessage[]; latest_id: string | null; next: string | null }> {
     await this.ensureDatabase();
 
     // If SQLite is available, query messages table
     if (this.sql) {
       try {
-        let sinceSeq = 0;
-        let sinceFound = true;
+        let sinceSeq: number | null = null;
         const trimmedSince = (since || "").trim();
         if (
           trimmedSince &&
@@ -1358,45 +1509,52 @@ export class AgentMeshHub {
           if (findSeq.length > 0) {
             sinceSeq = findSeq[0].seq;
           } else {
-            sinceFound = false;
+            // Check if since id is older than earliest known seq in DB
+            const minSeqRow = this.sql.exec<{ min_seq: number }>(
+              "SELECT min(seq) as min_seq FROM messages"
+            ).toArray();
+            const minSeq = minSeqRow[0]?.min_seq;
+            if (minSeq !== undefined && minSeq !== null) {
+              sinceSeq = 0;
+            } else {
+              return { ok: true, count: 0, messages: [], latest_id: trimmedSince, next: null };
+            }
           }
         }
 
-        if (!sinceFound) {
-          // If a specific since=<id> was provided but not found in the DB,
-          // do NOT return all historical messages. Return empty list with latest DB id.
-          const lastWhere: string[] = ["lower(project) != 'system'", "lower(type) NOT IN ('ping', 'pong')"];
-          const lastParams: any[] = [];
-          if (!targetProjects.includes("*")) {
-            const projs = Array.from(new Set(targetProjects));
-            if (projs.length > 0) {
-              lastWhere.push(`project IN (${projs.map(() => "?").join(", ")})`);
-              lastParams.push(...projs);
-            }
-          }
-          if (agent && agent !== "admin") {
-            lastWhere.push("(to_agent = 'all' OR to_agent = ? OR from_agent = ?)");
-            lastParams.push(agent, agent);
-          }
-          const whereStr = lastWhere.length > 0 ? `WHERE ${lastWhere.join(" AND ")}` : "";
-          const lastRow = this.sql.exec<{ id: string }>(
-            `SELECT id FROM messages ${whereStr} ORDER BY seq DESC LIMIT 1`,
-            ...lastParams
+        let beforeSeq: number | null = null;
+        const trimmedBefore = (before || "").trim();
+        if (
+          trimmedBefore &&
+          trimmedBefore !== "0" &&
+          trimmedBefore !== "null" &&
+          trimmedBefore !== "undefined"
+        ) {
+          const findSeq = this.sql.exec<{ seq: number }>(
+            "SELECT seq FROM messages WHERE id = ? LIMIT 1",
+            trimmedBefore
           ).toArray();
-          return {
-            messages: [],
-            latest_id: lastRow.length > 0 ? lastRow[0].id : trimmedSince,
-          };
+          if (findSeq.length > 0) {
+            beforeSeq = findSeq[0].seq;
+          }
         }
 
         const whereClauses: string[] = [
-          "seq > ?",
           "lower(project) != 'system'",
           "lower(type) NOT IN ('ping', 'pong')",
         ];
-        const params: any[] = [sinceSeq];
+        const params: any[] = [];
 
-        // Project filter: if '*' not included, filter projects
+        if (sinceSeq !== null) {
+          whereClauses.push("seq > ?");
+          params.push(sinceSeq);
+        }
+
+        if (beforeSeq !== null) {
+          whereClauses.push("seq < ?");
+          params.push(beforeSeq);
+        }
+
         if (!targetProjects.includes("*")) {
           const projs = Array.from(new Set(targetProjects));
           if (projs.length > 0) {
@@ -1406,108 +1564,93 @@ export class AgentMeshHub {
           }
         }
 
-        // Recipient filter: unless agent is 'admin' or empty
         if (agent && agent !== "admin") {
           whereClauses.push("(to_agent = 'all' OR to_agent = ? OR from_agent = ?)");
           params.push(agent, agent);
         }
 
-        const query =
-          `SELECT * FROM messages WHERE ${whereClauses.join(" AND ")} ORDER BY seq ASC LIMIT ?`;
-        params.push(limit);
+        const sortDir = order.toUpperCase() === "ASC" ? "ASC" : "DESC";
+        // Fetch up to limit + 1 to detect whether an older page exists
+        const query = `SELECT * FROM messages WHERE ${whereClauses.join(" AND ")} ORDER BY seq ${sortDir} LIMIT ?`;
+        params.push(limit + 1);
 
         const rows = this.sql.exec<MessageRow>(query, ...params).toArray();
-        const messages: AgentMessage[] = rows.map((r) => ({
-          id: r.id,
-          project: r.project,
-          from: r.from_agent,
-          to: r.to_agent,
-          type: r.type,
-          reply_to: r.reply_to || null,
-          body: r.body,
-          timestamp: r.timestamp,
-          subject: r.subject || `proj.${r.project}.${r.type}`,
-        }));
 
-        let latestId: string | null = null;
-        if (messages.length > 0) {
-          latestId = messages[messages.length - 1].id;
-        } else if (
-          trimmedSince &&
-          trimmedSince !== "0" &&
-          trimmedSince !== "null" &&
-          trimmedSince !== "undefined"
-        ) {
-          latestId = trimmedSince;
-        } else {
-          // Find newest message id for these projects if any
-          const lastWhere: string[] = ["lower(project) != 'system'", "lower(type) NOT IN ('ping', 'pong')"];
-          const lastParams: any[] = [];
-          if (!targetProjects.includes("*")) {
-            const projs = Array.from(new Set(targetProjects));
-            if (projs.length > 0) {
-              lastWhere.push(`project IN (${projs.map(() => "?").join(", ")})`);
-              lastParams.push(...projs);
-            }
+        const messages: AgentMessage[] = [];
+        let currentBytes = 150; // JSON envelope overhead
+        let hasMoreOlder = false;
+
+        for (let i = 0; i < rows.length; i++) {
+          if (messages.length >= limit) {
+            hasMoreOlder = true;
+            break;
           }
-          if (agent && agent !== "admin") {
-            lastWhere.push("(to_agent = 'all' OR to_agent = ? OR from_agent = ?)");
-            lastParams.push(agent, agent);
+
+          const r = rows[i];
+          const msg: AgentMessage = {
+            id: r.id,
+            project: r.project,
+            from: r.from_agent,
+            to: r.to_agent,
+            type: r.type,
+            reply_to: r.reply_to || null,
+            body: r.body,
+            timestamp: r.timestamp,
+            subject: r.subject || `proj.${r.project}.${r.type}`,
+          };
+
+          const msgBytes = 2 + JSON.stringify(msg).length;
+          if (messages.length > 0 && currentBytes + msgBytes > maxBytes) {
+            hasMoreOlder = true;
+            break;
           }
-          const whereStr = lastWhere.length > 0 ? `WHERE ${lastWhere.join(" AND ")}` : "";
-          const lastRow = this.sql.exec<{ id: string }>(
-            `SELECT id FROM messages ${whereStr} ORDER BY seq DESC LIMIT 1`,
-            ...lastParams
-          ).toArray();
-          latestId = lastRow.length > 0 ? lastRow[0].id : null;
+
+          messages.push(msg);
+          currentBytes += msgBytes;
         }
 
-        return { messages, latest_id: latestId };
+        if (rows.length > messages.length) {
+          hasMoreOlder = true;
+        }
+
+        let latestId: string | null = null;
+        let nextCursor: string | null = null;
+
+        if (messages.length > 0) {
+          if (order === "desc") {
+            latestId = messages[0].id;
+            if (hasMoreOlder) {
+              nextCursor = messages[messages.length - 1].id;
+            }
+          } else {
+            latestId = messages[messages.length - 1].id;
+            if (hasMoreOlder) {
+              nextCursor = messages[messages.length - 1].id;
+            }
+          }
+        } else if (trimmedSince && trimmedSince !== "0") {
+          latestId = trimmedSince;
+        }
+
+        return {
+          ok: true,
+          count: messages.length,
+          messages,
+          latest_id: latestId,
+          next: nextCursor,
+        };
       } catch (err) {
         console.error("[queryMessages SQL Error]", err);
       }
     }
 
-    // Fallback if SQL not available: DO storage list
-    const results: AgentMessage[] = [];
-    const projectSet = new Set<string>(targetProjects);
-    const projectList = targetProjects.includes("*") ? [] : Array.from(projectSet);
-
-    for (const proj of projectList) {
-      if (proj === "system") continue;
-      const listKey = `recent:${proj}`;
-      const keys = (await this.state.storage.get<string[]>(listKey)) || [];
-      for (const k of keys) {
-        const m = await this.state.storage.get<AgentMessage>(k);
-        if (m && m.project !== "system" && m.type !== "ping" && m.type !== "pong") {
-          if (!agent || m.to === "all" || m.to === agent || m.from === agent) {
-            results.push(m);
-          }
-        }
-      }
-    }
-
-    results.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-
-    let finalMessages = results;
-    const trimmedSince = (since || "").trim();
-    if (trimmedSince && trimmedSince !== "0" && trimmedSince !== "null") {
-      const idx = results.findIndex((m) => m.id === trimmedSince);
-      if (idx !== -1) {
-        finalMessages = results.slice(idx + 1);
-      }
-    }
-
-    if (finalMessages.length > limit) {
-      finalMessages = finalMessages.slice(0, limit);
-    }
-
-    const latestId =
-      finalMessages.length > 0
-        ? finalMessages[finalMessages.length - 1].id
-        : (trimmedSince && trimmedSince !== "0" ? trimmedSince : null);
-
-    return { messages: finalMessages, latest_id: latestId };
+    return {
+      ok: true,
+      count: 0,
+      messages: [],
+      latest_id: null,
+      next: null,
+    };
   }
 }
 

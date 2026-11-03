@@ -55,10 +55,10 @@ def fetch_inbox(since_id=""):
 async def run_websocket():
     ws_url = HUB_URL.replace("https://", "wss://").replace("http://", "ws://")
     projects_arg = ",".join(PROJECTS)
-    endpoint = f"{ws_url}/connect?agent={NAME}&projects={projects_arg}&token={TOKEN}"
+    endpoint = f"{ws_url}/connect?agent={NAME}&projects={projects_arg}"
 
     print(f"Connecting to Cloudflare Hub WebSocket: {ws_url}...")
-    headers = {"User-Agent": f"AgentMesh/{NAME}"}
+    headers = {"Authorization": f"Bearer {TOKEN}", "User-Agent": f"AgentMesh/{NAME}"}
     connect_kwargs = {"ping_interval": None, "ping_timeout": None}
     try:
         import inspect

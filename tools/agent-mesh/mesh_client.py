@@ -347,7 +347,6 @@ async def run_websocket_loop(cfg: dict, seen_ids: set):
         qs_params = {
             "agent": cfg["agent"],
             "projects": projs_str,
-            "token": cfg["token"],
             "since": last_id,
         }
 
@@ -356,7 +355,10 @@ async def run_websocket_loop(cfg: dict, seen_ids: set):
 
         try:
             print(f"[{cfg['agent']}] Connecting WebSocket to {ws_url} (projects: {projs_str})...")
-            headers_dict = {"User-Agent": f"AgentMesh/{cfg['agent']}"}
+            headers_dict = {
+                "Authorization": f"Bearer {cfg['token']}",
+                "User-Agent": f"AgentMesh/{cfg['agent']}",
+            }
             connect_kwargs = {
                 "ping_interval": None,  # Hub alarm heartbeat handles ping/pong; disable client 20s auto-ping
                 "ping_timeout": None,

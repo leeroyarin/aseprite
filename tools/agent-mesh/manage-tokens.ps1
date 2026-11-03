@@ -1,13 +1,14 @@
 # tools/agent-mesh/manage-tokens.ps1
 param(
     [Parameter(Position=0, Mandatory=$true)]
-    [ValidateSet("list", "create", "revoke")]
+    [ValidateSet("list", "create", "rotate", "revoke")]
     [string]$Command,
 
     [string]$Agent,
     [string]$Projects,
     [string]$Token,
     [string]$Description,
+    [int]$GraceSeconds = 3600,
     [switch]$ActiveOnly,
     [switch]$Purge,
     [string]$HubUrl = $env:HUB_URL,
@@ -53,12 +54,14 @@ switch ($Command) {
         }
         Write-Host "Total Tokens: $($resp.tokens.Count)`n" -ForegroundColor Cyan
         $resp.tokens | ForEach-Object {
+            $statusStr = if ($_.revoked_at -or $_.revoked) { "REVOKED" } elseif ($_.expires_at -or $_.expiry) { "EXPIRING" } else { "ACTIVE" }
             [PSCustomObject]@{
                 Token       = if ($_.token_hash_prefix) { $_.token_hash_prefix } elseif ($_.token_hash) { $_.token_hash.Substring(0, 12) + "..." } else { $_.token }
                 Agent       = $_.agent
                 Projects    = ($_.projects -join ", ")
-                Status      = if ($_.revoked_at) { "REVOKED" } else { "ACTIVE" }
-                CreatedAt   = $_.created_at
+                Status      = $statusStr
+                CreatedAt   = if ($_.created_at) { $_.created_at } else { $_.created }
+                ExpiresAt   = if ($_.expires_at) { $_.expires_at } elseif ($_.expiry) { $_.expiry } else { "-" }
                 Description = $_.description
             }
         } | Format-Table -AutoSize
@@ -99,6 +102,39 @@ switch ($Command) {
         Write-Host "------------------------------------------------------------"
         Write-Host " Usage in current PowerShell session:" -ForegroundColor Cyan
         Write-Host "   `$env:AGENT_NAME=`"$($created.agent)`"; `$env:AGENT_TOKEN=`"$($created.token)`""
+        Write-Host "============================================================`n"
+    }
+
+    "rotate" {
+        if (-not $Agent) {
+            $Agent = Read-Host "Enter Agent Name to rotate (e.g. arin-pc)"
+        }
+        $body = @{
+            agent         = $Agent
+            grace_seconds = $GraceSeconds
+        }
+        if ($Projects) {
+            $body.projects = $Projects.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        }
+        if ($Description) { $body.description = $Description }
+
+        $jsonBody = $body | ConvertTo-Json
+        $url = "$HubUrl/admin/tokens/rotate"
+        $resp = Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $jsonBody
+
+        Write-Host ""
+        Write-Host "============================================================" -ForegroundColor Green
+        Write-Host " Agent Token Rotated Successfully" -ForegroundColor Green
+        Write-Host "============================================================" -ForegroundColor Green
+        Write-Host " Agent:        $($resp.agent)"
+        Write-Host " New Token:    $($resp.new_token)" -ForegroundColor Yellow
+        Write-Host " Projects:     $(($resp.projects -join ', '))"
+        Write-Host " Grace Period: $($resp.grace_seconds) seconds"
+        Write-Host " Old Expiry:   $($resp.expires_at)"
+        Write-Host "------------------------------------------------------------"
+        Write-Host " A rotation notice was sent to the agent's primary project." -ForegroundColor Cyan
+        Write-Host " Usage in current PowerShell session:" -ForegroundColor Cyan
+        Write-Host "   `$env:AGENT_NAME=`"$($resp.agent)`"; `$env:AGENT_TOKEN=`"$($resp.new_token)`""
         Write-Host "============================================================`n"
     }
 

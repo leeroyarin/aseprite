@@ -18,3 +18,8 @@ AI-agent control via MCP, PixelLab extension integration, built-in project versi
 - Do NOT commit the PixelLab extension or any of its files (proprietary, contains license secret). It is installed at runtime from the user's own copy.
 - Do NOT touch `third_party/` (submodules) except when a phase explicitly says so.
 - New user-visible strings go in `data/strings/en.ini`; new menu items in `data/gui.xml`.
+
+## Agent Mesh (Cross-Agent Communication)
+- Hub lives under `tools/agent-mesh/` and `tools/agent-mesh/cloudflare-hub/`.
+- Auth is Bearer header only (`Authorization: Bearer <token>`). Token-in-URL is rejected.
+- Admin secret and agent tokens are env-only (`ADMIN_TOKEN`, `HUB_TOKEN`, `AGENT_TOKEN`). Never print, save, or commit tokens.
