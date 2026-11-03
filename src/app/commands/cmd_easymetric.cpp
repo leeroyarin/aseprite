@@ -2185,7 +2185,18 @@ static Render3DResult compute3DPreviewImages(
   const float cy = std::cos(yaw), sy = std::sin(yaw);
   const float cp = std::cos(pitch), sp = std::sin(pitch);
 
-  const float rxX = cy,      rxY = 0.0f, rzX = -sy;
+  // Screen-right axis, with its sign corrected: the old axis
+  // (cy, 0, -sy) made screen-right x screen-down = view direction,
+  // which is a left-handed (mirrored) camera in this Y-down world,
+  // where screen-right x screen-up must equal the view direction.
+  // With the old sign, a straight-on Front view (yaw 180) put
+  // world +X on screen left, so every face texture in Preview
+  // (and in bake3DToDoc, which shares this function) appeared
+  // mirrored left-to-right, and Front/Right swapped screen sides.
+  // Negating only this axis keeps screen-down and the view
+  // direction unchanged, so vertical orientation, depth, and
+  // which faces are visible are unchanged; only the mirror goes.
+  const float rxX = -cy,     rxY = 0.0f, rzX = sy;
   const float ryX = sy * sp, ryY = cp,   ryZ = cy * sp;
   const float vdX = sy * cp, vdY = -sp,  vdZ = cy * cp;
 
