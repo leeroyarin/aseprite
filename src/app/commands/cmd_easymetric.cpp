@@ -216,6 +216,8 @@ struct SixSurfaceData {
   std::array<int, kFaceCount> h = { 24, 24, 24, 24, 24, 24 };
   std::array<std::vector<uint32_t>, kFaceCount> pixels;
   std::array<std::vector<uint8_t>, kFaceCount> depthPixels;
+  std::array<std::vector<uint8_t>, kFaceCount> baseAlpha;
+  std::array<bool, kFaceCount> hasBaseLayer = { false, false, false, false, false, false };
   std::array<gfx::Rect, kFaceCount> bounds;
   std::array<bool, 3> colLinked = { false, false, false };
   bool hasSlices = false;
@@ -229,7 +231,9 @@ struct SixSurfaceData {
       h[f] = S;
       pixels[f].assign(S * S, 0);
       depthPixels[f].assign(S * S, 128);
+      baseAlpha[f].assign(S * S, 0);
     }
+    hasBaseLayer.fill(false);
     colLinked.fill(false);
   }
 
@@ -241,6 +245,7 @@ struct SixSurfaceData {
     h[face] = fh;
     pixels[face].assign(fw * fh, 0);
     depthPixels[face].assign(fw * fh, 128);
+    baseAlpha[face].assign(fw * fh, 0);
     S = std::max(S, std::max(fw, fh));
   }
 
@@ -331,8 +336,22 @@ struct SixSurfaceData {
     return sample(sf, u, v);
   }
 
+  bool isBaseSolid(int face, int u, int v) const
+  {
+    if (face < 0 || face >= kFaceCount) return false;
+    const int fw = w[face];
+    const int fh = h[face];
+    if (fw <= 0 || fh <= 0 || baseAlpha[face].empty()) return false;
+    u = std::clamp(u, 0, fw - 1);
+    v = std::clamp(v, 0, fh - 1);
+    return baseAlpha[face][v * fw + u] > 16;
+  }
+
   bool isFaceSolid(int face, int u, int v) const
   {
+    if (hasBaseLayer[face]) {
+      return isBaseSolid(face, u, v);
+    }
     return doc::rgba_geta(sampleSymmetric(face, u, v)) > 16;
   }
 };
@@ -418,15 +437,25 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
         bool solid = true;
 
         if (activeTopDown) {
-          const int uTop = std::clamp(int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceTop]), 0, data.w[kFaceTop] - 1);
-          const int vTop = std::clamp(int((float(z) + 0.5f) / float(vol.vz) * data.h[kFaceTop]), 0, data.h[kFaceTop] - 1);
+          const int uTop = std::clamp(
+            int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceTop]), 0, data.w[kFaceTop] - 1);
+          const int vTop = std::clamp(
+            int((float(z) + 0.5f) / float(vol.vz) * data.h[kFaceTop]), 0, data.h[kFaceTop] - 1);
           bool topSolid = data.isFaceSolid(kFaceTop, uTop, vTop);
 
           if (!data.colLinked[0] && hasDown) {
-            const int uDown = std::clamp(int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceDown]), 0, data.w[kFaceDown] - 1);
-            const int vDown = std::clamp(int((float(vol.vz - 1 - z) + 0.5f) / float(vol.vz) * data.h[kFaceDown]), 0, data.h[kFaceDown] - 1);
-            bool downSolid = data.isFaceSolid(kFaceDown, uDown, vDown);
-            topSolid = (hasTop ? (topSolid || downSolid) : downSolid);
+            const int uDown = std::clamp(
+              int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceDown]), 0, data.w[kFaceDown] - 1);
+            const int vDown = std::clamp(
+              int((float(vol.vz - 1 - z) + 0.5f) / float(vol.vz) * data.h[kFaceDown]),
+              0, data.h[kFaceDown] - 1);
+            const bool downSolid = data.isFaceSolid(kFaceDown, uDown, vDown);
+            if (data.hasBaseLayer[kFaceTop] && hasTop) {
+              // Base silhouette forms outer bounding hull: unlinked Down cannot expand voxels
+            }
+            else {
+              topSolid = (hasTop ? (topSolid || downSolid) : downSolid);
+            }
           }
           if (!topSolid) {
             solid = false;
@@ -434,15 +463,25 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
         }
 
         if (solid && activeFrontBack) {
-          const int uFront = std::clamp(int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceFront]), 0, data.w[kFaceFront] - 1);
-          const int vFront = std::clamp(int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceFront]), 0, data.h[kFaceFront] - 1);
+          const int uFront = std::clamp(
+            int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceFront]), 0, data.w[kFaceFront] - 1);
+          const int vFront = std::clamp(
+            int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceFront]), 0, data.h[kFaceFront] - 1);
           bool frontSolid = data.isFaceSolid(kFaceFront, uFront, vFront);
 
           if (!data.colLinked[1] && hasBack) {
-            const int uBack = std::clamp(int((float(vol.vx - 1 - x) + 0.5f) / float(vol.vx) * data.w[kFaceBack]), 0, data.w[kFaceBack] - 1);
-            const int vBack = std::clamp(int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceBack]), 0, data.h[kFaceBack] - 1);
-            bool backSolid = data.isFaceSolid(kFaceBack, uBack, vBack);
-            frontSolid = (hasFront ? (frontSolid || backSolid) : backSolid);
+            const int uBack = std::clamp(
+              int((float(vol.vx - 1 - x) + 0.5f) / float(vol.vx) * data.w[kFaceBack]),
+              0, data.w[kFaceBack] - 1);
+            const int vBack = std::clamp(
+              int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceBack]), 0, data.h[kFaceBack] - 1);
+            const bool backSolid = data.isFaceSolid(kFaceBack, uBack, vBack);
+            if (data.hasBaseLayer[kFaceFront] && hasFront) {
+              // Base silhouette forms outer bounding hull: unlinked Back cannot expand voxels
+            }
+            else {
+              frontSolid = (hasFront ? (frontSolid || backSolid) : backSolid);
+            }
           }
           if (!frontSolid) {
             solid = false;
@@ -450,15 +489,25 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
         }
 
         if (solid && activeRightLeft) {
-          const int uRight = std::clamp(int((float(vol.vz - 1 - z) + 0.5f) / float(vol.vz) * data.w[kFaceRight]), 0, data.w[kFaceRight] - 1);
-          const int vRight = std::clamp(int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceRight]), 0, data.h[kFaceRight] - 1);
+          const int uRight = std::clamp(
+            int((float(vol.vz - 1 - z) + 0.5f) / float(vol.vz) * data.w[kFaceRight]),
+            0, data.w[kFaceRight] - 1);
+          const int vRight = std::clamp(
+            int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceRight]), 0, data.h[kFaceRight] - 1);
           bool sideSolid = data.isFaceSolid(kFaceRight, uRight, vRight);
 
           if (!data.colLinked[2] && hasLeft) {
-            const int uLeft = std::clamp(int((float(z) + 0.5f) / float(vol.vz) * data.w[kFaceLeft]), 0, data.w[kFaceLeft] - 1);
-            const int vLeft = std::clamp(int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceLeft]), 0, data.h[kFaceLeft] - 1);
-            bool leftSolid = data.isFaceSolid(kFaceLeft, uLeft, vLeft);
-            sideSolid = (hasRight ? (sideSolid || leftSolid) : leftSolid);
+            const int uLeft = std::clamp(
+              int((float(z) + 0.5f) / float(vol.vz) * data.w[kFaceLeft]), 0, data.w[kFaceLeft] - 1);
+            const int vLeft = std::clamp(
+              int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceLeft]), 0, data.h[kFaceLeft] - 1);
+            const bool leftSolid = data.isFaceSolid(kFaceLeft, uLeft, vLeft);
+            if (data.hasBaseLayer[kFaceRight] && hasRight) {
+              // Base silhouette forms outer bounding hull: unlinked Left cannot expand voxels
+            }
+            else {
+              sideSolid = (hasRight ? (sideSolid || leftSolid) : leftSolid);
+            }
           }
           if (!sideSolid) {
             solid = false;
@@ -1936,6 +1985,9 @@ static bool extractSixSurfaces(
       }
     };
 
+    const bool faceHasBase = (baseLyr != nullptr);
+    out.hasBaseLayer[f] = faceHasBase;
+
     bool hasPixels = false;
 
     for (int v = 0; v < fh; ++v) {
@@ -1943,29 +1995,32 @@ static bool extractSixSurfaces(
       for (int u = 0; u < fw; ++u) {
         const int canvasX = faceRect.x + u;
 
-        uint32_t baseCol = getRgbaPixel(baseImg, canvasX - baseOx, canvasY - baseOy);
-        uint32_t texCol = getRgbaPixel(texImg, canvasX - texOx, canvasY - texOy);
+        const uint32_t baseCol = getRgbaPixel(baseImg, canvasX - baseOx, canvasY - baseOy);
+        const uint32_t texCol = getRgbaPixel(texImg, canvasX - texOx, canvasY - texOy);
+        const uint8_t bA = doc::rgba_geta(baseCol);
+        out.baseAlpha[f][v * fw + u] = bA;
 
         uint32_t finalCol = 0;
-        if (baseImg && texImg) {
-          // Two-layer clipping mask & smart object structure:
-          // Base layer defines alpha clipping mask.
-          // When base alpha > 16: texture layer overrides base content.
-          // When texture is transparent: falls back to base content.
-          // When texture is semi-transparent: alpha-blends over base content.
-          // When base alpha <= 16: masked out (transparent).
-          if (doc::rgba_geta(baseCol) > 16) {
-            const int aT = doc::rgba_geta(texCol);
-            if (aT == 255) {
-              finalCol = texCol;
-            }
-            else if (aT > 0) {
-              const int invA = 255 - aT;
-              finalCol = doc::rgba(
-                (doc::rgba_getr(texCol) * aT + doc::rgba_getr(baseCol) * invA) / 255,
-                (doc::rgba_getg(texCol) * aT + doc::rgba_getg(baseCol) * invA) / 255,
-                (doc::rgba_getb(texCol) * aT + doc::rgba_getb(baseCol) * invA) / 255,
-                doc::rgba_geta(baseCol));
+        if (faceHasBase) {
+          // Base sheet strictly defines the silhouette boundary:
+          // If base pixel is transparent (bA <= 16), content is clamped to 0.
+          if (bA > 16) {
+            if (texImg) {
+              const int aT = doc::rgba_geta(texCol);
+              if (aT == 255) {
+                finalCol = texCol;
+              }
+              else if (aT > 0) {
+                const int invA = 255 - aT;
+                finalCol = doc::rgba(
+                  (doc::rgba_getr(texCol) * aT + doc::rgba_getr(baseCol) * invA) / 255,
+                  (doc::rgba_getg(texCol) * aT + doc::rgba_getg(baseCol) * invA) / 255,
+                  (doc::rgba_getb(texCol) * aT + doc::rgba_getb(baseCol) * invA) / 255,
+                  bA);
+              }
+              else {
+                finalCol = baseCol;
+              }
             }
             else {
               finalCol = baseCol;
@@ -1974,9 +2029,6 @@ static bool extractSixSurfaces(
         }
         else if (texImg) {
           finalCol = texCol;
-        }
-        else if (baseImg) {
-          finalCol = baseCol;
         }
 
         if (doc::rgba_geta(finalCol) > 0) {
@@ -1995,7 +2047,8 @@ static bool extractSixSurfaces(
       const doc::Image* eImg = extra->image();
       const int ox = extra->cel()->x();
       const int oy = extra->cel()->y();
-      const bool editingTex = (docView->editor()->layer() == texLyr && baseImg);
+      const bool editingBase = (docView->editor()->layer() == baseLyr);
+      const bool editingTex = (docView->editor()->layer() == texLyr);
 
       for (int v = 0; v < fh; ++v) {
         const int canvasY = faceRect.y + v;
@@ -2007,11 +2060,19 @@ static bool extractSixSurfaces(
           if (sx < 0 || sx >= eImg->width()) continue;
           const uint32_t ec = getRgbaPixel(eImg, sx, sy);
           if (doc::rgba_geta(ec) > 0) {
-            if (editingTex) {
-              const int bx = canvasX - baseOx;
-              const int by = canvasY - baseOy;
-              uint32_t bc = getRgbaPixel(baseImg, bx, by);
-              if (doc::rgba_geta(bc) > 16) {
+            if (editingBase) {
+              out.pixels[f][v * fw + u] = ec;
+              out.baseAlpha[f][v * fw + u] = doc::rgba_geta(ec);
+              hasPixels = true;
+            }
+            else if (editingTex) {
+              if (faceHasBase) {
+                const int bx = canvasX - baseOx;
+                const int by = canvasY - baseOy;
+                const uint32_t bc = getRgbaPixel(baseImg, bx, by);
+                if (doc::rgba_geta(bc) <= 16) {
+                  continue; // Clamped by Base silhouette
+                }
                 const int aT = doc::rgba_geta(ec);
                 if (aT == 255) {
                   out.pixels[f][v * fw + u] = ec;
@@ -2029,10 +2090,10 @@ static bool extractSixSurfaces(
                 }
                 hasPixels = true;
               }
-            }
-            else {
-              out.pixels[f][v * fw + u] = ec;
-              hasPixels = true;
+              else {
+                out.pixels[f][v * fw + u] = ec;
+                hasPixels = true;
+              }
             }
           }
         }
@@ -2054,7 +2115,9 @@ static bool extractSixSurfaces(
       }
     }
 
-    if (!hasPixels) {
+    // Only populate starter pixels if the sprite has NO established shared layers
+    // and NO base/texture layers (pure virgin document initialization).
+    if (!hasPixels && !useShared && !baseLyr && !texLyr) {
       for (int v = 0; v < fh; ++v) {
         for (int u = 0; u < fw; ++u) {
           out.pixels[f][v * fw + u] = starterSurfacePixel(f, u, v, fw, fh);
@@ -2072,6 +2135,8 @@ static bool extractSixSurfaces(
         const int btmFace = c * 2 + 1;
         out.pixels[btmFace] = out.pixels[topFace];
         out.depthPixels[btmFace] = out.depthPixels[topFace];
+        out.baseAlpha[btmFace] = out.baseAlpha[topFace];
+        out.hasBaseLayer[btmFace] = out.hasBaseLayer[topFace];
         out.w[btmFace] = out.w[topFace];
         out.h[btmFace] = out.h[topFace];
         out.bounds[btmFace] = out.bounds[topFace];
@@ -3736,6 +3801,25 @@ private:
             data.pixels[f][v * 24 + u] = starterSurfacePixel(f, u, v, 24, 24);
     }
 
+    uint64_t baseHash = 14695981039346656037ULL;
+    bool anyBase = false;
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (data.hasBaseLayer[f]) {
+        anyBase = true;
+        for (uint8_t a : data.baseAlpha[f]) {
+          baseHash ^= uint64_t(a > 16 ? 1 : 0);
+          baseHash *= 1099511628211ULL;
+        }
+      }
+    }
+    if (anyBase) {
+      if (m_lastBaseSilhouetteHash != 0 && baseHash != m_lastBaseSilhouetteHash) {
+        if (auto* sb = StatusBar::instance())
+          sb->showTip(1000, "Views clamped to Base sheet silhouette");
+      }
+      m_lastBaseSilhouetteHash = baseHash;
+    }
+
     // Check if any face slice dimensions changed and Link Dims is active
     if (m_linkDimensionsCheck && m_linkDimensionsCheck->isSelected()) {
       int changedFace = -1;
@@ -3808,6 +3892,11 @@ private:
         const uint8_t* dp = data.depthPixels[f].data();
         for (size_t i = 0; i < n; ++i)
           mix(dp[i]);
+      }
+      if (data.hasBaseLayer[f]) {
+        const uint8_t* ba = data.baseAlpha[f].data();
+        for (size_t i = 0; i < n; ++i)
+          mix(uint64_t(ba[i]));
       }
     }
 
@@ -4216,6 +4305,7 @@ private:
 
   ui::Timer m_timer;
   uint64_t m_lastHash = 0;
+  uint64_t m_lastBaseSilhouetteHash = 0;
   doc::ImageRef m_lastDiffImg;
   doc::ImageRef m_lastNormImg;
   doc::ImageRef m_lastDeptImg;

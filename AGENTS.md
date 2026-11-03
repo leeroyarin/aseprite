@@ -18,3 +18,4 @@ AI-agent control via MCP, PixelLab extension integration, built-in project versi
 - Do NOT commit the PixelLab extension or any of its files (proprietary, contains license secret). It is installed at runtime from the user's own copy.
 - Do NOT touch `third_party/` (submodules) except when a phase explicitly says so.
 - New user-visible strings go in `data/strings/en.ini`; new menu items in `data/gui.xml`.
+- Agent Mesh Coordination: When receiving tasks via Agent Mesh, send exactly ONE ACK confirmation. Do not enter auto-acknowledgment loops. Use differential hygiene checks (`git diff -U0 HEAD -- "src/*"`) for C++ line width validation.

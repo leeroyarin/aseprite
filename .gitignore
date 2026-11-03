@@ -28,3 +28,6 @@ graphify-out/
 inbox_*.jsonl
 
 
+.mesh_processed_tasks.json
+.mesh_subagent_*.json
+.mesh_*.lock
