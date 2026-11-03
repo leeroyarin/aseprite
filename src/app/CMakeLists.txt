@@ -475,6 +475,11 @@ target_sources(app-lib PRIVATE
   commands/cmd_save_palette.cpp
   commands/cmd_version.cpp
   commands/cmd_easymetric.cpp
+  commands/easymetric_model.cpp
+  commands/easymetric_render.cpp
+  commands/easymetric_sheets.cpp
+  commands/easymetric_ui.cpp
+  commands/easymetric_volume.cpp
   versions/version_store.cpp
   commands/cmd_scroll.cpp
   commands/cmd_scroll_center.cpp
