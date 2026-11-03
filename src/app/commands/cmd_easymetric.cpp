@@ -81,6 +81,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <typeinfo>
 #include <vector>
 
 #if defined(_WIN32)
@@ -2905,7 +2906,22 @@ public:
         else {
           ed->setClipSpriteBounds(gfx::Rect(0, 0, spr->width(), spr->height()));
         }
-        doc::LayerImage* lyr = shared.textureLayer ? shared.textureLayer : shared.baseLayer;
+        // Bug 3 fix: a panel must NOT force the texture layer.
+        // Before this, entering the studio always switched the
+        // active layer to Surface_Texture, even if the user had
+        // Surface_Base (or Surface_DEPTH) selected in the Layers
+        // panel, and every later initLayersAndFraming() did it
+        // again. Now the panel follows the layer the user had
+        // selected in the main editor before entering the
+        // studio, if it is one of the three sheets, and only
+        // falls back to texture (then base) otherwise.
+        doc::Layer* preStudioLayer = m_docView->editor() ? m_docView->editor()->layer() : nullptr;
+        doc::LayerImage* lyr = nullptr;
+        if (preStudioLayer == shared.baseLayer || preStudioLayer == shared.textureLayer ||
+            preStudioLayer == shared.depthLayer)
+          lyr = static_cast<doc::LayerImage*>(preStudioLayer);
+        if (!lyr)
+          lyr = shared.textureLayer ? shared.textureLayer : shared.baseLayer;
         if (!lyr) {
           SurfaceLayerPair sp = findSurfaceLayers(spr, f);
           lyr = sp.texLayer ? sp.texLayer : sp.baseLayer;
@@ -3135,13 +3151,20 @@ public:
         m_docView->setActivePaneEditor(m_editors[topFace]);
       }
       if (spr) {
-        SharedSurfaceLayers shared = findSharedLayers(spr);
-        if (shared.textureLayer)
-          m_editors[topFace]->setLayer(shared.textureLayer);
-        else {
-          const std::string topLyrName = std::string("Surface_") + kFaceSpecs[topFace].sliceName;
-          if (doc::LayerImage* lyr = findLayerByName(spr, topLyrName))
-            m_editors[topFace]->setLayer(lyr);
+        // Bug 3: linking a column must not flip the active
+        // layer to texture. Keep the user's chosen sheet if
+        // there is one, otherwise keep the panel's own layer.
+        if (doc::LayerImage* chosen = activeSheetLayer(spr))
+          m_editors[topFace]->setLayer(chosen);
+        else if (!m_editors[topFace]->layer()) {
+          SharedSurfaceLayers shared = findSharedLayers(spr);
+          if (shared.textureLayer)
+            m_editors[topFace]->setLayer(shared.textureLayer);
+          else {
+            const std::string topLyrName = std::string("Surface_") + kFaceSpecs[topFace].sliceName;
+            if (doc::LayerImage* lyr = findLayerByName(spr, topLyrName))
+              m_editors[topFace]->setLayer(lyr);
+          }
         }
       }
 
@@ -3171,17 +3194,69 @@ public:
     pollAndRender(true);
   }
 
+  // Bug 1/2 helper: an editor is idle only when it is in its
+  // standby state, not mid-stroke. The old code used
+  // dynamic_cast<StandbyState*>, which is true for EVERY editor
+  // state, because DrawingState, MovingPixelsState,
+  // MovingCelState and SelectBoxState all inherit StandbyState,
+  // so the old "only in standby" guard never guarded anything.
+  // Idle here means exactly StandbyState, or the Easymetric
+  // wheel-zoom idle state the panels are created with.
+  bool isPanelEditorIdle(Editor* ed) const
+  {
+    if (!ed || !ed->getState()) return false;
+    const std::type_info& t = typeid(*ed->getState());
+    return t == typeid(StandbyState) || t == typeid(EasymetricWheelZoomState);
+  }
+
+  bool anyPanelEditorBusy() const
+  {
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (m_editors[f] && (m_editors[f]->hasCapture() || !isPanelEditorIdle(m_editors[f])))
+        return true;
+    }
+    return false;
+  }
+
+  // Bug 3 helper: the sheet layer the user actually chose, or
+  // nullptr if the active panel editor is not on a sheet. The
+  // active panel editor is the one the Layers panel last set
+  // (Timeline::setLayer sets that editor's layer), so it is the
+  // user's choice, not a studio default.
+  doc::LayerImage* activeSheetLayer(doc::Sprite* spr) const
+  {
+    if (!spr) return nullptr;
+    SharedSurfaceLayers shared = findSharedLayers(spr);
+    doc::Layer* active = m_docView->editor() ? m_docView->editor()->layer() : nullptr;
+    if (active == shared.baseLayer || active == shared.textureLayer ||
+        active == shared.depthLayer)
+      return static_cast<doc::LayerImage*>(active);
+    return nullptr;
+  }
+
   void initLayersAndFraming()
   {
     Doc* doc = m_docView->document();
     doc::Sprite* spr = doc ? doc->sprite() : nullptr;
     if (!spr) return;
 
+    // Bug 3: sync all panels to the user's chosen sheet layer
+    // when there is one. When the active editor is on a
+    // non-sheet layer, leave every panel's layer untouched:
+    // overwriting it with texture here is exactly what flipped
+    // the active layer back to texture after the user had
+    // chosen something else. Panels with no layer yet (studio
+    // entry) still get the texture/base fallback below.
+    doc::LayerImage* chosenSheet = activeSheetLayer(spr);
+    const bool busy = anyPanelEditorBusy();
+
     for (int f = 0; f < kFaceCount; ++f) {
       if (m_editors[f]) {
         SharedSurfaceLayers shared = findSharedLayers(spr);
-        doc::LayerImage* lyr = shared.textureLayer ? shared.textureLayer : shared.baseLayer;
-        if (!lyr) {
+        doc::LayerImage* lyr = chosenSheet;
+        if (!lyr && !m_editors[f]->layer())
+          lyr = shared.textureLayer ? shared.textureLayer : shared.baseLayer;
+        if (!lyr && !m_editors[f]->layer()) {
           SurfaceLayerPair sp = findSurfaceLayers(spr, f);
           lyr = sp.texLayer ? sp.texLayer : sp.baseLayer;
           if (!lyr) {
@@ -3206,7 +3281,12 @@ public:
         else {
           m_editors[f]->setClipSpriteBounds(gfx::Rect(0, 0, spr->width(), spr->height()));
         }
-        m_editors[f]->fitClipSpriteBounds();
+        // Bug 2: fitting resets an editor's zoom/scroll. Doing
+        // it while that editor (or any panel) is mid-stroke
+        // makes the panel jump/resize under the user's pen, so
+        // skip the fit when busy; the next idle poll fits it.
+        if (!busy)
+          m_editors[f]->fitClipSpriteBounds();
       }
     }
   }
@@ -3279,9 +3359,18 @@ protected:
     rowY[1] = rc.y + rowH[0] + bh;
   }
 
-  // Splitter under the cursor, or 0: 1..3 = vertical boundary before
-  // column c, 4 = horizontal boundary between the two rows.
-  int splitterAt(const gfx::Point& pos) const
+  // Bug 2: splitter under the cursor, or 0: 1..3 = vertical
+  // boundary before column c, 4 = horizontal boundary between
+  // the two rows — but ONLY if the cursor is actually in a
+  // splitter gap strip, not merely near one. The old hit test
+  // extended bw/2+s beyond the gap into both neighbouring
+  // panes, so a drawing stroke starting a few pixels inside a
+  // pane, or a click on a pane header that propagates up to
+  // this widget, was treated as a splitter drag and resized a
+  // panel while drawing. A drag may only start in
+  // [colX[c]-bw, colX[c]) vertically, or [rowY[1]-bh,
+  // rowY[1]) horizontally.
+  int splitterGapAt(const gfx::Point& pos) const
   {
     const gfx::Rect rc = clientBounds();
     const int s = std::max(1, ui::guiscale());
@@ -3291,17 +3380,11 @@ protected:
     computePaneLayout(rc, colX, colW, rowY, rowH);
     if (!rc.contains(pos))
       return 0;
-    // Vertical gap for column c is [colX[c]-bw, colX[c]), so its
-    // centre is colX[c]-bw/2, not colX[c] (the old code centred
-    // the hit area on the gap's right edge, so the resize cursor
-    // appeared up to half a bar inside the next pane and missed
-    // the left half of the painted bar).
     for (int c = 1; c < 4; ++c) {
-      if (std::abs(pos.x - (colX[c] - bw / 2)) <= bw / 2 + s)
+      if (pos.x >= colX[c] - bw && pos.x < colX[c])
         return c;
     }
-    const int midY = rowY[1] - bh / 2;
-    if (std::abs(pos.y - midY) <= bh / 2 + s)
+    if (pos.y >= rowY[1] - bh && pos.y < rowY[1])
       return 4;
     return 0;
   }
@@ -3315,7 +3398,7 @@ protected:
           return true;
         }
         auto* mouseMsg = static_cast<ui::MouseMessage*>(msg);
-        const int hit = splitterAt(mouseMsg->position());
+        const int hit = splitterGapAt(mouseMsg->position());
         if (hit != 0) {
           ui::set_mouse_cursor(hit == 4 ? ui::kSizeNSCursor : ui::kSizeWECursor);
           return true;
@@ -3324,8 +3407,13 @@ protected:
       }
       case ui::kMouseDownMessage: {
         auto* mouseMsg = static_cast<ui::MouseMessage*>(msg);
-        const int hit = splitterAt(mouseMsg->position());
-        if (hit != 0 && mouseMsg->left()) {
+        const int hit = splitterGapAt(mouseMsg->position());
+        // Bug 2: a splitter drag may only start from a real
+        // gap click, never while a panel editor is drawing,
+        // moving, or selecting (mouse captured or in a
+        // non-idle state). Without this, a stroke that began
+        // in a panel and propagated here could start resizing.
+        if (hit != 0 && mouseMsg->left() && !anyPanelEditorBusy()) {
           m_dragSplitter = hit;
           m_dragStart = mouseMsg->position();
           {
@@ -3350,7 +3438,7 @@ protected:
           // a later move must NOT keep resizing panes, and the
           // resize cursor must not stay stuck. Cancel the drag
           // instead of applying a stale dragStart to a new position.
-          if (!hasCapture()) {
+          if (!hasCapture() || anyPanelEditorBusy()) {
             m_dragSplitter = 0;
             m_hoverSplitter = 0;
             invalidate();
@@ -3408,7 +3496,7 @@ protected:
           invalidate();
           return true;
         }
-        const int hit = splitterAt(mouseMsg->position());
+        const int hit = splitterGapAt(mouseMsg->position());
         if (hit != m_hoverSplitter) {
           m_hoverSplitter = hit;
           invalidate();
@@ -4062,7 +4150,12 @@ private:
         // sprite size, so resizing a panel made the canvas
         // itself smaller, and repeated polls kept shrinking
         // it until the studio was left in a broken state.
-        if (m_dragSplitter == 0 && exact.w > 0 &&
+        // Bug 2: also never rebuild while any panel editor
+        // is busy (drawing/moving/selecting). A document
+        // change mid-stroke must not trigger a sheet rebuild
+        // or a panel fit, which is what made panels jump
+        // while drawing.
+        if (m_dragSplitter == 0 && !anyPanelEditorBusy() && exact.w > 0 &&
             (spr->width() != exact.w || spr->height() != exact.h)) {
           int oldW[kFaceCount], oldH[kFaceCount];
           sharedFaceSizes(spr, oldW, oldH);
@@ -4102,13 +4195,33 @@ private:
         for (int f = 0; f < kFaceCount; ++f)
           if (curEd == m_editors[f]) activeFace = f;
         if (activeFace != m_lastActiveFace) {
-          if (activeFace >= 0 && curEd &&
-              dynamic_cast<StandbyState*>(curEd->getState().get())) {
-            doc::Mask mask;
-            mask.replace(sharedFaceRect(spr, activeFace));
-            doc->setMask(&mask);
-            doc->setMaskVisible(true);
-            doc->notifySelectionChanged();
+          // Bug 1: the old guard here was
+          // dynamic_cast<StandbyState*>, which is true for
+          // every editor state (Drawing, MovingPixels,
+          // MovingCel and SelectBox all inherit StandbyState),
+          // so the mask was overwritten even mid-stroke and
+          // mid-transform, losing the user's sub-selection.
+          // isPanelEditorIdle() only matches the true idle
+          // states, and a non-empty mask already inside the
+          // new face's rect (a sub-selection the user made,
+          // then clicked away and back) is preserved, not
+          // replaced with the whole face rect.
+          if (activeFace >= 0 && curEd && isPanelEditorIdle(curEd)) {
+            const gfx::Rect faceRect = sharedFaceRect(spr, activeFace);
+            bool keepExisting = false;
+            if (doc->mask() && !doc->mask()->isEmpty()) {
+              const gfx::Rect m = doc->mask()->bounds();
+              keepExisting = (m.x >= faceRect.x && m.y >= faceRect.y &&
+                              m.x + m.w <= faceRect.x + faceRect.w &&
+                              m.y + m.h <= faceRect.y + faceRect.h);
+            }
+            if (!keepExisting) {
+              doc::Mask mask;
+              mask.replace(faceRect);
+              doc->setMask(&mask);
+              doc->setMaskVisible(true);
+              doc->notifySelectionChanged();
+            }
             m_lastActiveFace = activeFace;
           }
           else if (activeFace < 0) {
@@ -4146,8 +4259,11 @@ private:
       m_lastBaseSilhouetteHash = baseHash;
     }
 
-    // Check if any face slice dimensions changed and Link Dims is active
-    if (m_linkDimensionsCheck && m_linkDimensionsCheck->isSelected()) {
+    // Check if any face slice dimensions changed and Link Dims is active.
+    // Bug 2: never propagate/fit while a panel editor is busy;
+    // a dimension change detected mid-stroke must wait for the
+    // next idle poll, or the panel fit jumps under the pen.
+    if (m_linkDimensionsCheck && m_linkDimensionsCheck->isSelected() && !anyPanelEditorBusy()) {
       int changedFace = -1;
       for (int f = 0; f < kFaceCount; ++f) {
         if (m_lastFaceW[f] > 0 && (data.w[f] != m_lastFaceW[f] || data.h[f] != m_lastFaceH[f])) {
