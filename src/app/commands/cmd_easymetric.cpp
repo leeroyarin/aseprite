@@ -3063,6 +3063,17 @@ protected:
       case ui::kMouseMoveMessage: {
         auto* mouseMsg = static_cast<ui::MouseMessage*>(msg);
         if (m_dragSplitter != 0) {
+          // If mouse capture was lost mid-drag (window deactivated,
+          // drag interrupted, mouse released outside the widget),
+          // a later move must NOT keep resizing panes, and the
+          // resize cursor must not stay stuck. Cancel the drag
+          // instead of applying a stale dragStart to a new position.
+          if (!hasCapture()) {
+            m_dragSplitter = 0;
+            m_hoverSplitter = 0;
+            invalidate();
+            return true;
+          }
           const gfx::Rect rc = clientBounds();
           const int s = std::max(1, ui::guiscale());
           const int bw = 6 * s;
@@ -3085,8 +3096,20 @@ protected:
               pair = m_dragColWpx[left] + m_dragColWpx[m_dragSplitter];
             else
               pair = m_dragColWpx[left] + m_dragPreviewW;
+            // std::clamp is undefined when its upper bound is
+            // below its lower bound. That happens when a pair
+            // of narrow columns is smaller than twice the
+            // minimum column width (small window, or HiDPI
+            // guiscale making 64*guiscale large): dragging
+            // that boundary then fed a shrinking / negative
+            // width into the layout, which is exactly the
+            // "panel shrinks, then it crashes at the end"
+            // pattern. Clamp the upper bound up to the lower
+            // bound first, so a drag can never produce a
+            // negative or below-minimum column width.
+            const int hiCol = std::max(minColPx, pair - minColPx);
             const int newLeft = std::clamp(m_dragColWpx[left] + deltaPx,
-                                           minColPx, pair - minColPx);
+                                           minColPx, hiCol);
             m_colWpx[left] = newLeft;
             if (m_dragSplitter < 3)
               m_colWpx[m_dragSplitter] = pair - newLeft;
@@ -3095,8 +3118,9 @@ protected:
           }
           else {
             const int deltaPx = mouseMsg->position().y - m_dragStart.y;
+            const int hiRow = std::max(minRowPx, totalH - minRowPx);
             m_rowHpx = std::clamp(m_dragRowHpx + deltaPx,
-                                  minRowPx, totalH - minRowPx);
+                                  minRowPx, hiRow);
           }
           layout();
           invalidate();
@@ -3119,6 +3143,11 @@ protected:
         break;
       }
       case ui::kMouseLeaveMessage: {
+        if (m_dragSplitter != 0) {
+          m_dragSplitter = 0;
+          if (hasCapture())
+            releaseMouse();
+        }
         if (m_hoverSplitter != 0) {
           m_hoverSplitter = 0;
           invalidate();
@@ -3737,7 +3766,16 @@ private:
         // so a face resize via the dimension controls is not
         // double-applied.
         const gfx::Size exact = sharedSheetSize(spr);
-        if (exact.w > 0 && (spr->width() != exact.w || spr->height() != exact.h)) {
+        // Never rebuild the sheets (and so never shrink the
+        // canvas) while a panel splitter is being dragged:
+        // a UI layout drag must not mutate the document.
+        // Before this guard, a timer poll firing mid-drag
+        // could rebuild the UV sheets from a transient
+        // sprite size, so resizing a panel made the canvas
+        // itself smaller, and repeated polls kept shrinking
+        // it until the studio was left in a broken state.
+        if (m_dragSplitter == 0 && exact.w > 0 &&
+            (spr->width() != exact.w || spr->height() != exact.h)) {
           int oldW[kFaceCount], oldH[kFaceCount];
           sharedFaceSizes(spr, oldW, oldH);
           const double sx = (exact.w > 0 && spr->width() != exact.w)
