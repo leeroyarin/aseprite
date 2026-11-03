@@ -1,0 +1,62 @@
+name: easymetric-linux
+# Linux build + Easymetric tests for leeroyarin/aseprite, branch Aseprite-2.0.
+# This is NOT a replacement for the Windows MSVC build (tools/aseprite2-build.ps1)
+# or for manual GUI checks on Windows. It is a cross-check: it catches C++
+# compile errors and runs the Easymetric Lua suites headless on Linux.
+# Four-requirements is continue-on-error until TC 4.2/4.3 test expectations
+# are updated for PR #5 decoupling (see Codex investigation, 2026-11-03).
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [Aseprite-2.0]
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install Linux dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libpixman-1-dev libfreetype6-dev libharfbuzz-dev zlib1g-dev \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev \
+            libfontconfig1-dev xvfb
+      - name: Install Skia
+        shell: bash
+        run: |
+          skia_url=$(source laf/misc/skia-url.sh | xargs)
+          skia_file=$(basename "$skia_url")
+          curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
+          unzip "$skia_file" -d skia
+      - uses: aseprite/get-ninja@main
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DENABLE_TESTS=ON \
+            -DENABLE_SCRIPTING=on \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR="$(realpath skia)" \
+            -DSKIA_LIBRARY_DIR="$(realpath skia/out/Release-x64)"
+      - name: Build
+        shell: bash
+        run: |
+          cd build && ninja
+      - name: Easymetric regression (67 tests)
+        shell: bash
+        run: |
+          xvfb-run ./build/bin/aseprite -b --script tests/easymetric_test.lua
+      - name: Easymetric adversarial stress (54 tests)
+        shell: bash
+        run: |
+          xvfb-run ./build/bin/aseprite -b --script tests/easymetric_adversarial_stress.lua
+      - name: Easymetric four-requirements (23 tests, known TC 4.2/4.3 failures)
+        continue-on-error: true
+        shell: bash
+        run: |
+          xvfb-run ./build/bin/aseprite -b --script tests/easymetric_four_requirements_test.lua
