@@ -4582,6 +4582,14 @@ private:
 
       const float sprW = std::max(1.0f, float(doc->sprite()->width()));
       const float sprH = std::max(1.0f, float(doc->sprite()->height()));
+      // Per-face rect in the exported texture atlas (the flattened
+      // sprite). Previously every face was given UVs over the whole
+      // 0..1 atlas, so each face showed the entire atlas at once and
+      // transparent regions of other faces read as holes. Each face
+      // must instead sample only its own rect.
+      gfx::Rect faceRect[kFaceCount];
+      for (int f = 0; f < kFaceCount; ++f)
+        faceRect[f] = sharedFaceRect(doc->sprite(), f);
       const float halfX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown] }) * 0.5f;
       const float halfY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight] }) * 0.5f;
       const float halfZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown] }) * 0.5f;
@@ -4597,12 +4605,22 @@ private:
 
       int vIdx = 1, vtIdx = 1, vnIdx = 1;
 
-      auto emitQuad = [&](float x0, float y0, float z0,
+      // uOld/vOld are the old 0..1 coordinates across the voxel
+      // volume (orientation preserved exactly); they are remapped
+      // into this face's rect in the atlas. vOld is bottom-up, so
+      // (1 - vOld) is the distance down from the top of the face.
+      auto emitQuad = [&](int face,
+                          float x0, float y0, float z0,
                           float x1, float y1, float z1,
                           float x2, float y2, float z2,
                           float x3, float y3, float z3,
                           float nx, float ny, float nz,
-                          float u0, float v0, float u1, float v1) {
+                          float uOld0, float vOld0, float uOld1, float vOld1) {
+        const gfx::Rect& fr = faceRect[face];
+        const float u0 = (fr.x + uOld0 * float(data.w[face])) / sprW;
+        const float u1 = (fr.x + uOld1 * float(data.w[face])) / sprW;
+        const float v0 = 1.0f - (fr.y + (1.0f - vOld0) * float(data.h[face])) / sprH;
+        const float v1 = 1.0f - (fr.y + (1.0f - vOld1) * float(data.h[face])) / sprH;
         obj << "v " << x0 << " " << y0 << " " << z0 << "\n"
             << "v " << x1 << " " << y1 << " " << z1 << "\n"
             << "v " << x2 << " " << y2 << " " << z2 << "\n"
@@ -4642,7 +4660,7 @@ private:
               const float u1 = float(vx + 1) / float(vol.vx);
               const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
               const float v1 = 1.0f - float(vy) / float(vol.vy);
-              emitQuad(xMin, yMin, zMax,
+              emitQuad(kFaceFront, xMin, yMin, zMax,
                        xMax, yMin, zMax,
                        xMax, yMax, zMax,
                        xMin, yMax, zMax,
@@ -4656,7 +4674,7 @@ private:
               const float u1 = float(vol.vx - vx) / float(vol.vx);
               const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
               const float v1 = 1.0f - float(vy) / float(vol.vy);
-              emitQuad(xMax, yMin, zMin,
+              emitQuad(kFaceBack, xMax, yMin, zMin,
                        xMin, yMin, zMin,
                        xMin, yMax, zMin,
                        xMax, yMax, zMin,
@@ -4670,7 +4688,7 @@ private:
               const float u1 = float(vx + 1) / float(vol.vx);
               const float v0 = 1.0f - float(vz + 1) / float(vol.vz);
               const float v1 = 1.0f - float(vz) / float(vol.vz);
-              emitQuad(xMin, yMax, zMax,
+              emitQuad(kFaceTop, xMin, yMax, zMax,
                        xMax, yMax, zMax,
                        xMax, yMax, zMin,
                        xMin, yMax, zMin,
@@ -4684,7 +4702,7 @@ private:
               const float u1 = float(vx + 1) / float(vol.vx);
               const float v0 = 1.0f - float(vol.vz - vz) / float(vol.vz);
               const float v1 = 1.0f - float(vol.vz - 1 - vz) / float(vol.vz);
-              emitQuad(xMin, yMin, zMin,
+              emitQuad(kFaceDown, xMin, yMin, zMin,
                        xMax, yMin, zMin,
                        xMax, yMin, zMax,
                        xMin, yMin, zMax,
@@ -4698,7 +4716,7 @@ private:
               const float u1 = float(vol.vz - vz) / float(vol.vz);
               const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
               const float v1 = 1.0f - float(vy) / float(vol.vy);
-              emitQuad(xMax, yMin, zMax,
+              emitQuad(kFaceRight, xMax, yMin, zMax,
                        xMax, yMin, zMin,
                        xMax, yMax, zMin,
                        xMax, yMax, zMax,
@@ -4712,7 +4730,7 @@ private:
               const float u1 = float(vz + 1) / float(vol.vz);
               const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
               const float v1 = 1.0f - float(vy) / float(vol.vy);
-              emitQuad(xMin, yMin, zMin,
+              emitQuad(kFaceLeft, xMin, yMin, zMin,
                        xMin, yMin, zMax,
                        xMin, yMax, zMax,
                        xMin, yMax, zMin,
