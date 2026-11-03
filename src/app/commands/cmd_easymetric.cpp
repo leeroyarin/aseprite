@@ -2812,18 +2812,44 @@ public:
                          FromMouseWheel::On);
       return true;
     }
-    double dz = double(delta.y);
+    // Vertical wheel is ALWAYS zoom in a surface panel, never
+    // View scroll, regardless of the zoomWithWheel preference or
+    // whether the wheel is precise/high-resolution.
+    // Old precise handling divided dz by 1.5, clamped to [-1, 1]
+    // and then truncated with int(dz): a small precise delta
+    // (e.g. 0.66 after division) truncated to 0, so the wheel
+    // did nothing, and a large one jumped several zoom steps.
+    // Accumulate precise deltas instead, and use exactly one
+    // step per event for a normal (non-precise) mouse notch,
+    // whatever magnitude the OS reports for it.
+    int step = 0;
     if (msg->preciseWheel()) {
-      dz /= 1.5;
-      if (dz < -1.0) dz = -1.0;
-      else if (dz > 1.0) dz = 1.0;
+      m_wheelAccum += double(delta.y) / 4.0;
+      if (m_wheelAccum >= 1.0 || m_wheelAccum <= -1.0) {
+        step = int(m_wheelAccum);
+        m_wheelAccum -= double(step);
+      }
+      else {
+        // Swallow the event: a partial precise step must not
+        // fall through to View scroll, or the canvas displaces
+        // instead of zooming once the accumulation completes.
+        return true;
+      }
     }
+    else {
+      step = (delta.y > 0) ? 1 : -1;
+    }
+    if (step == 0)
+      return true;
     render::Zoom zoom = render::Zoom::fromLinearScale(
-      editor->zoom().linearScale() - int(dz));
+      editor->zoom().linearScale() - step);
     editor->setZoomAndCenterInMouse(zoom, msg->position(),
                                     Editor::ZoomBehavior::MOUSE);
     return true;
   }
+
+private:
+  double m_wheelAccum = 0.0;
 };
 
 class EasymetricMultiPaneView : public ui::Widget {
@@ -4121,6 +4147,21 @@ private:
   void pollAndRender(bool force)
   {
     if (!isVisible()) return;
+    // Wheel-zoom guarantee: a panel editor whose idle state has
+    // fallen back to plain StandbyState (for any reason — a state
+    // pop, a tool change, an editor recreated by a caller) would
+    // scroll the View on wheel instead of zooming, which is the
+    // reported "scroll displaces the canvas" bug. Re-apply the
+    // wheel-zoom state while the editor is idle and uncaptured;
+    // this is a no-op once the state is already the wheel-zoom
+    // state, and it never runs mid-stroke.
+    for (int f = 0; f < kFaceCount; ++f) {
+      Editor* ed = m_editors[f];
+      if (ed && !ed->hasCapture() && ed->getState() &&
+          typeid(*ed->getState()) == typeid(StandbyState)) {
+        ed->setState(EditorStatePtr(new EasymetricWheelZoomState));
+      }
+    }
     Doc* doc = m_docView->document();
     const doc::frame_t frame = (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
 
