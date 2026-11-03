@@ -420,7 +420,19 @@ local function generateObjExport(vol, faceSize)
   local halfY = S * 0.5
   local halfZ = S * 0.5
 
-  local function emitQuad(v, n, u0, v0, u1, v1)
+  -- Atlas mapping (mirrors C++ exportToWavefrontObj after the
+  -- per-face UV fix): uOld/vOld are 0..1 across the volume and are
+  -- remapped into this face's rect in the 3x2 atlas (atlasW x atlasH).
+  local atlasW = 3 * S
+  local atlasH = 2 * S
+  local function emitQuad(face, v, n, uOld0, vOld0, uOld1, vOld1)
+    local spec = kFaceSpecs[face]
+    local fx = spec.col * S
+    local fy = spec.row * S
+    local u0 = (fx + uOld0 * S) / atlasW
+    local u1 = (fx + uOld1 * S) / atlasW
+    local v0 = 1.0 - (fy + (1.0 - vOld0) * S) / atlasH
+    local v1 = 1.0 - (fy + (1.0 - vOld1) * S) / atlasH
     for i = 1, 4 do
       table.insert(lines, string.format("v %f %f %f", v[i][1], v[i][2], v[i][3]))
     end
@@ -436,7 +448,7 @@ local function generateObjExport(vol, faceSize)
       vIdx+2, vtIdx+2, vnIdx,
       vIdx+3, vtIdx+3, vnIdx))
 
-    table.insert(uvCoords, { u0 = u0, v0 = v0, u1 = u1, v1 = v1 })
+    table.insert(uvCoords, { face = face, u0 = u0, v0 = v0, u1 = u1, v1 = v1 })
     vIdx = vIdx + 4
     vtIdx = vtIdx + 4
     vnIdx = vnIdx + 1
@@ -460,7 +472,7 @@ local function generateObjExport(vol, faceSize)
             local u1 = (vx + 1) / vol.vx
             local v0 = 1.0 - (vy + 1) / vol.vy
             local v1 = 1.0 - vy / vol.vy
-            emitQuad({
+            emitQuad(kFaceFront, {
               {xMin, yMin, zMax}, {xMax, yMin, zMax}, {xMax, yMax, zMax}, {xMin, yMax, zMax}
             }, {0, 0, 1}, u0, v0, u1, v1)
           end
@@ -471,7 +483,7 @@ local function generateObjExport(vol, faceSize)
             local u1 = (vol.vx - vx) / vol.vx
             local v0 = 1.0 - (vy + 1) / vol.vy
             local v1 = 1.0 - vy / vol.vy
-            emitQuad({
+            emitQuad(kFaceBack, {
               {xMax, yMin, zMin}, {xMin, yMin, zMin}, {xMin, yMax, zMin}, {xMax, yMax, zMin}
             }, {0, 0, -1}, u0, v0, u1, v1)
           end
@@ -482,7 +494,7 @@ local function generateObjExport(vol, faceSize)
             local u1 = (vx + 1) / vol.vx
             local v0 = 1.0 - (vz + 1) / vol.vz
             local v1 = 1.0 - vz / vol.vz
-            emitQuad({
+            emitQuad(kFaceTop, {
               {xMin, yMax, zMax}, {xMax, yMax, zMax}, {xMax, yMax, zMin}, {xMin, yMax, zMin}
             }, {0, 1, 0}, u0, v0, u1, v1)
           end
@@ -493,7 +505,7 @@ local function generateObjExport(vol, faceSize)
             local u1 = (vx + 1) / vol.vx
             local v0 = 1.0 - (vol.vz - vz) / vol.vz
             local v1 = 1.0 - (vol.vz - 1 - vz) / vol.vz
-            emitQuad({
+            emitQuad(kFaceDown, {
               {xMin, yMin, zMin}, {xMax, yMin, zMin}, {xMax, yMin, zMax}, {xMin, yMin, zMax}
             }, {0, -1, 0}, u0, v0, u1, v1)
           end
@@ -504,7 +516,7 @@ local function generateObjExport(vol, faceSize)
             local u1 = (vol.vz - vz) / vol.vz
             local v0 = 1.0 - (vy + 1) / vol.vy
             local v1 = 1.0 - vy / vol.vy
-            emitQuad({
+            emitQuad(kFaceRight, {
               {xMax, yMin, zMax}, {xMax, yMin, zMin}, {xMax, yMax, zMin}, {xMax, yMax, zMax}
             }, {1, 0, 0}, u0, v0, u1, v1)
           end
@@ -515,7 +527,7 @@ local function generateObjExport(vol, faceSize)
             local u1 = (vz + 1) / vol.vz
             local v0 = 1.0 - (vy + 1) / vol.vy
             local v1 = 1.0 - vy / vol.vy
-            emitQuad({
+            emitQuad(kFaceLeft, {
               {xMin, yMin, zMin}, {xMin, yMin, zMax}, {xMin, yMax, zMax}, {xMin, yMax, zMin}
             }, {-1, 0, 0}, u0, v0, u1, v1)
           end
@@ -863,6 +875,25 @@ describe(1, "Feature 7: OBJ Export UV Mapping (Normalized [0.0, 1.0])", function
     assert_true(string.find(obj.content, "mtllib easymetric_model.mtl") ~= nil, "mtllib reference present")
     assert_true(string.find(obj.content, "usemtl EasymetricMat") ~= nil, "usemtl reference present")
     assert_true(string.find(obj.content, "o EasymetricSculptedModel") ~= nil, "object group present")
+  it("TC 7.6: OBJ UVs land inside each face's own atlas rect (not the whole atlas)", function()
+    local spr = Sprite(24, 24)
+    setupSixSurfaces(spr, 24, true)
+    local vol = buildVoxelVolume(spr, 24)
+    local obj = generateObjExport(vol, 24)
+    -- Atlas is 72x48, Front rect is x 24..48, y 0..24, so OBJ u in
+    -- [24/72, 48/72] and v in [1 - 24/48, 1] = [0.5, 1.0].
+    local sawFront = false
+    for _, uv in ipairs(obj.uvCoords) do
+      if uv.face == kFaceFront then
+        sawFront = true
+        assert_in_range(uv.u0, 1.0 / 3.0 - 0.001, 2.0 / 3.0 + 0.001, "Front u0 inside Front rect")
+        assert_in_range(uv.u1, 1.0 / 3.0 - 0.001, 2.0 / 3.0 + 0.001, "Front u1 inside Front rect")
+        assert_in_range(uv.v0, 0.5 - 0.001, 1.0 + 0.001, "Front v0 inside Front rect")
+        assert_in_range(uv.v1, 0.5 - 0.001, 1.0 + 0.001, "Front v1 inside Front rect")
+      end
+    end
+    assert_true(sawFront, "Front quads present")
+  end)
   end)
 end)
 
