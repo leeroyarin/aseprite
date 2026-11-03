@@ -27,7 +27,5 @@ graphify-out/
 .mesh_listener_*.lock
 inbox_*.jsonl
 
-
-
 tools/agent-mesh/.*token*
 build-test

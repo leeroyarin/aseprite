@@ -76,6 +76,24 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-03 — Codex: Published microphone assets, `.gitignore`, and the mesh
+  launcher as `03da721a565b1ae0b15179c11a16d8ad126b8f3e`. Four generation
+  scripts and this handoff were not published after automatic review rejected
+  disclosure of sensitive paths. Local branch and index remain unchanged.
+- 2026-11-03 — Codex: Fast-forwarded the local `Aseprite-2.0` checkout to
+  `e85599bfc183b828759d6338d33cd993a44289bd`. The Windows guards now match
+  that commit; staged changes and other local edits were preserved.
+- 2026-11-03 — Antigravity (arin-pc): Built production binary for human interactive use and created dedicated test build environment.
+  - Human build: `build/bin/aseprite.exe` (21,998,080 bytes) compiled with MSVC x64 Ninja, reports `Aseprite 2.0 2.0-dev+aafc5b9c8`.
+  - Testing build: `build-test/bin/aseprite.exe` isolated with `data/` extension junction to avoid file locks during automated runs.
+  - Test suites verified on `build-test/bin/aseprite.exe`: 206/206 PASS across all 6 suites (`easymetric_test.lua` 68/68, `easymetric_adversarial_stress.lua` 54/54, `easymetric_four_requirements_test.lua` 23/23, `easymetric_texture_layer_panel_bugs.lua` 14/14, `challenger_empirical_test.lua` 39/39, `test_asymmetric_carving.lua` 8/8).
+- 2026-11-03 — Codex: Pushed the Windows include guards to `Aseprite-2.0`
+  as `e85599bfc183b828759d6338d33cd993a44289bd`. The local branch remains at
+  its previous head, with the same guards unstaged; other staged work is intact.
+- 2026-11-03 — Codex: Resolved the local pull overlap and fast-forwarded
+  `Aseprite-2.0` to `aafc5b9c8`. Preserved the local Windows include guards,
+  all staged changes, and other unstaged work. Recovery copies are under
+  `build/pull-recovery-20261103`; no build was run for this pull.
 - 2026-11-03 — ULTRON (Muse): OBJ export texture mapping fix, branch `fix/obj-export-uv-mapping`, base `Aseprite-2.0` at `5770b18` (after PR #13 and PR #14 merged), NOT merged, William reviews first. Files: `src/app/commands/cmd_easymetric.cpp`, `tests/easymetric_test.lua` (Feature 7 generator updated to the new mapping + new TC 7.6).
   - **Bug reported by William (screenshots):** an exported OBJ showed holes in the faces and the whole texture printed onto a single surface. **Root cause (code inspection, certain):** `exportToWavefrontObj` gave every face UVs over the whole 0..1 texture atlas (e.g. Front `u = vx/vol.vx, v = 1 - vy/vol.vy`), while the exported PNG is the flattened sprite atlas with each face in its own 3x2-grid rect. Every face therefore sampled the entire atlas, and transparent regions belonging to other faces rendered as see-through holes. The previously computed `sprW`/`sprH` were unused — the smoking gun that the atlas scaling was never applied.
   - **Fix:** `emitQuad` now takes the face and remaps its 0..1 volume UVs into that face's rect from `sharedFaceRect` (orientation preserved exactly): `u = (rect.x + uOld * faceW) / sprW`, `v = 1 - (rect.y + (1 - vOld) * faceH) / sprH`. For a 72x48 atlas with 24px faces, Front now samples u 0.333..0.667, v 0.5..1.0, Top u 0..0.333, v 0.5..1.0, and so on.
