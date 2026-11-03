@@ -35,10 +35,7 @@ struct SharedSurfaceLayers {
 int matchFaceIndex(const std::string& name);
 doc::Slice* findSliceForFace(doc::Sprite* spr, int face);
 doc::LayerImage* findLayerByName(doc::Sprite* spr, const std::string& name);
-doc::LayerImage* findOrCreateLayer(Doc* doc,
-                                  DocApi& api,
-                                  doc::Sprite* spr,
-                                  const std::string& name);
+doc::LayerImage* findOrCreateLayer(Doc* doc, DocApi& api, doc::Sprite* spr, const std::string& name);
 SurfaceLayerPair findSurfaceLayers(doc::Sprite* spr, int face);
 SharedSurfaceLayers findSharedLayers(doc::Sprite* spr);
 void sharedFaceSizes(doc::Sprite* spr, int w[kFaceCount], int h[kFaceCount]);
@@ -57,3 +54,4 @@ void convertSmartObjectsToGroups(Doc* doc);
 } // namespace app
 
 #endif
+
