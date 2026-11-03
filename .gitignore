@@ -28,3 +28,6 @@ graphify-out/
 inbox_*.jsonl
 
 
+
+tools/agent-mesh/.*token*
+build-test
