@@ -76,6 +76,73 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-03 — Antigravity (Windows): Completed full native MSVC build and E2E verification at `b0f0578` (commit `b0f0578a8327f3fed61530c1e5b5a4a9a38dc840` on `codex/baseline-b0f0578`):
+  - **Build**: Regenerated `build.ninja` via `cmake -B build` (2.0s configure, 1.4s generate) to eliminate console-pool lock. Compiled clean with MSVC x64 via `tools\aseprite2-build.ps1` (619 steps, exit code 0, binary `build\bin\aseprite.exe` generated).
+  - **Suite 1 (`tests\easymetric_test.lua`)**: 67/67 PASSED (8.74s, exit code 0). Tested canvas bounds framing, slice offset removal, 6-face layer structure, column linking, dynamic layout, focus safety, OBJ UV mapping, 4x4 to 256x256 boundaries, rapid toggling, and undo/redo.
+  - **Suite 2 (`tests\easymetric_adversarial_stress.lua`)**: 54/54 PASSED (3.97s, exit code 0). Tested 10 boundary sizes (including 16x128 / 128x32 high-aspect), all 8 column link permutations, 1000-cycle rapid toggle storm, multi-pane editor framing, and viewport math.
+  - **Suite 3 (`tests\easymetric_four_requirements_test.lua`)**: 21/23 PASSED (4.53s, exit code -1).
+    - Failed: TC 4.2 (L815) and TC 4.3 (L850) — both expected Top resize to propagate to paired Bottom slice width. This expectation was explicitly superseded by PR #5 (`6e2cf5026`), where exact per-column/row UV layout keeps non-resized face dimensions unchanged.
+  - Total verified tests: 142/144 passed across 3 test suites. Build and test results broadcasted to `arin-pc-codex`, `muse`, and `arin-pc-daedalus-antigravity-leeroyarin` on project `agent-hub`.
+
+- 2026-11-03 — GPT-6 (Codex, Windows): arin-pc reported a Windows MSVC build
+  success at `b0f0578`, 67/67 Easymetric tests and 54/54 adversarial tests;
+  its additional four-requirements suite reported 21/23, with TC 4.2 and 4.3
+  failing dimension propagation expectations. This is a peer report, not
+  independently verified; timings and exact reproduction steps were not supplied.
+  Forwarded the report to Daedalus and Muse for the final evidence.
+- 2026-11-03 — GPT-6 (Codex, Windows): Muse transferred Phase 0 ownership to
+  `arin-pc-daedalus-antigravity-leeroyarin`. arin-pc reported native compilation
+  running at `b0f0578` after regenerating CMake and checking executable write access;
+  visible CMake, Ninja, and link processes corroborate activity, not build success.
+  Our build and isolated probe were stopped before transfer. No C++ changes made;
+  build result and both requested test-suite results remain unverified.
+- 2026-11-03 — GPT-6 (Codex, Windows): arin-pc diagnosed Ninja console-pool
+  blocking in redirected execution. An isolated Ninja `pool = console` probe running
+  `cmd /c exit 0` also stalled in this environment. Stopped only our two stalled
+  Ninja processes; build session exited -1 after 428.76 s, with no successful build.
+  Existing executable predates this verification and is not evidence of success.
+  Requested arin-pc run the same baseline build from its native session; both test
+  suites remain pending. Existing Aseprite processes were not closed.
+- 2026-11-03 — GPT-6 (Codex, Windows): Executing Muse Phase 0 baseline task
+  `0fdf2a02-f8bb-4239-96bb-b15fa915e1a0`. Preserved prior HANDOFF patch at
+  `build/codex-baseline-b0f0578/hand-off-codex.diff`; old mesh branch not pushed.
+  - Fetched remote with Git OpenSSL backend. Local `Aseprite-2.0` diverges (local
+    `67c160811` versus cleaned upstream `2d4d6ffa4`); preserved it and created local
+    `codex/baseline-b0f0578` at exact `b0f0578a8327f3fed61530c1e5b5a4a9a38dc840`.
+  - Started `powershell -NoProfile -ExecutionPolicy Bypass -File tools/aseprite2-build.ps1`.
+    CMake configure/generate passed. Build command session `23745` remains live,
+    Ninja PID `41728`, CMake PID `45700`, PowerShell PID `43556`, with no compiler
+    child or subsequent build output observed. Log: `build/codex-baseline-b0f0578/build.log`.
+    Build success unverified; both test suites pending. Do not restart just because
+    observation timed out; inspect this same live build first.
+  - arin-pc confirmed no concurrent checkout/build; requested its read-only diagnosis
+    of the waiting Ninja process. Muse received progress message
+    `7203a666-46ab-40c0-8752-ce26d0f52633`. No C++ changes or Phase 1 work.
+- 2026-11-03 — GPT-6 (Codex, Windows): William requested ongoing coordination and
+  execution of other agents' tasks. Contacted `muse` and `arin-pc` as `arin-pc-codex`
+  on `agent-hub`, requesting a concrete task, exact branch/SHA, acceptance steps,
+  and active ownership before changing the shared checkout.
+  - Hub accepted messages `7d07a781-93cf-4405-a2af-c6da48c93da5` (Muse) and
+    `5e971291-9fe5-4edf-8835-2038ffc2013f` (arin-pc). Sender command session `93314`
+    retains its dedicated credential only in process memory/environment; listener
+    remains PID `18280`, inbox `build/agent-mesh/arin-pc-codex/inbox_agent-hub.jsonl`.
+  - GitHub confirms `Aseprite-2.0` now at `b0f0578a8327f3fed61530c1e5b5a4a9a38dc840`
+    (PR #6 merged). Local shared checkout remains `feature/agent-mesh-hub` at
+    `5971cddc1`; no source edits, branch changes, or builds started pending assignment.
+- 2026-11-03 — GPT-6 (Codex, Windows): Joined agent mesh as `arin-pc-codex`, the
+  exact identity requested by William, on project `agent-hub`. Issued a dedicated
+  identity-bound agent token; kept it only in the hidden listener process environment.
+  Listener PID: `18280`; runtime inbox/state: `build/agent-mesh/arin-pc-codex/`.
+  Existing `arin-pc` and `muse` listeners were left running. Listener is save-only.
+- 2026-11-03 — GPT-6 (Codex, Windows): Verified authenticated agent-mesh access using
+  the existing Windows user environment, loaded into the command process without
+  displaying or saving credentials. Identity is `arin-pc`, project `agent-hub`.
+  - Repository client `status` returned hub online; `connections` showed one existing
+    WebSocket connection each for `arin-pc` and `muse`. Did not start another listener.
+  - Sent one deliberate communication check to `muse`, message
+    `0f31d28a-a4eb-400f-807f-da448148c0a7`; hub accepted it. No automatic replies enabled.
+  - Earlier missing-credential result applied to the inherited process environment;
+    the user environment now supplies the configured agent credentials.
 - 2026-11-02 — ULTRON (Muse): Fixed three issues William reported testing the merged version (Aseprite-2.0 at 7848663, PR #3 + PR #4 merged), on branch `feature/easymetric-uv-canvas-columns`, in `src/app/commands/cmd_easymetric.cpp` only:
   - **Canvas size = UV mapping, exactly:** replaced the uniform 3 x cellW, 2 x cellH grid (cell from sprite size / 3, / 2, padding every smaller face, and shifting UV origins on a manual canvas resize) with an exact per-column/row layout: each column is its widest face, each row its tallest face, sheet = sum of columns/rows (e.g. faces 32/48/16 wide -> sheet 96 wide, not 144). Resizing one face now changes only that face (other faces in its column/row move to their new UV origin, sizes/pixels unchanged), and a manual canvas resize in the studio is reconciled in pollAndRender by scaling face sizes by the same ratio and rebuilding the sheets, so the canvas ends up exactly the UV sum. Face pixels are copied, never scaled (larger rect = transparent padding, smaller = cropped).
   - **Surfaces independent in one shared layer:** when the active panel changes (in standby state), the document selection is set to that face's UV rect, without an undo step, and restored on studio exit. Brush and Move are then confined to that face's pixels, so moving Top's content does not move Front/Back/etc. Limitation: a sub-selection dragged far enough to cross into a neighbouring UV rect will still land in that rect's sampled area, because the sheet is one image; what is guaranteed is that the other faces' pixels do not move with it.
