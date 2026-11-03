@@ -87,8 +87,13 @@ SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data, int pivX, in
               int((float(vol.vz - 1 - z) + 0.5f) / float(vol.vz) * data.h[kFaceDown]),
               0,
               data.h[kFaceDown] - 1);
-            bool downSolid = data.isFaceSolid(kFaceDown, uDown, vDown);
-            topSolid = (hasTop ? (topSolid || downSolid) : downSolid);
+            const bool downSolid = data.isFaceSolid(kFaceDown, uDown, vDown);
+            if (data.hasBaseLayer[kFaceTop] && hasTop) {
+              // Base silhouette forms outer bounding hull: unlinked Down cannot expand voxels
+            }
+            else {
+              topSolid = (hasTop ? (topSolid || downSolid) : downSolid);
+            }
           }
           if (!topSolid) {
             solid = false;
@@ -112,8 +117,13 @@ SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data, int pivX, in
             const int vBack = std::clamp(int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceBack]),
                                          0,
                                          data.h[kFaceBack] - 1);
-            bool backSolid = data.isFaceSolid(kFaceBack, uBack, vBack);
-            frontSolid = (hasFront ? (frontSolid || backSolid) : backSolid);
+            const bool backSolid = data.isFaceSolid(kFaceBack, uBack, vBack);
+            if (data.hasBaseLayer[kFaceFront] && hasFront) {
+              // Base silhouette forms outer bounding hull: unlinked Back cannot expand voxels
+            }
+            else {
+              frontSolid = (hasFront ? (frontSolid || backSolid) : backSolid);
+            }
           }
           if (!frontSolid) {
             solid = false;
@@ -137,8 +147,13 @@ SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data, int pivX, in
             const int vLeft = std::clamp(int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceLeft]),
                                          0,
                                          data.h[kFaceLeft] - 1);
-            bool leftSolid = data.isFaceSolid(kFaceLeft, uLeft, vLeft);
-            sideSolid = (hasRight ? (sideSolid || leftSolid) : leftSolid);
+            const bool leftSolid = data.isFaceSolid(kFaceLeft, uLeft, vLeft);
+            if (data.hasBaseLayer[kFaceRight] && hasRight) {
+              // Base silhouette forms outer bounding hull: unlinked Left cannot expand voxels
+            }
+            else {
+              sideSolid = (hasRight ? (sideSolid || leftSolid) : leftSolid);
+            }
           }
           if (!sideSolid) {
             solid = false;

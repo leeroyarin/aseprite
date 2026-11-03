@@ -745,6 +745,9 @@ static bool extractSixSurfaces(Doc* doc,
       }
     };
 
+    const bool faceHasBase = (baseLyr != nullptr);
+    out.hasBaseLayer[f] = faceHasBase;
+
     bool hasPixels = false;
 
     for (int v = 0; v < fh; ++v) {
@@ -752,29 +755,32 @@ static bool extractSixSurfaces(Doc* doc,
       for (int u = 0; u < fw; ++u) {
         const int canvasX = faceRect.x + u;
 
-        uint32_t baseCol = getRgbaPixel(baseImg, canvasX - baseOx, canvasY - baseOy);
-        uint32_t texCol = getRgbaPixel(texImg, canvasX - texOx, canvasY - texOy);
+        const uint32_t baseCol = getRgbaPixel(baseImg, canvasX - baseOx, canvasY - baseOy);
+        const uint32_t texCol = getRgbaPixel(texImg, canvasX - texOx, canvasY - texOy);
+        const uint8_t bA = doc::rgba_geta(baseCol);
+        out.baseAlpha[f][v * fw + u] = bA;
 
         uint32_t finalCol = 0;
-        if (baseImg && texImg) {
-          // Two-layer clipping mask & smart object structure:
-          // Base layer defines alpha clipping mask.
-          // When base alpha > 16: texture layer overrides base content.
-          // When texture is transparent: falls back to base content.
-          // When texture is semi-transparent: alpha-blends over base content.
-          // When base alpha <= 16: masked out (transparent).
-          if (doc::rgba_geta(baseCol) > 16) {
-            const int aT = doc::rgba_geta(texCol);
-            if (aT == 255) {
-              finalCol = texCol;
-            }
-            else if (aT > 0) {
-              const int invA = 255 - aT;
-              finalCol = doc::rgba(
-                (doc::rgba_getr(texCol) * aT + doc::rgba_getr(baseCol) * invA) / 255,
-                (doc::rgba_getg(texCol) * aT + doc::rgba_getg(baseCol) * invA) / 255,
-                (doc::rgba_getb(texCol) * aT + doc::rgba_getb(baseCol) * invA) / 255,
-                doc::rgba_geta(baseCol));
+        if (faceHasBase) {
+          // Base sheet strictly defines the silhouette boundary:
+          // If base pixel is transparent (bA <= 16), content is clamped to 0.
+          if (bA > 16) {
+            if (texImg) {
+              const int aT = doc::rgba_geta(texCol);
+              if (aT == 255) {
+                finalCol = texCol;
+              }
+              else if (aT > 0) {
+                const int invA = 255 - aT;
+                finalCol = doc::rgba(
+                  (doc::rgba_getr(texCol) * aT + doc::rgba_getr(baseCol) * invA) / 255,
+                  (doc::rgba_getg(texCol) * aT + doc::rgba_getg(baseCol) * invA) / 255,
+                  (doc::rgba_getb(texCol) * aT + doc::rgba_getb(baseCol) * invA) / 255,
+                  bA);
+              }
+              else {
+                finalCol = baseCol;
+              }
             }
             else {
               finalCol = baseCol;
@@ -783,9 +789,6 @@ static bool extractSixSurfaces(Doc* doc,
         }
         else if (texImg) {
           finalCol = texCol;
-        }
-        else if (baseImg) {
-          finalCol = baseCol;
         }
 
         if (doc::rgba_geta(finalCol) > 0) {
@@ -803,7 +806,8 @@ static bool extractSixSurfaces(Doc* doc,
       const doc::Image* eImg = extra->image();
       const int ox = extra->cel()->x();
       const int oy = extra->cel()->y();
-      const bool editingTex = (docView->editor()->layer() == texLyr && baseImg);
+      const bool editingBase = (docView->editor()->layer() == baseLyr);
+      const bool editingTex = (docView->editor()->layer() == texLyr);
 
       for (int v = 0; v < fh; ++v) {
         const int canvasY = faceRect.y + v;
@@ -817,11 +821,19 @@ static bool extractSixSurfaces(Doc* doc,
             continue;
           const uint32_t ec = getRgbaPixel(eImg, sx, sy);
           if (doc::rgba_geta(ec) > 0) {
-            if (editingTex) {
-              const int bx = canvasX - baseOx;
-              const int by = canvasY - baseOy;
-              uint32_t bc = getRgbaPixel(baseImg, bx, by);
-              if (doc::rgba_geta(bc) > 16) {
+            if (editingBase) {
+              out.pixels[f][v * fw + u] = ec;
+              out.baseAlpha[f][v * fw + u] = doc::rgba_geta(ec);
+              hasPixels = true;
+            }
+            else if (editingTex) {
+              if (faceHasBase) {
+                const int bx = canvasX - baseOx;
+                const int by = canvasY - baseOy;
+                const uint32_t bc = getRgbaPixel(baseImg, bx, by);
+                if (doc::rgba_geta(bc) <= 16) {
+                  continue; // Clamped by Base silhouette
+                }
                 const int aT = doc::rgba_geta(ec);
                 if (aT == 255) {
                   out.pixels[f][v * fw + u] = ec;
@@ -839,10 +851,10 @@ static bool extractSixSurfaces(Doc* doc,
                 }
                 hasPixels = true;
               }
-            }
-            else {
-              out.pixels[f][v * fw + u] = ec;
-              hasPixels = true;
+              else {
+                out.pixels[f][v * fw + u] = ec;
+                hasPixels = true;
+              }
             }
           }
         }
@@ -868,7 +880,9 @@ static bool extractSixSurfaces(Doc* doc,
       }
     }
 
-    if (!hasPixels) {
+    // Only populate starter pixels if the sprite has NO established shared layers
+    // and NO base/texture layers (pure virgin document initialization).
+    if (!hasPixels && !useShared && !baseLyr && !texLyr) {
       for (int v = 0; v < fh; ++v) {
         for (int u = 0; u < fw; ++u) {
           out.pixels[f][v * fw + u] = starterSurfacePixel(f, u, v, fw, fh);
@@ -886,6 +900,8 @@ static bool extractSixSurfaces(Doc* doc,
         const int btmFace = c * 2 + 1;
         out.pixels[btmFace] = out.pixels[topFace];
         out.depthPixels[btmFace] = out.depthPixels[topFace];
+        out.baseAlpha[btmFace] = out.baseAlpha[topFace];
+        out.hasBaseLayer[btmFace] = out.hasBaseLayer[topFace];
         out.w[btmFace] = out.w[topFace];
         out.h[btmFace] = out.h[topFace];
         out.bounds[btmFace] = out.bounds[topFace];
@@ -2259,6 +2275,25 @@ private:
             data.pixels[f][v * 24 + u] = starterSurfacePixel(f, u, v, 24, 24);
     }
 
+    uint64_t baseHash = 14695981039346656037ULL;
+    bool anyBase = false;
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (data.hasBaseLayer[f]) {
+        anyBase = true;
+        for (uint8_t a : data.baseAlpha[f]) {
+          baseHash ^= uint64_t(a > 16 ? 1 : 0);
+          baseHash *= 1099511628211ULL;
+        }
+      }
+    }
+    if (anyBase) {
+      if (m_lastBaseSilhouetteHash != 0 && baseHash != m_lastBaseSilhouetteHash) {
+        if (auto* sb = StatusBar::instance())
+          sb->showTip(1000, "Views clamped to Base sheet silhouette");
+      }
+      m_lastBaseSilhouetteHash = baseHash;
+    }
+
     // Check if any face slice dimensions changed and Link Dims is active
     if (m_linkDimensionsCheck && m_linkDimensionsCheck->isSelected()) {
       int changedFace = -1;
@@ -2331,6 +2366,11 @@ private:
         const uint8_t* dp = data.depthPixels[f].data();
         for (size_t i = 0; i < n; ++i)
           mix(dp[i]);
+      }
+      if (data.hasBaseLayer[f]) {
+        const uint8_t* ba = data.baseAlpha[f].data();
+        for (size_t i = 0; i < n; ++i)
+          mix(uint64_t(ba[i]));
       }
     }
 
@@ -2852,6 +2892,7 @@ private:
 
   ui::Timer m_timer;
   uint64_t m_lastHash = 0;
+  uint64_t m_lastBaseSilhouetteHash = 0;
   doc::ImageRef m_lastDiffImg;
   doc::ImageRef m_lastNormImg;
   doc::ImageRef m_lastDeptImg;

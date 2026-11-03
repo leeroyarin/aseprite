@@ -54,4 +54,3 @@ void convertSmartObjectsToGroups(Doc* doc);
 } // namespace app
 
 #endif
-

@@ -87,6 +87,8 @@ struct SixSurfaceData {
   std::array<int, kFaceCount> h = { 24, 24, 24, 24, 24, 24 };
   std::array<std::vector<uint32_t>, kFaceCount> pixels;
   std::array<std::vector<uint8_t>, kFaceCount> depthPixels;
+  std::array<std::vector<uint8_t>, kFaceCount> baseAlpha;
+  std::array<bool, kFaceCount> hasBaseLayer = { false, false, false, false, false, false };
   std::array<gfx::Rect, kFaceCount> bounds;
   std::array<bool, 3> colLinked = { false, false, false };
   bool hasSlices = false;
@@ -100,7 +102,9 @@ struct SixSurfaceData {
       h[f] = S;
       pixels[f].assign(S * S, 0);
       depthPixels[f].assign(S * S, 128);
+      baseAlpha[f].assign(S * S, 0);
     }
+    hasBaseLayer.fill(false);
     colLinked.fill(false);
   }
 
@@ -112,6 +116,7 @@ struct SixSurfaceData {
     h[face] = fh;
     pixels[face].assign(fw * fh, 0);
     depthPixels[face].assign(fw * fh, 128);
+    baseAlpha[face].assign(fw * fh, 0);
     S = std::max(S, std::max(fw, fh));
   }
 
@@ -222,8 +227,24 @@ struct SixSurfaceData {
     return sample(sf, u, v);
   }
 
+  bool isBaseSolid(int face, int u, int v) const
+  {
+    if (face < 0 || face >= kFaceCount)
+      return false;
+    const int fw = w[face];
+    const int fh = h[face];
+    if (fw <= 0 || fh <= 0 || baseAlpha[face].empty())
+      return false;
+    u = std::clamp(u, 0, fw - 1);
+    v = std::clamp(v, 0, fh - 1);
+    return baseAlpha[face][v * fw + u] > 16;
+  }
+
   bool isFaceSolid(int face, int u, int v) const
   {
+    if (hasBaseLayer[face]) {
+      return isBaseSolid(face, u, v);
+    }
     return doc::rgba_geta(sampleSymmetric(face, u, v)) > 16;
   }
 };
