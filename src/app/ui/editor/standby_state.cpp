@@ -158,6 +158,22 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
 
   // Move cel X,Y coordinates
   if (clickedInk->isCelMovement()) {
+    // Bug 1 (Easymetric panels only): the panel's cel is the
+    // whole shared UV sheet, so MovingCel would move every
+    // face, including the base map, even when the user only
+    // selected part of one face. If the click is inside a
+    // movable selection, move the selected pixels instead of
+    // the whole cel. Normal (non-panel) editors keep the old
+    // Move-cel behaviour.
+    if (DocView* paneView = editor->getDocView()) {
+      const auto& panes = paneView->paneEditors();
+      if (std::find(panes.begin(), panes.end(), editor) != panes.end() &&
+          editor->canStartMovingSelectionPixels()) {
+        transformSelection(editor, msg, MovePixelsHandle);
+        return true;
+      }
+    }
+
     // Handle "Auto Select Layer"
     if (editor->isAutoSelectLayer()) {
       gfx::PointF cursor = editor->screenToEditorF(msg->position());
@@ -166,10 +182,18 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
 
       const view::RealRange& range = context->range();
       if (picker.layer() && !range.contains(picker.layer())) {
-        layer = picker.layer();
-        if (layer) {
-          editor->setLayer(layer);
-          editor->flashCurrentLayer();
+        // Bug 3: a locked or hidden layer must never be
+        // auto-selected, even with the Move tool. The old
+        // code set the layer first and only checked
+        // visibility/editability afterwards, for moving, so
+        // the active layer had already flipped.
+        if (picker.layer()->isVisibleHierarchy() && picker.layer()->isMovable() &&
+            picker.layer()->isEditableHierarchy()) {
+          layer = picker.layer();
+          if (layer) {
+            editor->setLayer(layer);
+            editor->flashCurrentLayer();
+          }
         }
       }
     }
@@ -255,7 +279,14 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
         break;
     }
 
-    // When clicking inside a named surface border to paint, auto-align symmetry axes & surface layer
+    // When clicking inside a named surface border, auto-align
+    // symmetry axes only. Bug 3: the old code also switched
+    // the active layer to Surface_<slice> here, on ANY tool
+    // click (brush, eraser, fill, selection, ...), which is
+    // exactly the "layer switches by itself while editing"
+    // report. The active layer may only change from a Layers
+    // panel click or from Move-tool auto-select, so this
+    // path must not change it at all.
     if (msg->left() && editor->sprite() && ((editor->editorFlags() & Editor::kShowSlices) != 0)) {
       const gfx::Point sprPt = editor->screenToEditor(msg->position());
       for (auto* slice : editor->sprite()->slices()) {
@@ -269,15 +300,6 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
             sym.xAxis(b.x + b.w * 0.5);
           if (sym.yAxis() < b.y || sym.yAxis() > b.y2())
             sym.yAxis(b.y + b.h * 0.5);
-
-          const std::string surfLyrName = "Surface_" + slice->name();
-          for (auto* lyr : editor->sprite()->allLayers()) {
-            if (lyr->isImage() && lyr->isVisible() && lyr->isEditable() &&
-                lyr->name() == surfLyrName && editor->layer() != lyr) {
-              editor->setLayer(lyr);
-              break;
-            }
-          }
           break;
         }
       }
