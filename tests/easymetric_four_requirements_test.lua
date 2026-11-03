@@ -795,13 +795,16 @@ describe("Requirement 4: Linked Surface Dimension Dependencies", function()
     assert_eq(resH[kFaceLeft], 24, "Left height = Y (unmodified)")
   end)
 
-  it("TC 4.2: EasymetricStudio linkDims command propagates Top resize across real document slices and cels", function()
+  it("TC 4.2: EasymetricStudio linkDims command resizes Top only, other faces stay independent (PR #5)", function()
     local spr = Sprite(24, 24)
     app.activeSprite = spr
 
     app.command.EasymetricStudio{ action = "setupSurfaces" }
 
-    -- Propagate Top resize to (32, 48)
+    -- Resize Top to (32, 48). PR #5 decoupled sizing: only the resized
+    -- face changes size. Other faces keep their initial 24x24 size, and
+    -- the canvas becomes exactly the sum of column widths / row heights:
+    -- width = max(32,24) + 24 + 24 = 80, height = max(48,24,24) + 24 = 72.
     app.command.EasymetricStudio{ action = "linkDims", face = "top", width = 32, height = 48 }
 
     -- Verify slice bounds
@@ -812,32 +815,34 @@ describe("Requirement 4: Linked Surface Dimension Dependencies", function()
 
     assert_eq(slices["TOP"].width, 32, "Top slice width = 32")
     assert_eq(slices["TOP"].height, 48, "Top slice height = 48")
-    assert_eq(slices["DOWN"].width, 32, "Bottom slice width = 32")
-    assert_eq(slices["DOWN"].height, 48, "Bottom slice height = 48")
+    assert_eq(slices["DOWN"].width, 24, "Bottom slice width unchanged = 24")
+    assert_eq(slices["DOWN"].height, 24, "Bottom slice height unchanged = 24")
 
-    assert_eq(slices["FRONT"].width, 32, "Front slice width = 32")
-    assert_eq(slices["FRONT"].height, 48, "Front slice height = 48")
-    assert_eq(slices["BACK"].width, 32, "Back slice width = 32")
-    assert_eq(slices["BACK"].height, 48, "Back slice height = 48")
+    assert_eq(slices["FRONT"].width, 24, "Front slice width unchanged = 24")
+    assert_eq(slices["FRONT"].height, 24, "Front slice height unchanged = 24")
+    assert_eq(slices["BACK"].width, 24, "Back slice width unchanged = 24")
+    assert_eq(slices["BACK"].height, 24, "Back slice height unchanged = 24")
 
-    assert_eq(slices["RIGHT"].width, 32, "Right slice width = 32")
-    assert_eq(slices["RIGHT"].height, 48, "Right slice height = 48")
-    assert_eq(slices["LEFT"].width, 32, "Left slice width = 32")
-    assert_eq(slices["LEFT"].height, 48, "Left slice height = 48")
+    assert_eq(slices["RIGHT"].width, 24, "Right slice width unchanged = 24")
+    assert_eq(slices["RIGHT"].height, 24, "Right slice height unchanged = 24")
+    assert_eq(slices["LEFT"].width, 24, "Left slice width unchanged = 24")
+    assert_eq(slices["LEFT"].height, 24, "Left slice height unchanged = 24")
 
-    assert_eq(spr.width, 96, "Sprite canvas width = 3*32")
-    assert_eq(spr.height, 96, "Sprite canvas height = 2*48")
+    assert_eq(spr.width, 80, "Sprite canvas width = 32+24+24 (exact UV layout)")
+    assert_eq(spr.height, 72, "Sprite canvas height = 48+24 (exact UV layout)")
 
     spr:close()
   end)
 
-  it("TC 4.3: EasymetricStudio linkDims command propagates Front resize to all surfaces uniformly on shared sheet", function()
+  it("TC 4.3: EasymetricStudio linkDims command resizes Front only, other faces stay independent (PR #5)", function()
     local spr = Sprite(24, 24)
     app.activeSprite = spr
 
     app.command.EasymetricStudio{ action = "setupSurfaces" }
 
-    -- Resize Front to (64, 40)
+    -- Resize Front to (64, 40). PR #5 decoupled sizing: only Front
+    -- changes. Other faces keep 24x24, canvas = exact UV layout:
+    -- width = 24 + max(64,24) + 24 = 112, height = max(24,40,24) + 24 = 64.
     app.command.EasymetricStudio{ action = "linkDims", face = "front", width = 64, height = 40 }
 
     local slices = {}
@@ -847,17 +852,17 @@ describe("Requirement 4: Linked Surface Dimension Dependencies", function()
 
     assert_eq(slices["FRONT"].width, 64, "Front width = 64")
     assert_eq(slices["FRONT"].height, 40, "Front height = 40")
-    assert_eq(slices["BACK"].width, 64, "Back width = 64")
-    assert_eq(slices["BACK"].height, 40, "Back height = 40")
+    assert_eq(slices["BACK"].width, 24, "Back width unchanged = 24")
+    assert_eq(slices["BACK"].height, 24, "Back height unchanged = 24")
 
-    assert_eq(slices["TOP"].width, 64, "Top width updated to Front width")
-    assert_eq(slices["TOP"].height, 40, "Top height updated to Front height")
+    assert_eq(slices["TOP"].width, 24, "Top width unchanged = 24")
+    assert_eq(slices["TOP"].height, 24, "Top height unchanged = 24")
 
-    assert_eq(slices["RIGHT"].width, 64, "Right width remains uniform")
-    assert_eq(slices["RIGHT"].height, 40, "Right height updated to Front height")
+    assert_eq(slices["RIGHT"].width, 24, "Right width unchanged = 24")
+    assert_eq(slices["RIGHT"].height, 24, "Right height unchanged = 24")
 
-    assert_eq(spr.width, 192, "Sprite canvas width = 3*64")
-    assert_eq(spr.height, 80, "Sprite canvas height = 2*40")
+    assert_eq(spr.width, 112, "Sprite canvas width = 24+64+24 (exact UV layout)")
+    assert_eq(spr.height, 64, "Sprite canvas height = 40+24 (exact UV layout)")
 
     spr:close()
   end)
