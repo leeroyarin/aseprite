@@ -74,15 +74,266 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
+
+#if defined(_WIN32)
+  #include <windows.h>
+  #include <winhttp.h>
+  #pragma comment(lib, "winhttp.lib")
+#endif
 
 namespace app {
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Easymetric error / crash reporting to agent-hub.
+//
+// What this does, and what it deliberately does NOT do:
+// - Every Easymetric error caught in this file is appended to a local
+//   log file (see easymetricHubLogPath) AND, only if reporting is
+//   explicitly enabled, posted to agent-hub as a message.
+// - A native crash cannot post from inside the crash itself, so the
+//   studio writes a session marker on entry and removes it on a
+//   clean exit. If the marker is still there on the next entry,
+//   the previous session ended unexpectedly, and a "crash" report
+//   (no dump, no document content, just that fact) is sent then.
+// - Reporting is OFF by default. It turns on only when all of these
+//   environment variables are set on the machine running Aseprite:
+//     AGENT_HUB_ENABLED=1
+//     AGENT_HUB_TOKEN=<agent token issued by the hub admin>
+//     AGENT_HUB_AGENT=<agent name that token was issued for>
+//   Optional: AGENT_HUB_URL (default is the mesh hub URL below),
+//   AGENT_HUB_PROJECT (default "agent-hub").
+// - No token, URL, or password is hardcoded here and none is ever
+//   written to the log file. The token is read from the environment
+//   at send time only, and is sent only as a Bearer header over
+//   HTTPS. If any variable is missing, reporting is local-log only.
+// - Only the error kind, location, and exception message (truncated
+//   to 500 characters) are sent. Never a sprite, image, file
+//   contents, or document name. A hub send failure never throws
+//   into the UI: it is swallowed, so reporting can never itself
+//   crash the app, and it runs on a detached thread with a 5s
+//   timeout so it can never block painting or editing.
+// - Hub API (tools/agent-mesh/mesh_client.py, cloudflare-hub):
+//   POST {hub_url}/send, Bearer token, JSON {project, from, to,
+//   type, body}. "from" must equal the token's agent, and the
+//   project must be allowed for that token, or the hub returns
+//   403. On non-Windows builds this is local-log only: the
+//   WinHTTP sender below is Windows-only.
+// ---------------------------------------------------------------------------
+inline std::string easymetricHubTempDir()
+{
+  const char* temp = std::getenv("TEMP");
+  if (!temp || !*temp)
+    temp = std::getenv("TMP");
+  return temp && *temp ? std::string(temp) : std::string(".");
+}
+
+inline std::string easymetricHubLogPath()
+{
+  return easymetricHubTempDir() + "\\aseprite-easymetric-errors.log";
+}
+
+inline std::string easymetricHubMarkerPath()
+{
+  return easymetricHubTempDir() + "\\aseprite-easymetric-session.marker";
+}
+
+inline std::string easymetricHubTimestamp()
+{
+  std::time_t now = std::time(nullptr);
+  std::tm tmv{};
+#if defined(_WIN32)
+  gmtime_s(&tmv, &now);
+#else
+  gmtime_r(&now, &tmv);
+#endif
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tmv);
+  return std::string(buf);
+}
+
+inline std::string easymetricJsonEscape(const std::string& in)
+{
+  std::string out;
+  for (char ch : in) {
+    switch (ch) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(ch) < 0x20) {
+          char buf[8];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", ch);
+          out += buf;
+        }
+        else
+          out += ch;
+    }
+  }
+  return out;
+}
+
+inline std::string easymetricUtf8(const std::wstring& in)
+{
+#if defined(_WIN32)
+  if (in.empty())
+    return std::string();
+  const int n = WideCharToMultiByte(CP_UTF8, 0, in.c_str(), -1,
+                                    nullptr, 0, nullptr, nullptr);
+  if (n <= 0)
+    return std::string();
+  // Buffer sized n (including the terminator), then trimmed, so
+  // the conversion never writes past the string's storage.
+  std::string out(static_cast<size_t>(n), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, in.c_str(), -1, out.data(), n,
+                      nullptr, nullptr);
+  if (!out.empty() && out.back() == '\0')
+    out.pop_back();
+  return out;
+#else
+  (void)in;
+  return std::string();
+#endif
+}
+
+inline std::wstring easymetricWide(const std::string& in)
+{
+#if defined(_WIN32)
+  if (in.empty())
+    return std::wstring();
+  const int n = MultiByteToWideChar(CP_UTF8, 0, in.c_str(), -1,
+                                    nullptr, 0);
+  if (n <= 0)
+    return std::wstring();
+  std::wstring out(static_cast<size_t>(n), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, in.c_str(), -1, out.data(), n);
+  if (!out.empty() && out.back() == L'\0')
+    out.pop_back();
+  return out;
+#else
+  (void)in;
+  return std::wstring();
+#endif
+}
+
+inline void easymetricSendToHub(const std::string& type,
+                                const std::string& body)
+{
+  // Local log first, always, even when hub sending is disabled.
+  try {
+    std::ofstream log(easymetricHubLogPath(), std::ios::app);
+    if (log)
+      log << easymetricHubTimestamp() << " [" << type << "] " << body << "\n";
+  }
+  catch (...) {
+  }
+
+  const char* enabled = std::getenv("AGENT_HUB_ENABLED");
+  const char* token = std::getenv("AGENT_HUB_TOKEN");
+  const char* agent = std::getenv("AGENT_HUB_AGENT");
+  if (!enabled || std::string(enabled) != "1" || !token || !*token ||
+      !agent || !*agent)
+    return;
+
+  const char* urlEnv = std::getenv("AGENT_HUB_URL");
+  const char* projectEnv = std::getenv("AGENT_HUB_PROJECT");
+  const std::string hubUrl =
+    urlEnv && *urlEnv ? urlEnv : "https://agent-mesh-hub.slack-clone-arin.workers.dev";
+  const std::string project =
+    projectEnv && *projectEnv ? projectEnv : "agent-hub";
+  const std::string fullBody = "[easymetric] " + body;
+  const std::string json =
+    "{\"project\":\"" + easymetricJsonEscape(project) +
+    "\",\"from\":\"" + easymetricJsonEscape(agent) +
+    "\",\"to\":\"all\",\"type\":\"" + easymetricJsonEscape(type) +
+    "\",\"body\":\"" + easymetricJsonEscape(fullBody) + "\"}";
+
+#if defined(_WIN32)
+  // Detached thread: a slow or dead hub must never block the UI.
+  // Token and body are copied into the thread by value; nothing
+  // here is written to a file, and the token is never logged.
+  std::thread([hubUrl, token = std::string(token), json]() {
+    try {
+      const std::wstring host =
+        L"agent-mesh-hub.slack-clone-arin.workers.dev";
+      // Only the default hub host is used over WinHTTP here; a
+      // custom AGENT_HUB_URL is honoured for its host only when
+      // it is an https URL, otherwise the default host is used.
+      std::wstring useHost = host;
+      if (hubUrl.rfind("https://", 0) == 0) {
+        const std::string rest = hubUrl.substr(8);
+        const size_t slash = rest.find('/');
+        const std::string customHost =
+          slash == std::string::npos ? rest : rest.substr(0, slash);
+        if (!customHost.empty())
+          useHost = easymetricWide(customHost);
+      }
+      HINTERNET session = WinHttpOpen(L"AsepriteEasymetric/2.0",
+                                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                      WINHTTP_NO_PROXY_NAME,
+                                      WINHTTP_NO_PROXY_BYPASS, 0);
+      if (!session)
+        return;
+      WinHttpSetTimeouts(session, 5000, 5000, 5000, 5000);
+      HINTERNET connect = WinHttpConnect(session, useHost.c_str(),
+                                         INTERNET_DEFAULT_HTTPS_PORT, 0);
+      if (!connect) {
+        WinHttpCloseHandle(session);
+        return;
+      }
+      HINTERNET request = WinHttpOpenRequest(
+        connect, L"POST", L"/send", nullptr, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+      if (!request) {
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        return;
+      }
+      const std::wstring headers =
+        L"Content-Type: application/json\r\nAuthorization: Bearer " +
+        easymetricWide(token) + L"\r\n";
+      BOOL sent = WinHttpSendRequest(request, headers.c_str(),
+                                     static_cast<DWORD>(headers.size()),
+                                     (LPVOID)json.data(),
+                                     static_cast<DWORD>(json.size()),
+                                     static_cast<DWORD>(json.size()), 0);
+      if (sent)
+        WinHttpReceiveResponse(request, nullptr);
+      WinHttpCloseHandle(request);
+      WinHttpCloseHandle(connect);
+      WinHttpCloseHandle(session);
+    }
+    catch (...) {
+    }
+  }).detach();
+#else
+  (void)hubUrl;
+  (void)json;
+#endif
+}
+
+inline void easymetricReportError(const std::string& where,
+                                  const std::string& what)
+{
+  std::string msg = what.substr(0, 500);
+  easymetricSendToHub("error", where + ": " + msg);
+}
+
+inline void easymetricReportCrash(const std::string& what)
+{
+  easymetricSendToHub("crash", what.substr(0, 500));
+}
 
 enum FaceId : int {
   kFaceTop = 0,
@@ -852,6 +1103,7 @@ static void rebuildSharedSheets(Doc* doc, const int newW[kFaceCount],
     doc->notifyGeneralUpdate();
   }
   catch (const std::exception& e) {
+    easymetricReportError("rebuildSharedSheets", e.what());
     // Ignore: entering the studio will retry.
   }
 }
@@ -906,6 +1158,7 @@ static void setupSharedSurfaceLayers(Doc* doc, bool seedStarterIfBlank)
       doc->notifyGeneralUpdate();
     }
     catch (const std::exception& e) {
+    easymetricReportError("setupSharedSurfaceLayers", e.what());
       // Ignore: the shared layers themselves are already usable.
     }
     return;
@@ -1080,6 +1333,7 @@ static void setupSharedSurfaceLayers(Doc* doc, bool seedStarterIfBlank)
     doc->notifyGeneralUpdate();
   }
   catch (const std::exception& e) {
+    easymetricReportError("setupSharedSurfaceLayers", e.what());
     // Ignore: entering the studio will retry the migration.
   }
 }
@@ -1224,6 +1478,7 @@ static void propagateLinkedDimensions(Doc* doc, SixSurfaceData& data, int srcFac
     doc->notifyGeneralUpdate();
   }
   catch (const std::exception& e) {
+    easymetricReportError("propagateLinkedDimensions", e.what());
     // Ignore
   }
 }
@@ -2522,6 +2777,7 @@ static void bake3DToDoc(Doc* doc, int yawDeg = 45, int pitchDeg = 30)
     doc->notifyGeneralUpdate();
   }
   catch (const std::exception& e) {
+    easymetricReportError("bake3DToDoc", e.what());
     // Ignore
   }
 }
@@ -2713,12 +2969,25 @@ public:
     m_timer.start();
 
     m_lastHash = 0;
+    // Session marker for crash reporting: if a marker from a
+    // previous studio session is still present, that session
+    // ended without a clean exit, so report it now (the crash
+    // itself could not post). Then start this session's marker.
+    {
+      std::ifstream oldMarker(easymetricHubMarkerPath());
+      if (oldMarker)
+        easymetricReportCrash("previous Easymetric session ended unexpectedly");
+      std::ofstream marker(easymetricHubMarkerPath());
+      if (marker)
+        marker << easymetricHubTimestamp() << "\n";
+    }
     pollAndRender(true);
   }
 
   ~EasymetricMultiPaneView() override
   {
     m_timer.stop();
+    std::remove(easymetricHubMarkerPath().c_str());
     restoreWheelZoomPref();
     if (Doc* doc = m_docView->document()) {
       if (m_savedMask) {
@@ -2785,6 +3054,7 @@ public:
       }
       catch (const std::exception& e) {
         Console::showException(e);
+        easymetricReportError("syncOpposingCels", e.what());
       }
       return;
     }
@@ -2829,6 +3099,7 @@ public:
     }
     catch (const std::exception& e) {
       Console::showException(e);
+      easymetricReportError("syncOpposingCels", e.what());
     }
   }
 
@@ -3581,6 +3852,10 @@ private:
     exitBtn->Click.connect([this] {
       syncAllLinkedCels();
       restoreWheelZoomPref();
+      // Clean studio exit: clear the session marker here as well
+      // as in the destructor, so a normal Exit can never be
+      // reported as a crash on the next entry.
+      std::remove(easymetricHubMarkerPath().c_str());
       m_docView->exitMultiPaneMode();
     });
   }
@@ -3675,6 +3950,7 @@ private:
     }
     catch (const std::exception& e) {
       Console::showException(e);
+      easymetricReportError("saveCurrentAngleAsTag", e.what());
     }
   }
 
@@ -3742,6 +4018,7 @@ private:
     }
     catch (const std::exception& e) {
       Console::showException(e);
+      easymetricReportError("generateEditableFaceDepthLayer", e.what());
     }
     m_lastHash = 0;
     pollAndRender(true);
@@ -4069,6 +4346,7 @@ private:
     }
     catch (const std::exception& e) {
       Console::showException(e);
+      easymetricReportError("bakeToActiveDocLayers", e.what());
     }
   }
 
