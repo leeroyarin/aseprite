@@ -81,6 +81,11 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-04 — Codex: Pulled `f4439b4c2` and built it with MSVC x64. Windows
+  suites passed: Easymetric 68/68, adversarial 54/54, four requirements 23/23,
+  texture/layer/panel 14/14, all exit 0. PR #19 was closed as superseded;
+  its substantive additions are already in the base. Draft PR #10 conflicts
+  with later Easymetric work and still requires integration and validation.
 - 2026-11-04 — Codex: Verified the current Windows build at `d6be90e98` with
   `tools/aseprite2-build.ps1` (Ninja reported no work remaining). The resulting
   executable reports `2.0-dev+d6be90e98`. No test suites were run in this check.
