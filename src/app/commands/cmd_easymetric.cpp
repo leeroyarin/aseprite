@@ -2879,14 +2879,281 @@ public:
       return true;
     render::Zoom zoom = render::Zoom::fromLinearScale(
       editor->zoom().linearScale() - step);
+    // Wheel-zoom revert guard (proven by Linux wheel harness,
+    // 2026-11-04): setZoomAndCenterInMouse calls updateEditor,
+    // which resizes the viewport, which calls Editor::onResize,
+    // which calls fitClipSpriteBounds on a panel editor that
+    // has a clip rect — and that fit floors the zoom back to
+    // 1x and overwrites the scroll, so the panel displaced
+    // instead of zooming. Clearing the clip for the duration
+    // of this one call makes fitClip return early (empty
+    // clip), so the zoom and the mouse-centred scroll survive;
+    // the clip is restored immediately afterwards, in the
+    // same call, so panel editing confinement is unchanged.
+    // This touches only Easymetric panel editors, not the
+    // upstream Editor::onResize/fitClip behaviour.
+    const gfx::Rect savedClip = editor->clipSpriteBounds();
+    editor->setClipSpriteBounds(gfx::Rect());
     editor->setZoomAndCenterInMouse(zoom, msg->position(),
                                     Editor::ZoomBehavior::MOUSE);
+    editor->setClipSpriteBounds(savedClip);
     return true;
   }
 
 private:
   double m_wheelAccum = 0.0;
 };
+
+// Depth-sculpt state for surface panels. Inherits the wheel-zoom
+// behaviour, and intercepts left-button strokes so they sculpt
+// the Surface_DEPTH layer instead of painting with the active
+// tool. The actual sculpting lives in EasymetricMultiPaneView
+// (paintDepthDab / endDepthStroke, via the callbacks below),
+// because only the view knows which panel editor is which face
+// and holds the Fields Depth Brush settings.
+class EasymetricDepthState : public EasymetricWheelZoomState {
+public:
+  using PaintFn = std::function<void(Editor*, const gfx::Point&, bool)>;
+  using EndFn = std::function<void()>;
+  EasymetricDepthState(PaintFn paint, EndFn end)
+    : m_paint(std::move(paint))
+    , m_end(std::move(end))
+  {
+  }
+  bool onMouseDown(Editor* editor, ui::MouseMessage* msg) override
+  {
+    if (msg->left()) {
+      m_paint(editor, msg->position(), true);
+      return true;
+    }
+    return false;
+  }
+  bool onMouseMove(Editor* editor, ui::MouseMessage* msg) override
+  {
+    if (editor->hasCapture()) {
+      m_paint(editor, msg->position(), false);
+      return true;
+    }
+    return false;
+  }
+  bool onMouseUp(Editor* editor, ui::MouseMessage* msg) override
+  {
+    (void)editor;
+    (void)msg;
+    m_end();
+    return true;
+  }
+
+private:
+  PaintFn m_paint;
+  EndFn m_end;
+};
+
+// Standalone depth-map generation (William's spec, 2026-11-04).
+// Used by the studio button AND by the headless script action
+// "generateDepthFromBase", so a Lua batch test can verify the
+// exact gray values without opening the GUI. See the method
+// generateEditableFaceDepthLayer() for the spec comment.
+static bool generateDepthFromBaseOnDoc(app::Doc* doc, doc::frame_t fr)
+{
+  if (!doc || !doc->sprite()) return false;
+  doc::Sprite* spr = doc->sprite();
+  SharedSurfaceLayers shared = findSharedLayers(spr);
+  if (!shared.baseLayer || !shared.baseLayer->cel(fr)) return false;
+  doc::ImageRef baseImg = shared.baseLayer->cel(fr)->imageRef();
+
+  try {
+    Tx tx(doc, "Generate Depth from Base", ModifyDocument);
+    DocApi api = doc->getApi(tx);
+
+    doc::LayerImage* depthLayer = findOrCreateLayer(doc, api, spr, "Surface_DEPTH");
+    depthLayer->setVisible(true);
+    depthLayer->userData().setColor(doc::rgba(148, 163, 184, 255));
+
+    doc::ImageRef depthImg(doc::Image::create(doc::IMAGE_RGB, spr->width(), spr->height()));
+    depthImg->clear(0);
+
+    gfx::Rect rects[kFaceCount];
+    for (int f = 0; f < kFaceCount; ++f)
+      rects[f] = sharedFaceRect(spr, f);
+
+    auto lineCount = [&](int view, bool column, int index) {
+      const gfx::Rect& r = rects[view];
+      int count = 0;
+      if (column) {
+        if (index < 0 || index >= r.w) return 0;
+        for (int v = 0; v < r.h; ++v)
+          if (doc::rgba_geta(doc::get_pixel(baseImg.get(), r.x + index, r.y + v)) > 16)
+            ++count;
+      }
+      else {
+        if (index < 0 || index >= r.h) return 0;
+        for (int u = 0; u < r.w; ++u)
+          if (doc::rgba_geta(doc::get_pixel(baseImg.get(), r.x + u, r.y + index)) > 16)
+            ++count;
+      }
+      return count;
+    };
+
+    for (int f = 0; f < kFaceCount; ++f) {
+      const gfx::Rect& r = rects[f];
+      if (r.w <= 0 || r.h <= 0) continue;
+      std::vector<float> thick(size_t(r.w) * size_t(r.h), -1.0f);
+      float sum = 0.0f;
+      int n = 0;
+      for (int v = 0; v < r.h; ++v) {
+        for (int u = 0; u < r.w; ++u) {
+          if (doc::rgba_geta(doc::get_pixel(baseImg.get(), r.x + u, r.y + v)) <= 16)
+            continue;
+          float t = 0.0f;
+          switch (f) {
+            case kFaceTop:
+            case kFaceDown:
+              t = 0.5f * (float(lineCount(kFaceFront, true, u)) / std::max(1, rects[kFaceFront].h) +
+                          float(lineCount(kFaceRight, true, v)) / std::max(1, rects[kFaceRight].h));
+              break;
+            case kFaceFront:
+              t = 0.5f * (float(lineCount(kFaceTop, true, u)) / std::max(1, rects[kFaceTop].h) +
+                          float(lineCount(kFaceRight, false, v)) / std::max(1, rects[kFaceRight].w));
+              break;
+            case kFaceBack:
+              t = 0.5f * (float(lineCount(kFaceTop, true, u)) / std::max(1, rects[kFaceTop].h) +
+                          float(lineCount(kFaceLeft, false, v)) / std::max(1, rects[kFaceLeft].w));
+              break;
+            case kFaceRight:
+              t = 0.5f * (float(lineCount(kFaceFront, false, v)) / std::max(1, rects[kFaceFront].w) +
+                          float(lineCount(kFaceTop, true, u)) / std::max(1, rects[kFaceTop].w));
+              break;
+            case kFaceLeft:
+              t = 0.5f * (float(lineCount(kFaceFront, false, v)) / std::max(1, rects[kFaceFront].w) +
+                          float(lineCount(kFaceTop, true, u)) / std::max(1, rects[kFaceTop].w));
+              break;
+          }
+          thick[size_t(v) * size_t(r.w) + size_t(u)] = t;
+          sum += t;
+          ++n;
+        }
+      }
+      if (n == 0) continue;
+      const float avg = sum / float(n);
+      for (int v = 0; v < r.h; ++v) {
+        for (int u = 0; u < r.w; ++u) {
+          const float t = thick[size_t(v) * size_t(r.w) + size_t(u)];
+          if (t < 0.0f) continue;
+          const int gray = std::clamp(int(std::round(128.0f + (t - avg) * 128.0f)), 0, 255);
+          doc::put_pixel(depthImg.get(), r.x + u, r.y + v, doc::rgba(gray, gray, gray, 255));
+        }
+      }
+    }
+
+    if (doc::Cel* cel = depthLayer->cel(fr))
+      api.replaceImage(spr, cel->imageRef(), depthImg);
+    else
+      api.addCel(depthLayer, fr, depthImg);
+
+    tx.commit();
+    doc->notifyGeneralUpdate();
+    return true;
+  }
+  catch (const std::exception& e) {
+    easymetricReportError("generateDepthFromBaseOnDoc", e.what());
+    return false;
+  }
+}
+
+// Pure depth-sculpt dab on two working images. Shared by the
+// GUI brush (which holds one Tx for a whole drag) and by the
+// headless script action "depthDab" (which opens its own Tx),
+// so both paths apply exactly the same step math.
+// Returns {depthChanged, baseChanged}. See paintDepthDab for
+// the spec (128 surface, step 128/D, black then through-hole).
+static std::pair<bool, bool> applyDepthDabToImages(doc::Image* depthWork,
+                                                   doc::Image* baseWork,
+                                                   const gfx::Rect& faceRect,
+                                                   int u0, int v0,
+                                                   bool minus, float step, int radius)
+{
+  bool depthChanged = false, baseChanged = false;
+  for (int dy = -radius; dy <= radius; ++dy) {
+    for (int dx = -radius; dx <= radius; ++dx) {
+      if (dx * dx + dy * dy > radius * radius) continue;
+      const int u = u0 + dx, v = v0 + dy;
+      if (u < 0 || v < 0 || u >= faceRect.w || v >= faceRect.h) continue;
+      const int cx = faceRect.x + u, cy = faceRect.y + v;
+      if (doc::rgba_geta(doc::get_pixel(baseWork, cx, cy)) <= 16) continue;
+      const uint32_t dCol = doc::get_pixel(depthWork, cx, cy);
+      const float oldGray = (doc::rgba_geta(dCol) <= 16) ? 128.0f : float(doc::rgba_getr(dCol));
+      if (!minus) {
+        const int ng = std::min(255, int(std::round(oldGray + step)));
+        doc::put_pixel(depthWork, cx, cy, doc::rgba(ng, ng, ng, 255));
+        depthChanged = true;
+      }
+      else {
+        if (oldGray <= 0.0f) {
+          doc::put_pixel(depthWork, cx, cy, 0);
+          doc::put_pixel(baseWork, cx, cy, 0);
+          depthChanged = true;
+          baseChanged = true;
+        }
+        else {
+          const float nv = oldGray - step;
+          const int ng = (nv <= 0.0f) ? 0 : int(std::round(nv));
+          doc::put_pixel(depthWork, cx, cy, doc::rgba(ng, ng, ng, 255));
+          depthChanged = true;
+        }
+      }
+    }
+  }
+  return {depthChanged, baseChanged};
+}
+
+// Headless single dab, used by the script action "depthDab"
+// and by Lua tests. Step is computed from the face normal size
+// exactly as the GUI brush does.
+static bool sculptDepthDabOnDoc(app::Doc* doc, doc::frame_t fr, int face,
+                                int u, int v, bool minus, int radius)
+{
+  if (!doc || !doc->sprite() || face < 0 || face >= kFaceCount) return false;
+  doc::Sprite* spr = doc->sprite();
+  SharedSurfaceLayers shared = findSharedLayers(spr);
+  if (!shared.baseLayer || !shared.baseLayer->cel(fr)) return false;
+  if (!shared.depthLayer || !shared.depthLayer->cel(fr)) {
+    if (!generateDepthFromBaseOnDoc(doc, fr)) return false;
+    shared = findSharedLayers(spr);
+    if (!shared.depthLayer || !shared.depthLayer->cel(fr)) return false;
+  }
+  int fw[kFaceCount], fh[kFaceCount];
+  sharedFaceSizes(spr, fw, fh);
+  int normalSize = 0;
+  if (face == kFaceTop || face == kFaceDown)
+    normalSize = fh[kFaceFront];
+  else if (face == kFaceFront || face == kFaceBack)
+    normalSize = fw[kFaceRight];
+  else
+    normalSize = fw[kFaceFront];
+  const float step = 128.0f / float(std::max(1, normalSize / 2));
+  const gfx::Rect faceRect = sharedFaceRect(spr, face);
+
+  try {
+    Tx tx(doc, "Depth Sculpt", ModifyDocument);
+    DocApi api = doc->getApi(tx);
+    doc::ImageRef depthWork(doc::Image::createCopy(shared.depthLayer->cel(fr)->imageRef().get()));
+    doc::ImageRef baseWork(doc::Image::createCopy(shared.baseLayer->cel(fr)->imageRef().get()));
+    const auto changed = applyDepthDabToImages(depthWork.get(), baseWork.get(),
+                                               faceRect, u, v, minus, step, radius);
+    if (changed.first)
+      api.replaceImage(spr, shared.depthLayer->cel(fr)->imageRef(), depthWork);
+    if (changed.second)
+      api.replaceImage(spr, shared.baseLayer->cel(fr)->imageRef(), baseWork);
+    tx.commit();
+    doc->notifyGeneralUpdate();
+    return changed.first || changed.second;
+  }
+  catch (const std::exception& e) {
+    easymetricReportError("sculptDepthDabOnDoc", e.what());
+    return false;
+  }
+}
 
 class EasymetricMultiPaneView : public ui::Widget {
 public:
@@ -3268,7 +3535,8 @@ public:
   {
     if (!ed || !ed->getState()) return false;
     const std::type_info& t = typeid(*ed->getState());
-    return t == typeid(StandbyState) || t == typeid(EasymetricWheelZoomState);
+    return t == typeid(StandbyState) || t == typeid(EasymetricWheelZoomState) ||
+           t == typeid(EasymetricDepthState);
   }
 
   bool anyPanelEditorBusy() const
@@ -3294,6 +3562,141 @@ public:
         active == shared.depthLayer)
       return static_cast<doc::LayerImage*>(active);
     return nullptr;
+  }
+
+  EditorStatePtr newPanelState()
+  {
+    if (m_depthBrushCheck && m_depthBrushCheck->isSelected()) {
+      return EditorStatePtr(new EasymetricDepthState(
+        [this](Editor* ed, const gfx::Point& pt, bool down) { paintDepthDab(ed, pt, down); },
+        [this] { endDepthStroke(); }));
+    }
+    return EditorStatePtr(new EasymetricWheelZoomState);
+  }
+
+  bool depthBrushOn() const
+  {
+    return m_depthBrushCheck && m_depthBrushCheck->isSelected();
+  }
+
+  // Depth-sculpt tool (William's spec, 2026-11-04, UI placement
+  // chosen by Muse: Fields Depth Brush, not a new toolbar tool).
+  // PLUS = bump, whiter towards the user; MINUS = carve, darker
+  // into the plane. 128 = the main surface. 1 step = 1 pixel of
+  // depth, so the gray step is 128 / D, D = pixels from surface
+  // to box centre along the face normal (per-axis: Front/Back
+  // use depth/2, Top/Bottom use height/2, Right/Left use
+  // width/2). Black 0 = deepest, single-pixel thinness at the
+  // centre; one more MINUS step past black = through-hole:
+  // depth becomes transparent AND the Base pixel is cleared,
+  // so the hole is real, not just shading.
+  void paintDepthDab(Editor* ed, const gfx::Point& screenPt, bool isDown)
+  {
+    if (!depthBrushOn() || !ed) return;
+    int face = -1;
+    for (int f = 0; f < kFaceCount; ++f)
+      if (m_editors[f] == ed) face = f;
+    if (face < 0) return;
+    Doc* doc = m_docView->document();
+    doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+    if (!spr) return;
+    SharedSurfaceLayers shared = findSharedLayers(spr);
+    if (!shared.baseLayer) return;
+
+    const doc::frame_t fr = (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
+    const gfx::Point sp = ed->screenToEditor(screenPt);
+    const gfx::Rect faceRect = sharedFaceRect(spr, face);
+    const int u0 = sp.x - faceRect.x;
+    const int v0 = sp.y - faceRect.y;
+    if (u0 < 0 || v0 < 0 || u0 >= faceRect.w || v0 >= faceRect.h) return;
+
+    int fw[kFaceCount], fh[kFaceCount];
+    sharedFaceSizes(spr, fw, fh);
+    int normalSize = 0;
+    if (face == kFaceTop || face == kFaceDown)
+      normalSize = fh[kFaceFront];
+    else if (face == kFaceFront || face == kFaceBack)
+      normalSize = fw[kFaceRight];
+    else
+      normalSize = fw[kFaceFront];
+    const int D = std::max(1, normalSize / 2);
+    const float step = 128.0f / float(D);
+    const bool minus = (m_depthModeCombo && m_depthModeCombo->getSelectedItemIndex() == 1);
+    const int brush = m_depthBrushSlider ? m_depthBrushSlider->getValue() : 3;
+    const int radius = std::max(0, (brush - 1) / 2);
+
+    try {
+      if (isDown || !m_depthStrokeActive) {
+        endDepthStroke();
+        m_depthTx.reset(new Tx(doc, "Depth Sculpt", ModifyDocument));
+        DocApi api = doc->getApi(*m_depthTx);
+        doc::LayerImage* depthLayer = shared.depthLayer;
+        if (!depthLayer)
+          depthLayer = findOrCreateLayer(doc, api, spr, "Surface_DEPTH");
+        doc::Cel* depthCel = depthLayer ? depthLayer->cel(fr) : nullptr;
+        doc::Cel* baseCel = shared.baseLayer->cel(fr);
+        if (!depthCel || !baseCel) {
+          // No cel to sculpt yet: create a depth cel from the
+          // generated depth map, then sculpt on top of it.
+          if (!depthCel && depthLayer) {
+            doc::ImageRef blank(doc::Image::create(doc::IMAGE_RGB, spr->width(), spr->height()));
+            blank->clear(0);
+            depthCel = api.addCel(depthLayer, fr, blank);
+          }
+          if (!depthCel || !baseCel) {
+            endDepthStroke();
+            return;
+          }
+        }
+        m_depthLive = depthCel->imageRef();
+        m_depthWork.reset(doc::Image::createCopy(m_depthLive.get()));
+        m_baseLive = baseCel->imageRef();
+        m_baseWork.reset(doc::Image::createCopy(m_baseLive.get()));
+        m_depthStrokeActive = true;
+      }
+      if (!m_depthTx || !m_depthWork || !m_baseWork) return;
+
+      const auto changed = applyDepthDabToImages(m_depthWork.get(), m_baseWork.get(),
+                                               faceRect, u0, v0, minus, step, radius);
+      const bool depthChanged = changed.first, baseChanged = changed.second;
+      if (!depthChanged && !baseChanged) return;
+      DocApi api = doc->getApi(*m_depthTx);
+      if (depthChanged) {
+        doc::ImageRef next(doc::Image::createCopy(m_depthWork.get()));
+        api.replaceImage(spr, m_depthLive, next);
+        m_depthLive = next;
+        m_depthWork = next;
+      }
+      if (baseChanged) {
+        doc::ImageRef next(doc::Image::createCopy(m_baseWork.get()));
+        api.replaceImage(spr, m_baseLive, next);
+        m_baseLive = next;
+        m_baseWork = next;
+      }
+      doc->notifyGeneralUpdate();
+    }
+    catch (const std::exception& e) {
+      endDepthStroke();
+      easymetricReportError("paintDepthDab", e.what());
+    }
+  }
+
+  void endDepthStroke()
+  {
+    if (m_depthTx) {
+      try {
+        m_depthTx->commit();
+      }
+      catch (...) {
+      }
+      m_depthTx.reset();
+    }
+    m_depthWork.reset();
+    m_depthLive.reset();
+    m_baseWork.reset();
+    m_baseLive.reset();
+    m_depthStrokeActive = false;
+    m_lastHash = 0;
   }
 
   void initLayersAndFraming()
@@ -3504,10 +3907,12 @@ protected:
         continue;
       if (!view->viewportBounds().contains(pos))
         continue;
-      if (!isPanelEditorIdle(ed) && typeid(*ed->getState()) != typeid(EasymetricWheelZoomState))
+      if (!isPanelEditorIdle(ed) && typeid(*ed->getState()) != typeid(EasymetricWheelZoomState) &&
+          typeid(*ed->getState()) != typeid(EasymetricDepthState))
         return false;
-      if (typeid(*ed->getState()) != typeid(EasymetricWheelZoomState))
-        ed->setState(EditorStatePtr(new EasymetricWheelZoomState));
+      if (typeid(*ed->getState()) != typeid(EasymetricWheelZoomState) &&
+          typeid(*ed->getState()) != typeid(EasymetricDepthState))
+        ed->setState(newPanelState());
       return ed->getState()->onMouseWheel(ed, msg);
     }
     return false;
@@ -3899,12 +4304,17 @@ private:
     objRow->setChildSpacing(4 * s);
     int curX = 24, curY = 24, curZ = 24;
     if (Doc* doc0 = m_docView->document()) {
-      SixSurfaceData d0;
-      if (extractSixSurfaces(doc0, 0, d0)) {
-        curX = d0.w[kFaceFront];
-        curY = d0.h[kFaceFront];
-        curZ = d0.w[kFaceRight];
-      }
+      // NOTE: do NOT call extractSixSurfaces() here. That member
+      // reads m_useFaceDepthCheck, which is only created later
+      // in this function; calling it during construction read
+      // an uninitialised pointer and segfaulted studio open
+      // intermittently (Widget::isSelected on 0x101). Face
+      // sizes alone are enough for the initial slider values.
+      int fw[kFaceCount], fh[kFaceCount];
+      sharedFaceSizes(doc0->sprite(), fw, fh);
+      curX = fw[kFaceFront];
+      curY = fh[kFaceFront];
+      curZ = fw[kFaceRight];
     }
     auto* objXSlider = new ui::Slider(4, 256, curX);
     auto* objYSlider = new ui::Slider(4, 256, curY);
@@ -3966,7 +4376,7 @@ private:
     // Row 6: Per-Face Editable Depth Maps + Live Sync
     auto* depthRow = new ui::HBox;
     depthRow->setChildSpacing(4 * s);
-    auto* genFaceDepthBtn = new ui::Button("Render Face Depths (Edit)");
+    auto* genFaceDepthBtn = new ui::Button("Generate Depth from Base");
     m_useFaceDepthCheck = new ui::CheckBox("Use Face Depth Layer");
     m_liveBakeCheck = new ui::CheckBox("Live Sync");
     m_useFaceDepthCheck->setSelected(true);
@@ -3975,6 +4385,26 @@ private:
     depthRow->addChild(m_useFaceDepthCheck);
     depthRow->addChild(m_liveBakeCheck);
     m_fieldsBox->addChild(depthRow);
+
+    // Row 6a: Depth Sculpt tool (dedicated depth-only tool).
+    // Fields placement, chosen by Muse: the studio has no
+    // toolbar of its own, and Fields already owns the depth
+    // controls. Tick Depth Brush, pick Plus (bump, whiter)
+    // or Minus (carve, darker), then drag in any surface
+    // panel. Wheel still zooms while the brush is on.
+    auto* sculptRow = new ui::HBox;
+    sculptRow->setChildSpacing(4 * s);
+    m_depthBrushCheck = new ui::CheckBox("Depth Brush");
+    m_depthModeCombo = new ui::ComboBox();
+    m_depthModeCombo->addItem("Plus (bump)");
+    m_depthModeCombo->addItem("Minus (carve)");
+    m_depthBrushSlider = new ui::Slider(1, 16, 3);
+    m_depthBrushSlider->setExpansive(true);
+    sculptRow->addChild(m_depthBrushCheck);
+    sculptRow->addChild(m_depthModeCombo);
+    sculptRow->addChild(new ui::Label("Brush:"));
+    sculptRow->addChild(m_depthBrushSlider);
+    m_fieldsBox->addChild(sculptRow);
 
     // Row 6b: 2-Layer Smart Object & Clipping Structure
     auto* smartRow = new ui::HBox;
@@ -4035,6 +4465,14 @@ private:
     m_cutoutCheck->Click.connect(onParam);
     m_useFaceDepthCheck->Click.connect(onParam);
     m_liveBakeCheck->Click.connect(onParam);
+    m_depthBrushCheck->Click.connect([this] {
+      endDepthStroke();
+      for (int f = 0; f < kFaceCount; ++f) {
+        Editor* ed = m_editors[f];
+        if (ed && !ed->hasCapture())
+          ed->setState(newPanelState());
+      }
+    });
 
     m_previewWidget->OrbitDrag.connect([this](int newYaw, int newPitch) {
       m_yawSlider->setValue(newYaw);
@@ -4260,71 +4698,29 @@ private:
     }
   }
 
+  // Initial depth map, William's spec (2026-11-04):
+  // - Starts at mid-gray 128 = the main surface, opaque.
+  // - Clipped by Base: depth only where Base is opaque;
+  //   outside the base silhouette, depth stays transparent.
+  // - Gradient derived from the OTHER views' depth, not a
+  //   dome or the Base colour: for each face pixel, thickness
+  //   along the face normal is read from the two orthogonal
+  //   views (e.g. a Front pixel's Z thickness comes from the
+  //   Top view's column and the Right view's row), averaged,
+  //   then centred on the face's own mean thickness, so a flat
+  //   face comes out flat 128 and a curved shape (a cylinder
+  //   seen from the side) comes out as a curved gradient
+  //   around 128, centre whiter, edges darker. The centring
+  //   choice is Muse's: William specified "starts at 128"
+  //   and "gradient from other views", not the exact formula.
   void generateEditableFaceDepthLayer()
   {
     Doc* doc = m_docView->document();
     if (!doc || !doc->sprite()) return;
-    doc::Sprite* spr = doc->sprite();
     const doc::frame_t fr = (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
-
-    SixSurfaceData data;
-    extractSixSurfaces(doc, fr, data);
-
-    try {
-      Tx tx(doc, "Render Editable Face Depths", ModifyDocument);
-      DocApi api = doc->getApi(tx);
-
-      doc::LayerImage* depthLayer = findOrCreateLayer(doc, api, spr, "Surface_DEPTH");
-      depthLayer->setVisible(true);
-      depthLayer->userData().setColor(doc::rgba(148, 163, 184, 255));
-
-      doc::ImageRef depthImg(doc::Image::create(doc::IMAGE_RGB, spr->width(), spr->height()));
-      depthImg->clear(0);
-
-      for (int f = 0; f < kFaceCount; ++f) {
-        const int fw = data.w[f];
-        const int fh = data.h[f];
-        if (fw <= 0 || fh <= 0) continue;
-
-        const float cx = (fw - 1) * 0.5f;
-        const float cy = (fh - 1) * 0.5f;
-        const float maxR = std::max(1.0f, std::sqrt(cx * cx + cy * cy));
-
-        // Shared sheets: write each face into its own UV cell
-        // (data.bounds[f] is that cell when shared layers exist),
-        // instead of writing every face at (0, 0) where each
-        // face would overwrite the previous one.
-        const int ox = (data.bounds[f].w > 0) ? data.bounds[f].x : 0;
-        const int oy = (data.bounds[f].w > 0) ? data.bounds[f].y : 0;
-        for (int v = 0; v < fh; ++v) {
-          if (oy + v < 0 || oy + v >= depthImg->height()) continue;
-          for (int u = 0; u < fw; ++u) {
-            if (ox + u < 0 || ox + u >= depthImg->width()) continue;
-            const uint32_t col = data.sample(f, u, v);
-            if (doc::rgba_geta(col) <= 16) continue;
-
-            const float luma = pixelLuma(col);
-            const float dist = std::sqrt((u - cx) * (u - cx) + (v - cy) * (v - cy)) / maxR;
-            const float dome = std::clamp(1.0f - dist * 0.35f, 0.0f, 1.0f);
-            const uint8_t hByte = clampByte((0.35f + luma * 0.45f + dome * 0.20f) * 255.0f);
-            doc::put_pixel(depthImg.get(), ox + u, oy + v, doc::rgba(hByte, hByte, hByte, 255));
-          }
-        }
-      }
-
-      if (doc::Cel* cel = depthLayer->cel(fr))
-        api.replaceImage(spr, cel->imageRef(), depthImg);
-      else
-        api.addCel(depthLayer, fr, depthImg);
-
-      tx.commit();
-      doc->notifyGeneralUpdate();
+    if (generateDepthFromBaseOnDoc(doc, fr)) {
       if (auto* sb = StatusBar::instance())
-        sb->showTip(2000, "Rendered face depths to 'Surface_DEPTH' layer");
-    }
-    catch (const std::exception& e) {
-      Console::showException(e);
-      easymetricReportError("generateEditableFaceDepthLayer", e.what());
+        sb->showTip(2000, "Generated depth map from Base (128 surface, clipped by Base)");
     }
     m_lastHash = 0;
     pollAndRender(true);
@@ -4351,7 +4747,7 @@ private:
       Editor* ed = m_editors[f];
       if (ed && !ed->hasCapture() && ed->getState() &&
           typeid(*ed->getState()) == typeid(StandbyState)) {
-        ed->setState(EditorStatePtr(new EasymetricWheelZoomState));
+        ed->setState(newPanelState());
       }
     }
     Doc* doc = m_docView->document();
@@ -4949,32 +5345,44 @@ private:
   std::array<bool, 3> m_colLinked = { false, false, false };
 
   // Preview & Fields
-  EasymetricPreviewWidget* m_previewWidget;
-  FieldsPanelBox* m_fieldsBox;
+  EasymetricPreviewWidget* m_previewWidget = nullptr;
+  FieldsPanelBox* m_fieldsBox = nullptr;
   ui::View* m_fieldsView = nullptr;
   bool m_savedZoomWithWheel = true;
   bool m_restoreZoomWithWheel = false;
 
   // Fields controls
-  ui::Slider* m_yawSlider;
-  ui::Slider* m_pitchSlider;
-  ui::Slider* m_pivXSlider;
-  ui::Slider* m_pivYSlider;
-  ui::Slider* m_pivZSlider;
-  ui::ComboBox* m_tagCombo;
-  ui::CheckBox* m_mapDiffuseCheck;
-  ui::CheckBox* m_mapNormalCheck;
-  ui::CheckBox* m_mapDepthCheck;
-  ui::ComboBox* m_renderTypeCombo;
+  ui::Slider* m_yawSlider = nullptr;
+  ui::Slider* m_pitchSlider = nullptr;
+  ui::Slider* m_pivXSlider = nullptr;
+  ui::Slider* m_pivYSlider = nullptr;
+  ui::Slider* m_pivZSlider = nullptr;
+  ui::ComboBox* m_tagCombo = nullptr;
+  ui::CheckBox* m_mapDiffuseCheck = nullptr;
+  ui::CheckBox* m_mapNormalCheck = nullptr;
+  ui::CheckBox* m_mapDepthCheck = nullptr;
+  ui::ComboBox* m_renderTypeCombo = nullptr;
   ui::Label* m_zoomLabel = nullptr;
-  ui::CheckBox* m_strokeCheck;
-  ui::CheckBox* m_cutoutCheck;
-  ui::CheckBox* m_lockBordersCheck;
-  ui::CheckBox* m_symXCheck;
-  ui::CheckBox* m_symYCheck;
-  ui::CheckBox* m_useFaceDepthCheck;
-  ui::CheckBox* m_liveBakeCheck;
-  ui::CheckBox* m_linkDimensionsCheck;
+  ui::CheckBox* m_strokeCheck = nullptr;
+  ui::CheckBox* m_cutoutCheck = nullptr;
+  ui::CheckBox* m_lockBordersCheck = nullptr;
+  ui::CheckBox* m_symXCheck = nullptr;
+  ui::CheckBox* m_symYCheck = nullptr;
+  ui::CheckBox* m_useFaceDepthCheck = nullptr;
+  ui::CheckBox* m_depthBrushCheck = nullptr;
+  ui::ComboBox* m_depthModeCombo = nullptr;
+  ui::Slider* m_depthBrushSlider = nullptr;
+  // Depth-sculpt stroke state: one Tx for the whole drag, so a
+  // drag is a single undo step. Each dab installs a fresh copy
+  // of the working image via replaceImage (the Tx groups them).
+  std::unique_ptr<Tx> m_depthTx;
+  doc::ImageRef m_depthWork;
+  doc::ImageRef m_depthLive;
+  doc::ImageRef m_baseWork;
+  doc::ImageRef m_baseLive;
+  bool m_depthStrokeActive = false;
+  ui::CheckBox* m_liveBakeCheck = nullptr;
+  ui::CheckBox* m_linkDimensionsCheck = nullptr;
 
   int m_lastFaceW[kFaceCount] = { 0, 0, 0, 0, 0, 0 };
   int m_lastFaceH[kFaceCount] = { 0, 0, 0, 0, 0, 0 };
@@ -5065,6 +5473,26 @@ protected:
       }
       else if (action == "setupSurfacesEasy") {
         setupSixSurfacesOnDoc(doc, true, true);
+      }
+      else if (action == "generateDepthFromBase") {
+        generateDepthFromBaseOnDoc(doc, doc::frame_t(0));
+      }
+      else if (action == "depthDab") {
+        // Params: face (top/down/front/back/right/left), u, v,
+        // mode (plus/minus), radius (default 0 = single pixel).
+        std::string faceStr = m_params.has_param("face") ? m_params.get("face") : "front";
+        int faceIdx = kFaceFront;
+        if (faceStr == "top" || faceStr == "TOP") faceIdx = kFaceTop;
+        else if (faceStr == "down" || faceStr == "bottom" || faceStr == "DOWN") faceIdx = kFaceDown;
+        else if (faceStr == "front" || faceStr == "FRONT") faceIdx = kFaceFront;
+        else if (faceStr == "back" || faceStr == "BACK") faceIdx = kFaceBack;
+        else if (faceStr == "right" || faceStr == "RIGHT") faceIdx = kFaceRight;
+        else if (faceStr == "left" || faceStr == "LEFT") faceIdx = kFaceLeft;
+        const int u = m_params.has_param("u") ? std::stoi(m_params.get("u")) : 0;
+        const int v = m_params.has_param("v") ? std::stoi(m_params.get("v")) : 0;
+        const bool minus = m_params.has_param("mode") && m_params.get("mode") == "minus";
+        const int radius = m_params.has_param("radius") ? std::stoi(m_params.get("radius")) : 0;
+        sculptDepthDabOnDoc(doc, doc::frame_t(0), faceIdx, u, v, minus, radius);
       }
       else if (action == "setupGroups") {
         setupTwoLayerStructure(doc, false);

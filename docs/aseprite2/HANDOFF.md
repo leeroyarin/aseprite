@@ -76,6 +76,57 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-04 — Muse (ULTRON): Depth-sculpt tool + depth map from Base, DRAFT PR, headless-verified, GUI brush click NOT yet verified.
+  Branch fix/easymetric-depth-sculpt, base 2cee30d. Note: this branch
+  was built in the same worktree as PR #19, so its snapshot also
+  contains PR #19's wheel-zoom revert guard and studio-open crash
+  fix; if PR #19 merges first, this PR's remaining diff is only
+  the depth work, and it still merges cleanly.
+  UI placement chosen by Muse (William said "do it by yourself"):
+  Fields "Depth Brush" checkbox + "Plus (bump) / Minus (carve)"
+  combo + Brush slider 1-16, under the depth row. Tick it and drag
+  in any surface panel; wheel still zooms while it is on.
+  (1) Generate Depth from Base (button, also script action
+  generateDepthFromBase): starts at 128 = main surface, clipped by
+  Base (transparent outside the silhouette), gradient derived from
+  the other views' thickness along the face normal, centred on the
+  face's own mean thickness — so a flat face is flat 128 and a
+  cylinder gives a curved gradient around 128. The centring formula
+  is Muse's interpretation; William specified "starts at 128" and
+  "gradient from other views", not the exact formula.
+  (2) Brush: PLUS whiter, MINUS darker, step = 128 / D, D = pixels
+  from surface to box centre along the face normal (Front/Back
+  depth/2, Top/Bottom height/2, Right/Left width/2). Black 0 =
+  deepest; one more MINUS past black = through-hole, depth
+  transparent AND Base pixel cleared. One Tx per drag, so a drag
+  is a single undo step. Same pixel code is used by the headless
+  script action depthDab (face/u/v/mode/radius).
+  Verified headless (Lua, workspace/wheel-test/depth_test.lua):
+  band 177 / non-band 113 / Top 128 exactly as hand-computed,
+  clipping transparent, plus dab 113->115, minus back to 113,
+  60 minus dabs -> depth alpha 0 AND Base alpha 0. Suites:
+  67/67 + 54/54 + 14/14 + 23/23. NOT verified: clicking the Depth
+  Brush checkbox in the GUI (Fields pane is covered by the
+  floating Preview window in the Linux harness, so the click
+  could not be driven reliably there) and Windows.
+- 2026-11-04 — Muse (ULTRON): Wheel zoom ACTUALLY fixed + PR #18 studio-open crash fixed, DRAFT PR, Linux GUI-verified, NOT Windows-verified.
+  Branch fix/easymetric-panel-wheel-zoom-revert, base 2cee30d (PR #18 merged).
+  (1) PR #18 crash: its Object W/H/D row called extractSixSurfaces() during
+  buildFieldsControls(), before m_useFaceDepthCheck was created later in the
+  same function; that member had no = nullptr initializer, so the guard read
+  garbage (0x101) and studio open segfaulted intermittently
+  (Widget::isSelected, gdb backtrace). Fix: nullptr-init all Fields pointer
+  members, and the Object row now uses sharedFaceSizes() for initial slider
+  values instead of extractSixSurfaces() during construction.
+  (2) Wheel zoom revert: EasymetricWheelZoomState fired, zoom went 12 -> 13
+  inside setZoomAndCenterInMouse, but updateEditor() -> Editor::onResize ->
+  fitClipSpriteBounds floored it back to 12 and displaced the canvas.
+  Fix: clear the panel editor's clip rect around the setZoomAndCenterInMouse
+  call (fitClip returns early on empty clip), restore it immediately after.
+  Linux wheel harness (Xvfb + XTest, workspace/wheel-test/full_test.py):
+  1 wheel-up over Top = face fills panel, status 200.0% (was 100.0%);
+  1 wheel-up over Front = Front zooms, Top untouched. Suites: 67/67 +
+  54/54 + 14/14 + 23/23. Windows wheel test still needed.
 - 2026-11-04 — Muse (ULTRON): Panel fixes, DRAFT, NOT Windows-verified.
   Branch fix/easymetric-panel-zoom-resize-dims, base e7dd611, 1 file
   (src/app/commands/cmd_easymetric.cpp) + this entry. (1) Wheel: view-level
