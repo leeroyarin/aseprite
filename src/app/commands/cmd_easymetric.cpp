@@ -1124,7 +1124,8 @@ static void rebuildSharedSheets(Doc* doc, const int newW[kFaceCount],
 // The old depth sheet cannot be migrated per face (it was written
 // at (0, 0) for every face), so it is recreated blank; use
 // "Render Editable Face Depths" to regenerate it from the UV cells.
-static void setupSharedSurfaceLayers(Doc* doc, bool seedStarterIfBlank)
+static void setupSharedSurfaceLayers(Doc* doc, bool seedStarterIfBlank,
+                                     bool seedSinglePixel = false)
 {
   if (!doc || !doc->sprite()) return;
   doc::Sprite* spr = doc->sprite();
@@ -1264,12 +1265,40 @@ static void setupSharedSurfaceLayers(Doc* doc, bool seedStarterIfBlank)
         hasPixels = true;
       }
       if (!hasPixels && seedStarterIfBlank && std::string(kind) == "base") {
-        for (int ff = 0; ff < kFaceCount; ++ff) {
-          const gfx::Rect uv = sharedUVRectExact(ff, colW, rowH, faces[ff].w, faces[ff].h);
-          for (int v = 0; v < faces[ff].h; ++v)
-            for (int u = 0; u < faces[ff].w; ++u)
-              doc::put_pixel(sheet.get(), uv.x + u, uv.y + v,
-                             starterSurfacePixel(ff, u, v, faces[ff].w, faces[ff].h));
+        if (seedSinglePixel) {
+          // Easy start, NOT the default: ONE central Base pixel
+          // per face (2 or 3 pixels across when the face is
+          // large enough that a single pixel cannot be
+          // seen/clicked reliably), grown outward from those
+          // seeds. The default full starter pattern is kept
+          // for setupSurfaces, because the four-requirements
+          // suite (TC 1.2) and existing preview work rely on
+          // it generating solid geometry; replacing it by
+          // default broke TC 1.2 (22/23). Easy start is an
+          // explicit action instead, see setupSurfacesEasy.
+          for (int ff = 0; ff < kFaceCount; ++ff) {
+            const gfx::Rect uv = sharedUVRectExact(ff, colW, rowH, faces[ff].w, faces[ff].h);
+            const int fw = faces[ff].w;
+            const int fh = faces[ff].h;
+            const int minDim = std::min(fw, fh);
+            const int seed = (minDim >= 32) ? 3 : (minDim >= 16) ? 2 : 1;
+            const int sx = (fw - seed) / 2;
+            const int sy = (fh - seed) / 2;
+            const auto& spec = kFaceSpecs[ff];
+            const uint32_t col = doc::rgba(spec.r, spec.g, spec.b, 255);
+            for (int v = 0; v < seed; ++v)
+              for (int u = 0; u < seed; ++u)
+                doc::put_pixel(sheet.get(), uv.x + sx + u, uv.y + sy + v, col);
+          }
+        }
+        else {
+          for (int ff = 0; ff < kFaceCount; ++ff) {
+            const gfx::Rect uv = sharedUVRectExact(ff, colW, rowH, faces[ff].w, faces[ff].h);
+            for (int v = 0; v < faces[ff].h; ++v)
+              for (int u = 0; u < faces[ff].w; ++u)
+                doc::put_pixel(sheet.get(), uv.x + u, uv.y + v,
+                               starterSurfacePixel(ff, u, v, faces[ff].w, faces[ff].h));
+          }
         }
       }
       return sheet;
@@ -2127,14 +2156,15 @@ protected:
   }
 };
 
-static void setupSixSurfacesOnDoc(Doc* doc, bool seedStarterIfBlank)
+static void setupSixSurfacesOnDoc(Doc* doc, bool seedStarterIfBlank,
+                                  bool seedSinglePixel = false)
 {
   // Entering the studio now sets up the shared UV sheets, not
   // per-face layers. setupSharedSurfaceLayers migrates any existing
   // per-face Base/Texture images into their UV cells and removes
   // the old layers, so opening an old document upgrades it in
   // place instead of leaving 12+ layers behind.
-  setupSharedSurfaceLayers(doc, seedStarterIfBlank);
+  setupSharedSurfaceLayers(doc, seedStarterIfBlank, seedSinglePixel);
 }
 
 static bool extractSixSurfaces(
@@ -3342,11 +3372,16 @@ protected:
   // the window is resized, and only the Preview column
   // (col 3, the remainder) absorbs the difference. Dragging
   // a boundary changes only the two columns either side of
-  // it (see onProcessMessage). The top row height is stored
-  // the same way; the Fields row absorbs window height
-  // changes. First layout: quarter / half, as before.
+  // it (see onProcessMessage). Row heights are now per-column
+  // too (rowHpx[c] is column c's top-row height, the bottom
+  // row absorbs the rest in that column only), so dragging
+  // one column's horizontal splitter never moves another
+  // column's row split. First layout: quarter / half, as before.
+  // Output: colRowTopH[c] = top-row height in column c,
+  // colRowBotY[c] = bottom-row top edge in column c,
+  // colRowBotH[c] = bottom-row height in column c.
   void computePaneLayout(const gfx::Rect& rc, int colX[4], int colW[4],
-                         int rowY[2], int rowH[2]) const
+                         int colRowTopH[4], int colRowBotY[4], int colRowBotH[4]) const
   {
     const int s = std::max(1, ui::guiscale());
     const int bw = 6 * s;
@@ -3360,7 +3395,8 @@ protected:
       m_colWpx[0] = totalW / 4;
       m_colWpx[1] = totalW / 4;
       m_colWpx[2] = totalW / 4;
-      m_rowHpx = totalH / 2;
+      for (int c = 0; c < 4; ++c)
+        m_rowHpx[c] = totalH / 2;
       m_colInit = true;
     }
 
@@ -3385,54 +3421,116 @@ protected:
     colX[2] = rc.x + colW[0] + bw + colW[1] + bw;
     colX[3] = rc.x + colW[0] + bw + colW[1] + bw + colW[2] + bw;
 
-    rowH[0] = std::clamp(m_rowHpx, minRow, std::max(minRow, totalH - minRow));
-    rowH[1] = std::max(minRow, totalH - rowH[0]);
-    rowY[0] = rc.y;
-    rowY[1] = rc.y + rowH[0] + bh;
+    for (int c = 0; c < 4; ++c) {
+      colRowTopH[c] = std::clamp(m_rowHpx[c], minRow, std::max(minRow, totalH - minRow));
+      colRowBotH[c] = std::max(minRow, totalH - colRowTopH[c]);
+      colRowBotY[c] = rc.y + colRowTopH[c] + bh;
+    }
   }
 
   // Bug 2: splitter under the cursor, or 0: 1..3 = vertical
-  // boundary before column c, 4 = horizontal boundary between
-  // the two rows — but ONLY if the cursor is actually in a
-  // splitter gap strip, not merely near one. The old hit test
-  // extended bw/2+s beyond the gap into both neighbouring
-  // panes, so a drawing stroke starting a few pixels inside a
-  // pane, or a click on a pane header that propagates up to
-  // this widget, was treated as a splitter drag and resized a
-  // panel while drawing. A drag may only start in
-  // [colX[c]-bw, colX[c]) vertically, or [rowY[1]-bh,
-  // rowY[1]) horizontally.
+  // boundary before column c, 10+c = horizontal boundary
+  // between the two rows in column c only — but ONLY if the
+  // cursor is actually in a splitter gap strip, not merely
+  // near one. The old hit test extended bw/2+s beyond the gap
+  // into both neighbouring panes, so a drawing stroke starting
+  // a few pixels inside a pane, or a click on a pane header
+  // that propagates up to this widget, was treated as a
+  // splitter drag and resized a panel while drawing. A drag
+  // may only start in [colX[c]-bw, colX[c]) vertically, or
+  // [botY[c]-bh, botY[c]) horizontally within that column.
   int splitterGapAt(const gfx::Point& pos) const
   {
     const gfx::Rect rc = clientBounds();
     const int s = std::max(1, ui::guiscale());
     const int bw = 6 * s;
     const int bh = 6 * s;
-    int colX[4], colW[4], rowY[2], rowH[2];
-    computePaneLayout(rc, colX, colW, rowY, rowH);
+    int colX[4], colW[4], colTopH[4], colBotY[4], colBotH[4];
+    computePaneLayout(rc, colX, colW, colTopH, colBotY, colBotH);
     if (!rc.contains(pos))
       return 0;
     for (int c = 1; c < 4; ++c) {
       if (pos.x >= colX[c] - bw && pos.x < colX[c])
         return c;
     }
-    if (pos.y >= rowY[1] - bh && pos.y < rowY[1])
-      return 4;
+    for (int c = 0; c < 4; ++c) {
+      if (pos.x >= colX[c] && pos.x < colX[c] + colW[c] && pos.y >= colBotY[c] - bh &&
+          pos.y < colBotY[c])
+        return 10 + c;
+    }
     return 0;
+  }
+
+  // Re-centre every panel's canvas in its pane without changing
+  // its zoom. This is what makes a resized pane move its
+  // contents instead of leaving them clipped at the old edge:
+  // onResize deliberately does NOT fit (fitting would reset
+  // zoom), but centring preserves zoom and keeps the face
+  // visible in the new pane size. Skipped while any panel is
+  // busy, so a resize never jumps under a stroke.
+  void recenterPanelCanvases()
+  {
+    if (anyPanelEditorBusy())
+      return;
+    for (int f = 0; f < kFaceCount; ++f) {
+      Editor* ed = m_editors[f];
+      if (!ed || !m_panes[f]->isVisible())
+        continue;
+      const gfx::Rect clip = ed->clipSpriteBounds();
+      if (clip.isEmpty())
+        continue;
+      ed->centerInSpritePoint(gfx::PointF(clip.x + clip.w * 0.5, clip.y + clip.h * 0.5));
+    }
+  }
+
+  // View-level wheel catch: if a wheel message reaches this
+  // widget, the panel editor under the mouse did NOT handle
+  // it (e.g. its HAS_MOUSE flag was clear, or its state had
+  // fallen back to plain Standby). Without this, that wheel
+  // falls through to View scroll and displaces the canvas —
+  // the reported bug, on a build that already contained the
+  // state-level wheel-zoom fix. Forcing the wheel-zoom state
+  // here and calling it directly, bypassing the editor's
+  // hasMouse() gate, makes wheel = zoom in a surface panel
+  // regardless of editor state. Fields/Preview wheels are
+  // left alone: they already scroll/zoom correctly.
+  bool handlePanelWheel(ui::MouseMessage* msg)
+  {
+    const gfx::Point pos = msg->position();
+    for (int f = 0; f < kFaceCount; ++f) {
+      ui::View* view = m_views[f];
+      Editor* ed = m_editors[f];
+      if (!view || !ed || !m_panes[f]->isVisible())
+        continue;
+      if (!view->viewportBounds().contains(pos))
+        continue;
+      if (!isPanelEditorIdle(ed) && typeid(*ed->getState()) != typeid(EasymetricWheelZoomState))
+        return false;
+      if (typeid(*ed->getState()) != typeid(EasymetricWheelZoomState))
+        ed->setState(EditorStatePtr(new EasymetricWheelZoomState));
+      return ed->getState()->onMouseWheel(ed, msg);
+    }
+    return false;
   }
 
   bool onProcessMessage(ui::Message* msg) override
   {
     switch (msg->type()) {
+      case ui::kMouseWheelMessage: {
+        auto* mouseMsg = static_cast<ui::MouseMessage*>(msg);
+        if (handlePanelWheel(mouseMsg))
+          return true;
+        break;
+      }
       case ui::kSetCursorMessage: {
         if (m_dragSplitter != 0) {
-          ui::set_mouse_cursor(m_dragSplitter == 4 ? ui::kSizeNSCursor : ui::kSizeWECursor);
+          ui::set_mouse_cursor(m_dragSplitter >= 10 ? ui::kSizeNSCursor : ui::kSizeWECursor);
           return true;
         }
         auto* mouseMsg = static_cast<ui::MouseMessage*>(msg);
         const int hit = splitterGapAt(mouseMsg->position());
         if (hit != 0) {
-          ui::set_mouse_cursor(hit == 4 ? ui::kSizeNSCursor : ui::kSizeWECursor);
+          ui::set_mouse_cursor(hit >= 10 ? ui::kSizeNSCursor : ui::kSizeWECursor);
           return true;
         }
         break;
@@ -3449,12 +3547,13 @@ protected:
           m_dragSplitter = hit;
           m_dragStart = mouseMsg->position();
           {
-            int cx[4], cw[4], ry[2], rh[2];
-            computePaneLayout(clientBounds(), cx, cw, ry, rh);
+            int cx[4], cw[4], topH[4], botY[4], botH[4];
+            computePaneLayout(clientBounds(), cx, cw, topH, botY, botH);
             for (int i = 0; i < 3; ++i)
               m_dragColWpx[i] = cw[i];
             m_dragPreviewW = cw[3];
-            m_dragRowHpx = rh[0];
+            m_dragRowCol = (hit >= 10) ? (hit - 10) : 0;
+            m_dragRowHpx = (hit >= 10) ? topH[hit - 10] : topH[0];
           }
           captureMouse();
           invalidate();
@@ -3490,7 +3589,7 @@ protected:
           // Preview via computePaneLayout.
           const int minColPx = std::min(64 * s, totalW / 4);
           const int minRowPx = std::min(64 * s, totalH / 2);
-          if (m_dragSplitter < 4) {
+          if (m_dragSplitter < 10 && m_dragSplitter < 4) {
             const int deltaPx = mouseMsg->position().x - m_dragStart.x;
             const int left = m_dragSplitter - 1;
             int pair = 0;
@@ -3521,8 +3620,8 @@ protected:
           else {
             const int deltaPx = mouseMsg->position().y - m_dragStart.y;
             const int hiRow = std::max(minRowPx, totalH - minRowPx);
-            m_rowHpx = std::clamp(m_dragRowHpx + deltaPx,
-                                  minRowPx, hiRow);
+            m_rowHpx[m_dragRowCol] = std::clamp(m_dragRowHpx + deltaPx,
+                                                minRowPx, hiRow);
           }
           layout();
           invalidate();
@@ -3539,6 +3638,7 @@ protected:
         if (m_dragSplitter != 0) {
           m_dragSplitter = 0;
           releaseMouse();
+          recenterPanelCanvases();
           invalidate();
           return true;
         }
@@ -3566,8 +3666,8 @@ protected:
     const gfx::Rect rc = childrenBounds();
     const int s = ui::guiscale();
     const int bh = 6 * s;
-    int colX[4], colW[4], rowY[2], rowH[2];
-    computePaneLayout(rc, colX, colW, rowY, rowH);
+    int colX[4], colW[4], colTopH[4], colBotY[4], colBotH[4];
+    computePaneLayout(rc, colX, colW, colTopH, colBotY, colBotH);
     const int totalH = std::max(16, rc.h - bh);
 
     // Cols 0..2: Opposing face pairs
@@ -3582,22 +3682,28 @@ protected:
       else {
         m_panes[topFace]->setVisible(true);
         m_panes[btmFace]->setVisible(true);
-        m_panes[topFace]->setBounds(gfx::Rect(colX[c], rowY[0], colW[c], rowH[0]));
-        m_panes[btmFace]->setBounds(gfx::Rect(colX[c], rowY[1], colW[c], rowH[1]));
+        m_panes[topFace]->setBounds(gfx::Rect(colX[c], rc.y, colW[c], colTopH[c]));
+        m_panes[btmFace]->setBounds(gfx::Rect(colX[c], colBotY[c], colW[c], colBotH[c]));
       }
     }
 
     // Col 3: Preview (6), Fields (7)
     m_panes[6]->setVisible(true);
     m_panes[7]->setVisible(true);
-    m_panes[6]->setBounds(gfx::Rect(colX[3], rowY[0], colW[3], rowH[0]));
-    m_panes[7]->setBounds(gfx::Rect(colX[3], rowY[1], colW[3], rowH[1]));
+    m_panes[6]->setBounds(gfx::Rect(colX[3], rc.y, colW[3], colTopH[3]));
+    m_panes[7]->setBounds(gfx::Rect(colX[3], colBotY[3], colW[3], colBotH[3]));
 
     // NOTE: deliberately no fitClipSpriteBounds() here. Fitting on
     // every resize reset each surface editor's zoom/scroll whenever
     // a splitter was dragged or the window was resized, which is
     // what made the panels feel unscrollable/unzoomable. Initial
-    // fitting still happens in initLayersAndFraming().
+    // fitting still happens in initLayersAndFraming(). Centring
+    // (not fitting) is safe here: it preserves zoom and only
+    // moves the canvas so it stays visible in its new pane.
+    // It is skipped while a panel is busy, and during a
+    // splitter drag the drag-end recenter does the same job.
+    if (m_dragSplitter == 0)
+      recenterPanelCanvases();
   }
 
   void onPaint(ui::PaintEvent& ev) override
@@ -3607,9 +3713,8 @@ protected:
     const int s = ui::guiscale();
     const int bw = 6 * s;
     const int bh = 6 * s;
-    int colX[4], colW[4], rowY[2], rowH[2];
-    computePaneLayout(rc, colX, colW, rowY, rowH);
-    const int midY = rowY[1] - bh / 2;
+    int colX[4], colW[4], colTopH[4], colBotY[4], colBotH[4];
+    computePaneLayout(rc, colX, colW, colTopH, colBotY, colBotH);
 
     // Dark charcoal surround & separator lines
     g->fillRect(gfx::rgba(28, 35, 43), rc);
@@ -3618,18 +3723,21 @@ protected:
     const gfx::Color gripCol = gfx::rgba(80, 95, 110);
     const gfx::Color activeCol = gfx::rgba(120, 170, 220);
 
-    // Horizontal separators only for columns that are NOT linked (and Col 3)
+    // Horizontal separators, one per column (its own row split),
+    // only for columns that are NOT linked (and Col 3)
     for (int c = 0; c < 4; ++c) {
       if (c < 3 && m_colLinked[c])
         continue;
-      const bool active = (m_hoverSplitter == 4 || m_dragSplitter == 4);
-      g->fillRect(active ? activeCol : sepCol, gfx::Rect(colX[c], midY - bh / 2, colW[c], bh));
+      const bool active = (m_hoverSplitter == 10 + c || m_dragSplitter == 10 + c);
+      g->fillRect(active ? activeCol : sepCol,
+                  gfx::Rect(colX[c], colBotY[c] - bh / 2, colW[c], bh));
     }
 
     // Vertical column separators, highlighted when hovered/dragged
     for (int c = 1; c < 4; ++c) {
       const int sepX = colX[c] - bw / 2;
       const bool active = (m_hoverSplitter == c || m_dragSplitter == c);
+      const int midY = colBotY[c - 1] - bh / 2;
       g->fillRect(active ? activeCol : sepCol, gfx::Rect(sepX - bw / 2, rc.y, bw, rc.h));
       g->fillRect(active ? activeCol : gripCol, gfx::Rect(sepX - 2 * s, midY - 6 * s, 4 * s, s));
       g->fillRect(active ? activeCol : gripCol, gfx::Rect(sepX - 2 * s, midY + 5 * s, 4 * s, s));
@@ -3775,6 +3883,84 @@ private:
       pollAndRender(true);
       if (auto* sb = StatusBar::instance())
         sb->showTip(1200, "Propagated linked dimensions across surfaces");
+    });
+
+    // Row 5c: Object Size (Width/Height/Depth) — one set of
+    // three dimensions for the whole object, applied to ALL
+    // face bound boxes concurrently. Mapping: Width = X
+    // (Top/Bottom/Front/Back width), Height = Y
+    // (Front/Back/Right/Left height), Depth = Z
+    // (Top/Bottom/Right/Left width). This replaces the
+    // per-face-only workflow for sizing the object: changing
+    // Width here does not leave Front at the old width while
+    // Top moves, because every face using that dimension is
+    // set to the same value in one rebuild.
+    auto* objRow = new ui::HBox;
+    objRow->setChildSpacing(4 * s);
+    int curX = 24, curY = 24, curZ = 24;
+    if (Doc* doc0 = m_docView->document()) {
+      SixSurfaceData d0;
+      if (extractSixSurfaces(doc0, 0, d0)) {
+        curX = d0.w[kFaceFront];
+        curY = d0.h[kFaceFront];
+        curZ = d0.w[kFaceRight];
+      }
+    }
+    auto* objXSlider = new ui::Slider(4, 256, curX);
+    auto* objYSlider = new ui::Slider(4, 256, curY);
+    auto* objZSlider = new ui::Slider(4, 256, curZ);
+    objXSlider->setExpansive(true);
+    objYSlider->setExpansive(true);
+    objZSlider->setExpansive(true);
+    auto* applyObjBtn = new ui::Button("Apply Object Size");
+    objRow->addChild(new ui::Label("Object W/H/D:"));
+    objRow->addChild(objXSlider);
+    objRow->addChild(objYSlider);
+    objRow->addChild(objZSlider);
+    objRow->addChild(applyObjBtn);
+    m_fieldsBox->addChild(objRow);
+
+    auto* easyStartBtn = new ui::Button("Easy Start (1 pixel)");
+    objRow->addChild(easyStartBtn);
+    easyStartBtn->Click.connect([this] {
+      Doc* doc = m_docView->document();
+      if (!doc || !doc->sprite()) return;
+      setupSixSurfacesOnDoc(doc, true, true);
+      initLayersAndFraming();
+      m_lastHash = 0;
+      pollAndRender(true);
+      if (auto* sb = StatusBar::instance())
+        sb->showTip(1200, "Easy start: 1 central pixel per face");
+    });
+
+    applyObjBtn->Click.connect([this, objXSlider, objYSlider, objZSlider] {
+      Doc* doc = m_docView->document();
+      if (!doc || !doc->sprite()) return;
+      const int X = std::clamp(objXSlider->getValue(), 4, 256);
+      const int Y = std::clamp(objYSlider->getValue(), 4, 256);
+      const int Z = std::clamp(objZSlider->getValue(), 4, 256);
+      SixSurfaceData data;
+      extractSixSurfaces(doc, 0, data);
+      data.w[kFaceTop] = X;
+      data.h[kFaceTop] = Z;
+      data.w[kFaceDown] = X;
+      data.h[kFaceDown] = Z;
+      data.w[kFaceFront] = X;
+      data.h[kFaceFront] = Y;
+      data.w[kFaceBack] = X;
+      data.h[kFaceBack] = Y;
+      data.w[kFaceRight] = Z;
+      data.h[kFaceRight] = Y;
+      data.w[kFaceLeft] = Z;
+      data.h[kFaceLeft] = Y;
+      // srcFace = -1: do not override one face, apply the
+      // whole data set above to every face at once.
+      propagateLinkedDimensions(doc, data, -1, 0, 0);
+      initLayersAndFraming();
+      m_lastHash = 0;
+      pollAndRender(true);
+      if (auto* sb = StatusBar::instance())
+        sb->showTip(1200, "Applied object size to all faces");
     });
 
     // Row 6: Per-Face Editable Depth Maps + Live Sync
@@ -4794,13 +4980,15 @@ private:
   int m_lastFaceH[kFaceCount] = { 0, 0, 0, 0, 0, 0 };
 
   // Splitter state: pixel widths for cols 0..2 (col 3 is the
-  // remainder), top-row pixel height, and hover/drag tracking.
-  // 0 in m_hoverSplitter/m_dragSplitter means no splitter.
+  // remainder), top-row pixel height per column, and
+  // hover/drag tracking. 0 in m_hoverSplitter/m_dragSplitter
+  // means no splitter; 1..3 = vertical boundary, 10+c =
+  // horizontal boundary in column c.
   // m_colWpx/m_rowHpx are mutable because computePaneLayout
   // (const, called from paint/hit-testing) lazily initialises
   // them on first layout; after that only a drag changes them.
   mutable int m_colWpx[3] = { 0, 0, 0 };
-  mutable int m_rowHpx = 0;
+  mutable int m_rowHpx[4] = { 0, 0, 0, 0 };
   mutable bool m_colInit = false;
   int m_hoverSplitter = 0;
   int m_dragSplitter = 0;
@@ -4808,6 +4996,7 @@ private:
   int m_dragColWpx[3] = { 0, 0, 0 };
   int m_dragPreviewW = 0;
   int m_dragRowHpx = 0;
+  int m_dragRowCol = 0;
   int m_lastActiveFace = -1;
   doc::MaskRef m_savedMask;
 
@@ -4873,6 +5062,9 @@ protected:
       }
       else if (action == "setupSurfaces") {
         setupSixSurfacesOnDoc(doc, true);
+      }
+      else if (action == "setupSurfacesEasy") {
+        setupSixSurfacesOnDoc(doc, true, true);
       }
       else if (action == "setupGroups") {
         setupTwoLayerStructure(doc, false);

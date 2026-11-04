@@ -76,6 +76,32 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-04 — Muse (ULTRON): Panel fixes, DRAFT, NOT Windows-verified.
+  Branch fix/easymetric-panel-zoom-resize-dims, base e7dd611, 1 file
+  (src/app/commands/cmd_easymetric.cpp) + this entry. (1) Wheel: view-level
+  catch in EasymetricMultiPaneView::onProcessMessage — a wheel that falls
+  through a panel editor (hasMouse clear / state fallback) is now forced
+  to EasymetricWheelZoomState and zoomed, instead of scrolling the View.
+  (2) Resize: panels re-centre their canvas (zoom preserved) on resize
+  and on splitter-drag end, instead of leaving it clipped at an edge.
+  (3) Columns independent: row heights are now per-column (splitter
+  10+c), so dragging one column's horizontal splitter never moves
+  another column's row split; vertical splitters unchanged.
+  (4) Fields: new Object W/H/D row (X/Y/Z) applying to ALL face bound
+  boxes concurrently via propagateLinkedDimensions with srcFace=-1.
+  (5) Easy start: new Fields button + EasymetricStudio action
+  setupSurfacesEasy, seeding ONE central Base pixel per face
+  (2/3 px when the face is >=16/>=32 px). This is EXPLICIT, not the
+  default: replacing the default starter broke four-requirements
+  TC 1.2 (22/23, setupSurfaces relies on the full starter for solid
+  preview geometry), so the default starter is unchanged.
+  Verified so far: full Linux build exit 0, no new warnings, suites
+  67/67 + 54/54 + 14/14 + 23/23 on the Linux binary. NOT verified:
+  real wheel/resize on Windows, or any GUI run. Do NOT present the
+  wheel fix as proven on Windows until that test passes.
+  Do NOT present as fixed until a Windows build test passes. Vision-muse
+  was also delegated this task by William (hub msg 2b7eb385) — coordinate
+  before pushing to the same branch.
 - 2026-11-03 — Codex: Published microphone assets, `.gitignore`, and the mesh
   launcher as `03da721a565b1ae0b15179c11a16d8ad126b8f3e`. Four generation
   scripts and this handoff were not published after automatic review rejected
