@@ -76,12 +76,19 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
-- 2026-11-04 — Codex: Fetched and fast-forwarded local `Aseprite-2.0` to
-  `668f9ab27`, retaining the local installation log. Recovery files are in
-  `build/pull-recovery-668f9ab`; no build or runtime checks were run.
-- 2026-11-04 — Codex: Installed the existing Windows build with
-  `tools/install-aseprite2.ps1`. Installed executable matches `build/bin`,
-  reports `2.0-dev+e85599bfc`, and remained running during a launch check.
+- 2026-11-04 — Muse (ULTRON): Horizontal splitter cursor misalignment fixed, DRAFT PR.
+  Branch fix/easymetric-splitter-cursor, base 2cee30d. The horizontal
+  separator was painted centred on the row boundary
+  [botY-bh/2, botY+bh/2), while splitterGapAt() hit-tested only
+  [botY-bh, botY), so the resize cursor appeared half a gap above
+  the visible bar and the lower half of the bar did not resize —
+  William's 2026-11-04 screenshot report. Fix: paint the bar in
+  the actual gap [botY-bh, botY). Vertical bars already matched
+  their gap and are unchanged. Suites: 67/67 + 54/54 + 14/14 +
+  23/23. Windows visual check still needed. Note: this branch
+  was built in the same worktree as PR #19/#20, so its snapshot
+  also contains those fixes; if they merge first, the remaining
+  diff here is only the splitter paint line.
 - 2026-11-04 — Muse (ULTRON): Depth-sculpt tool + depth map from Base, DRAFT PR, headless-verified, GUI brush click NOT yet verified.
   Branch fix/easymetric-depth-sculpt, base 2cee30d. Note: this branch
   was built in the same worktree as PR #19, so its snapshot also
