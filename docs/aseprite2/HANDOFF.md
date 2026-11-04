@@ -76,6 +76,9 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-04 — Antigravity (arin-pc): Built fresh Aseprite 2.0 binaries after pulling PR #20 merge and docs update (`100895df5`).
+  - Human build: `build/bin/aseprite.exe` (22,031,872 bytes) compiled cleanly via `tools/aseprite2-build.ps1`, reports `2.0-dev+100895df5`.
+  - Testing build: `build-test/bin/aseprite.exe` synced and verified against test suites (Easymetric 68/68 PASS, Adversarial 54/54 PASS).
 - 2026-11-04 — Codex: Fetched and fast-forwarded local `Aseprite-2.0` to
   `668f9ab27`, retaining the local installation log. Recovery files are in
   `build/pull-recovery-668f9ab`; no build or runtime checks were run.
