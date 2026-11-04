@@ -4129,16 +4129,7 @@ protected:
     const gfx::Color activeCol = gfx::rgba(120, 170, 220);
 
     // Horizontal separators, one per column (its own row split),
-    // only for columns that are NOT linked (and Col 3).
-    // The bar must sit exactly in the gap between the panes:
-    // [colBotY-bh, colBotY), which is also what splitterGapAt()
-    // hit-tests. It used to be painted centred on colBotY,
-    // [colBotY-bh/2, colBotY+bh/2), so the resize cursor
-    // appeared half a gap above the bar you see, and the
-    // lower half of the visible bar did not resize at all —
-    // the "cursor changes at a different place" report
-    // (2026-11-04, William's screenshots). Vertical bars
-    // already matched their gap, so they are unchanged.
+    // only for columns that are NOT linked (and Col 3)
     for (int c = 0; c < 4; ++c) {
       if (c < 3 && m_colLinked[c])
         continue;
