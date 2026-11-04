@@ -24,7 +24,9 @@
 #include "app/pref/preferences.h"
 #include "app/site.h"
 #include "app/tx.h"
+#include "app/ui/color_button.h"
 #include "app/ui/doc_view.h"
+#include "ui/window.h"
 #include "app/ui/editor/editor.h"
 #include "app/ui/editor/standby_state.h"
 #include "doc/mask.h"
@@ -1902,6 +1904,19 @@ public:
   void zoomIn() { setZoom(m_zoom * 1.25); }
   void zoomOut() { setZoom(m_zoom / 1.25); }
 
+  // Preview background, set from the Fields "Preview BG" row.
+  // Default alpha 0 = fully transparent, so the checkerboard
+  // shows exactly as before. Alpha 255 = solid colour,
+  // in-between = colour tinted over the checkerboard.
+  void setBackgroundColor(int r, int g, int b, int a)
+  {
+    r = std::clamp(r, 0, 255); g = std::clamp(g, 0, 255);
+    b = std::clamp(b, 0, 255); a = std::clamp(a, 0, 255);
+    if (r == m_bgR && g == m_bgG && b == m_bgB && a == m_bgA) return;
+    m_bgR = r; m_bgG = g; m_bgB = b; m_bgA = a;
+    invalidate();
+  }
+
   void resetZoom()
   {
     m_panX = 0;
@@ -2029,6 +2044,8 @@ protected:
     const int s = ui::guiscale();
 
     drawCheckerboardPattern(g, rc);
+    if (m_bgA > 0)
+      g->fillRect(gfx::rgba(m_bgR, m_bgG, m_bgB, m_bgA), rc);
     g->drawRect(gfx::rgba(28, 35, 43), rc);
 
     std::vector<os::SurfaceRef> activeSurfs;
@@ -2133,6 +2150,10 @@ private:
   double m_zoom = 1.0;
   int m_panX = 0;
   int m_panY = 0;
+  int m_bgR = 0;
+  int m_bgG = 0;
+  int m_bgB = 0;
+  int m_bgA = 0;
   bool m_panning = false;
   gfx::Point m_panStart;
   int m_startPanX = 0;
@@ -3287,6 +3308,9 @@ public:
     m_panes[kFaceCount] = new ui::VBox;
     m_panes[kFaceCount]->addChild(m_headers[kFaceCount]);
     m_panes[kFaceCount]->addChild(m_previewWidget);
+    m_previewPlaceholder = new ui::Label("Preview is in the floating window. Click Dock Preview in Fields to bring it back, or close the floating window.");
+    m_previewPlaceholder->setVisible(false);
+    m_panes[kFaceCount]->addChild(m_previewPlaceholder);
     addChild(m_panes[kFaceCount]);
 
     // 3. Column 4 Row 1: Fields Pane, scrollable. Previously the
@@ -3332,6 +3356,17 @@ public:
   ~EasymetricMultiPaneView() override
   {
     m_timer.stop();
+    // A popped-out preview is a separate top-level window that
+    // owns no studio members, but it does hold the preview
+    // widget: dock it back first, then delete the window,
+    // so closing the studio never leaves an orphan preview
+    // window (or a widget owned by a dead window) behind.
+    if (m_previewFloating && m_previewWindow)
+      m_previewWindow->closeWindow(nullptr);
+    if (m_previewWindow) {
+      delete m_previewWindow;
+      m_previewWindow = nullptr;
+    }
     std::remove(easymetricHubMarkerPath().c_str());
     restoreWheelZoomPref();
     if (Doc* doc = m_docView->document()) {
@@ -4129,13 +4164,22 @@ protected:
     const gfx::Color activeCol = gfx::rgba(120, 170, 220);
 
     // Horizontal separators, one per column (its own row split),
-    // only for columns that are NOT linked (and Col 3)
+    // only for columns that are NOT linked (and Col 3).
+    // The bar must sit exactly in the gap between the panes:
+    // [colBotY-bh, colBotY), which is also what splitterGapAt()
+    // hit-tests. It used to be painted centred on colBotY,
+    // [colBotY-bh/2, colBotY+bh/2), so the resize cursor
+    // appeared half a gap above the bar you see, and the
+    // lower half of the visible bar did not resize at all —
+    // the "cursor changes at a different place" report
+    // (2026-11-04, William's screenshots). Vertical bars
+    // already matched their gap, so they are unchanged.
     for (int c = 0; c < 4; ++c) {
       if (c < 3 && m_colLinked[c])
         continue;
       const bool active = (m_hoverSplitter == 10 + c || m_dragSplitter == 10 + c);
       g->fillRect(active ? activeCol : sepCol,
-                  gfx::Rect(colX[c], colBotY[c] - bh / 2, colW[c], bh));
+                  gfx::Rect(colX[c], colBotY[c] - bh, colW[c], bh));
     }
 
     // Vertical column separators, highlighted when hovered/dragged
@@ -4432,6 +4476,39 @@ private:
     zoomRow->addChild(m_zoomLabel);
     m_fieldsBox->addChild(zoomRow);
 
+    // Preview Background row: colour picker + alpha.
+    // Preview-only: it changes what the Preview pane shows
+    // behind the model, not the baked Iso layers or the
+    // exported .OBJ, whose background stays transparent.
+    // Alpha 0 (default) = checkerboard as before; 255 = solid.
+    auto* bgRow = new ui::HBox;
+    bgRow->setChildSpacing(4 * s);
+    m_bgColorButton = new app::ColorButton(app::Color::fromRgb(0, 0, 0),
+                                           doc::IMAGE_RGB,
+                                           app::ColorButtonOptions());
+    m_bgAlphaSlider = new ui::Slider(0, 255, 0);
+    m_bgAlphaSlider->setExpansive(true);
+    bgRow->addChild(new ui::Label("Preview BG:"));
+    bgRow->addChild(m_bgColorButton);
+    bgRow->addChild(new ui::Label("Alpha:"));
+    bgRow->addChild(m_bgAlphaSlider);
+    m_fieldsBox->addChild(bgRow);
+
+    // Floating preview row: the Preview pane in the studio
+    // column is small, so the same preview widget can be
+    // popped out into a moveable, sizeable floating window
+    // instead, and docked back at any time. Closing the
+    // floating window docks it back automatically.
+    auto* floatRow = new ui::HBox;
+    floatRow->setChildSpacing(4 * s);
+    m_previewPopoutBtn = new ui::Button("Pop out Preview");
+    m_previewPopoutBtn->Click.connect([this] {
+      if (m_previewFloating) dockPreview();
+      else popOutPreview();
+    });
+    floatRow->addChild(m_previewPopoutBtn);
+    m_fieldsBox->addChild(floatRow);
+
     // Row 7: Action Buttons (Render, Export .OBJ, Exit)
     auto* actRow = new ui::HBox;
     actRow->setChildSpacing(4 * s);
@@ -4465,6 +4542,20 @@ private:
     m_cutoutCheck->Click.connect(onParam);
     m_useFaceDepthCheck->Click.connect(onParam);
     m_liveBakeCheck->Click.connect(onParam);
+    // BG is composited into the preview image itself (see
+    // render3DModel), so changing it must re-render, not just
+    // update the widget fill that the opaque surface covers.
+    auto applyBg = [this] {
+      if (m_previewWidget && m_bgColorButton && m_bgAlphaSlider) {
+        const app::Color c = m_bgColorButton->getColor();
+        m_previewWidget->setBackgroundColor(c.getRed(), c.getGreen(), c.getBlue(),
+                                            m_bgAlphaSlider->getValue());
+        m_lastHash = 0;
+        pollAndRender(true);
+      }
+    };
+    m_bgColorButton->Change.connect([applyBg](const app::Color&) { applyBg(); });
+    m_bgAlphaSlider->Change.connect(applyBg);
     m_depthBrushCheck->Click.connect([this] {
       endDepthStroke();
       for (int f = 0; f < kFaceCount; ++f) {
@@ -4983,6 +5074,47 @@ private:
       bakeToActiveDocLayers();
   }
 
+public:
+  bool isPreviewFloating() const { return m_previewFloating; }
+
+  void popOutPreview()
+  {
+    if (m_previewFloating || !m_previewWidget) return;
+    if (!m_previewWindow) {
+      m_previewWindow = new ui::Window(ui::Window::WithTitleBar, "Easymetric Preview");
+      m_previewWindow->setMoveable(true);
+      m_previewWindow->setSizeable(true);
+      m_previewWindow->Close.connect([this](ui::CloseEvent&) { dockPreview(); });
+    }
+    m_panes[kFaceCount]->removeChild(m_previewWidget);
+    m_previewWindow->addChild(m_previewWidget);
+    m_previewWidget->setExpansive(true);
+    m_previewFloating = true;
+    if (m_previewPlaceholder) m_previewPlaceholder->setVisible(true);
+    if (m_previewPopoutBtn) m_previewPopoutBtn->setText("Dock Preview");
+    m_previewWindow->remapWindow();
+    m_previewWindow->centerWindow();
+    m_previewWindow->openWindow();
+    m_previewWidget->invalidate();
+  }
+
+  void dockPreview()
+  {
+    if (!m_previewFloating || !m_previewWidget) return;
+    // Called from the floating window's Close signal too: by
+    // then the window is already closed by the manager, so
+    // moving the widget back here is safe, and the window
+    // object itself is kept (closed) for the next pop-out.
+    if (m_previewWindow) m_previewWindow->removeChild(m_previewWidget);
+    m_panes[kFaceCount]->addChild(m_previewWidget);
+    m_previewWidget->setExpansive(true);
+    m_previewFloating = false;
+    if (m_previewPlaceholder) m_previewPlaceholder->setVisible(false);
+    if (m_previewPopoutBtn) m_previewPopoutBtn->setText("Pop out Preview");
+    m_previewWidget->invalidate();
+  }
+
+private:
   void render3DModel(const SixSurfaceData& data,
                      int yawDeg,
                      int pitchDeg,
@@ -5005,19 +5137,71 @@ private:
     if (!m_previewWidget)
       return;
 
-    auto makeSurface = [](const doc::Image* img) -> os::SurfaceRef {
+    // Preview images are RGB, so their background is opaque
+    // black (0,0,0) — and that black image completely covered
+    // the Preview BG colour/alpha fill drawn underneath it.
+    // That is why setting BG to #000000 / alpha 0 still showed
+    // a black background behind the model (2026-11-04).
+    // For the preview only (baked Iso layers keep the RGB
+    // images in m_last*Img unchanged), build RGBA copies
+    // where the background is transparent. Background is
+    // exactly the pixels no ray hit: diff, norm AND dept are
+    // all 0 there, while every hit pixel writes a non-zero
+    // dept (>=35) and a non-zero norm, so a genuinely black
+    // model pixel is never mistaken for background.
+    // Background is composited INTO the preview image, not
+    // relied on from surface alpha: in practice the scaled
+    // drawSurface path draws the image opaque (Linux harness
+    // screenshot, 2026-11-04: black rectangle, checkerboard
+    // only outside the image bounds, even though the image
+    // background pixels are alpha 0). So bg pixels here get
+    // the chosen BG colour (blended over a checkerboard when
+    // alpha is in-between), and alpha 0 gets the checkerboard
+    // itself — never black. Baked Iso layers are untouched.
+    int bgR = 0, bgG = 0, bgB = 0, bgA = 0;
+    if (m_bgColorButton && m_bgAlphaSlider) {
+      const app::Color c = m_bgColorButton->getColor();
+      bgR = c.getRed(); bgG = c.getGreen(); bgB = c.getBlue();
+      bgA = m_bgAlphaSlider->getValue();
+    }
+    auto makePreviewSurface = [](const doc::Image* img,
+                                 const doc::Image* diff,
+                                 const doc::Image* norm,
+                                 const doc::Image* dept,
+                                 int bgR, int bgG, int bgB, int bgA) -> os::SurfaceRef {
       if (!img) return nullptr;
       const int w = img->width();
       const int h = img->height();
+      doc::ImageRef rgba(doc::Image::create(doc::IMAGE_RGB, w, h));
+      for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+          const uint32_t dc = diff ? doc::get_pixel_fast<doc::RgbTraits>(diff, x, y) : 0;
+          const uint32_t nc = norm ? doc::get_pixel_fast<doc::RgbTraits>(norm, x, y) : 0;
+          const uint32_t tc = dept ? doc::get_pixel_fast<doc::RgbTraits>(dept, x, y) : 0;
+          const bool isBg = (dc == 0 && nc == 0 && tc == 0);
+          const uint32_t c = doc::get_pixel_fast<doc::RgbTraits>(img, x, y);
+          if (isBg) {
+            const int checker = (((x / 8) + (y / 8)) & 1) ? 192 : 128;
+            const int r = (bgR * bgA + checker * (255 - bgA)) / 255;
+            const int g = (bgG * bgA + checker * (255 - bgA)) / 255;
+            const int b = (bgB * bgA + checker * (255 - bgA)) / 255;
+            doc::put_pixel(rgba.get(), x, y, doc::rgba(r, g, b, 255));
+          }
+          else {
+            doc::put_pixel(rgba.get(), x, y,
+                           doc::rgba(doc::rgba_getr(c), doc::rgba_getg(c), doc::rgba_getb(c), 255));
+          }
+        }
+      }
       os::SurfaceRef surf = os::System::instance()->makeRgbaSurface(w, h);
-      convert_image_to_surface(img, nullptr, surf.get(), 0, 0, 0, 0, w, h);
+      convert_image_to_surface(rgba.get(), nullptr, surf.get(), 0, 0, 0, 0, w, h);
       return surf;
     };
 
     m_previewWidget->setSurfaces(
-      makeSurface(m_lastDiffImg.get()),
-      makeSurface(m_lastNormImg.get()),
-      makeSurface(m_lastDeptImg.get()),
+      makePreviewSurface(m_lastDiffImg.get(), m_lastDiffImg.get(), m_lastNormImg.get(), m_lastDeptImg.get(), bgR, bgG, bgB, bgA),
+      makePreviewSurface(m_lastNormImg.get(), m_lastDiffImg.get(), m_lastNormImg.get(), m_lastDeptImg.get(), bgR, bgG, bgB, bgA),
+      makePreviewSurface(m_lastDeptImg.get(), m_lastDiffImg.get(), m_lastNormImg.get(), m_lastDeptImg.get(), bgR, bgG, bgB, bgA),
       yawDeg,
       pitchDeg,
       int(res.cxScreen),
@@ -5369,6 +5553,12 @@ private:
   ui::CheckBox* m_symXCheck = nullptr;
   ui::CheckBox* m_symYCheck = nullptr;
   ui::CheckBox* m_useFaceDepthCheck = nullptr;
+  ui::Window* m_previewWindow = nullptr;
+  ui::Label* m_previewPlaceholder = nullptr;
+  ui::Button* m_previewPopoutBtn = nullptr;
+  bool m_previewFloating = false;
+  app::ColorButton* m_bgColorButton = nullptr;
+  ui::Slider* m_bgAlphaSlider = nullptr;
   ui::CheckBox* m_depthBrushCheck = nullptr;
   ui::ComboBox* m_depthModeCombo = nullptr;
   ui::Slider* m_depthBrushSlider = nullptr;
@@ -5493,6 +5683,26 @@ protected:
         const bool minus = m_params.has_param("mode") && m_params.get("mode") == "minus";
         const int radius = m_params.has_param("radius") ? std::stoi(m_params.get("radius")) : 0;
         sculptDepthDabOnDoc(doc, doc::frame_t(0), faceIdx, u, v, minus, radius);
+      }
+      else if (action == "previewFloat") {
+        // Params: mode (pop/dock/toggle, default toggle).
+        // UI-only: needs the studio open, so it does nothing
+        // headless. Added so the floating preview can be
+        // driven (and GUI-tested) without hunting for the
+        // Fields button under a floating panel.
+        if (context->isUIAvailable()) {
+          UIContext* uiCtx = UIContext::instance();
+          DocView* docView = uiCtx ? uiCtx->activeView() : nullptr;
+          if (docView && docView->isMultiPane()) {
+            if (auto* multiPane = dynamic_cast<EasymetricMultiPaneView*>(docView->multiPaneLayout())) {
+              const std::string mode = m_params.has_param("mode") ? m_params.get("mode") : "toggle";
+              if (mode == "pop") multiPane->popOutPreview();
+              else if (mode == "dock") multiPane->dockPreview();
+              else if (multiPane->isPreviewFloating()) multiPane->dockPreview();
+              else multiPane->popOutPreview();
+            }
+          }
+        }
       }
       else if (action == "setupGroups") {
         setupTwoLayerStructure(doc, false);

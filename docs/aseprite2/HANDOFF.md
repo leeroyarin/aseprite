@@ -1,3 +1,8 @@
+## 2026-11-04 — Easymetric panel neighbour bleed + preview black background (PR, draft)
+- Panel neighbour strips: in `src/app/ui/editor/editor.cpp` the Easymetric pane clip cover was enlarged by `5*guiscale` beyond the face rect, leaving a band of the shared 3x2 sheet visible around every face. That band is the neighbouring face's pixels (Top's right band is Front, Front's left band is Top, etc.) — exactly William's 2026-11-04 screenshot, where every solid-coloured face had a neighbour-coloured strip on its edges. Fix: cover starts exactly at the face rect edge. `clipSpriteBounds` is only set by Easymetric panels, so no other editor is affected.
+- Preview black background: the Preview BG colour/alpha fill is drawn under the preview surface, but the scaled `drawSurface` path draws the image opaque in practice (Linux harness screenshot reproduced it: black rectangle, checkerboard only outside the image bounds, even though image background pixels are alpha 0). So setting BG to #000000 / alpha 0 still showed black. Fix, preview only: `render3DModel` now composites the BG into the preview image itself — background pixels (diff, norm and dept all 0, i.e. no ray hit) get the chosen BG colour blended over a checkerboard, or the checkerboard itself when alpha is 0, never black. Changing the BG picker/alpha now forces a re-render. Baked Iso layers keep the original RGB images unchanged.
+- Verified on Linux: build exit 0, suites 67/67 + 54/54 + 14/14 + 23/23, plus a GUI harness screenshot where the preview background is checkerboard, not black, with the model visible against it. Windows test still needed: neighbour strips gone at your face sizes, BG picker + alpha 0/mid/255 in both embedded and floating preview.
+
 # Aseprite 2.0 — HANDOFF (live status)
 
 **Read first if you are a new agent.** Update the checkboxes + Log before you stop working.
@@ -76,6 +81,43 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-04 — Codex: Verified the current Windows build at `d6be90e98` with
+  `tools/aseprite2-build.ps1` (Ninja reported no work remaining). The resulting
+  executable reports `2.0-dev+d6be90e98`. No test suites were run in this check.
+- 2026-11-04 — Muse (ULTRON): Preview background changer + floating preview window, DRAFT PR.
+  Fields "Preview BG" row: ColorButton colour picker + Alpha slider
+  0-255. Alpha 0 (default) = checkerboard as before; 255 = solid
+  colour; in-between = colour over checkerboard. Preview-only:
+  baked Iso layers and exported .OBJ keep a transparent
+  background. Fields "Pop out Preview" button moves the same
+  preview widget into a moveable, sizeable floating window;
+  "Dock Preview" (or closing the floating window) brings it
+  back. Script action EasymetricStudio{ action="previewFloat",
+  mode="pop|dock|toggle" } does the same. Suites: 67/67 + 54/54
+  + 14/14 + 23/23. NOT yet GUI-verified: in the Linux harness
+  the Fields pane is covered by Aseprite's own floating
+  Preview window and its scrollbar drag did not scroll, so the
+  pop-out click could not be driven headless; Windows click
+  test still needed.
+
+- 2026-11-04 — Muse (ULTRON): Horizontal splitter cursor misalignment fixed.
+  The horizontal separator was painted centred on the row boundary
+  [botY-bh/2, botY+bh/2), while splitterGapAt() hit-tested only
+  [botY-bh, botY), so the resize cursor appeared half a gap above
+  the visible bar and the lower half of the bar did not resize.
+  Fix: paint the bar in the actual gap [botY-bh, botY). Vertical
+  bars already matched their gap and are unchanged. Suites:
+  67/67 + 54/54 + 14/14 + 23/23. Windows visual check still needed.
+
+- 2026-11-04 — Antigravity (arin-pc): Built fresh Aseprite 2.0 binaries after pulling PR #20 merge and docs update (`100895df5`).
+  - Human build: `build/bin/aseprite.exe` (22,031,872 bytes) compiled cleanly via `tools/aseprite2-build.ps1`, reports `2.0-dev+100895df5`.
+  - Testing build: `build-test/bin/aseprite.exe` synced and verified against test suites (Easymetric 68/68 PASS, Adversarial 54/54 PASS).
+- 2026-11-04 — Codex: Fetched and fast-forwarded local `Aseprite-2.0` to
+  `668f9ab27`, retaining the local installation log. Recovery files are in
+  `build/pull-recovery-668f9ab`; no build or runtime checks were run.
+- 2026-11-04 — Codex: Installed the existing Windows build with
+  `tools/install-aseprite2.ps1`. Installed executable matches `build/bin`,
+  reports `2.0-dev+e85599bfc`, and remained running during a launch check.
 - 2026-11-04 — Muse (ULTRON): Depth-sculpt tool + depth map from Base, DRAFT PR, headless-verified, GUI brush click NOT yet verified.
   Branch fix/easymetric-depth-sculpt, base 2cee30d. Note: this branch
   was built in the same worktree as PR #19, so its snapshot also
