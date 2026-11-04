@@ -76,6 +76,9 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-04 — Codex: Verified the current Windows build at `d6be90e98` with
+  `tools/aseprite2-build.ps1` (Ninja reported no work remaining). The resulting
+  executable reports `2.0-dev+d6be90e98`. No test suites were run in this check.
 - 2026-11-04 — Muse (ULTRON): Preview background changer + floating preview window, DRAFT PR.
   Fields "Preview BG" row: ColorButton colour picker + Alpha slider
   0-255. Alpha 0 (default) = checkerboard as before; 255 = solid
