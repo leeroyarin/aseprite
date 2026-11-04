@@ -76,6 +76,12 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-04 — Codex: Fetched and fast-forwarded local `Aseprite-2.0` to
+  `668f9ab27`, retaining the local installation log. Recovery files are in
+  `build/pull-recovery-668f9ab`; no build or runtime checks were run.
+- 2026-11-04 — Codex: Installed the existing Windows build with
+  `tools/install-aseprite2.ps1`. Installed executable matches `build/bin`,
+  reports `2.0-dev+e85599bfc`, and remained running during a launch check.
 - 2026-11-04 — Muse (ULTRON): Depth-sculpt tool + depth map from Base, DRAFT PR, headless-verified, GUI brush click NOT yet verified.
   Branch fix/easymetric-depth-sculpt, base 2cee30d. Note: this branch
   was built in the same worktree as PR #19, so its snapshot also
