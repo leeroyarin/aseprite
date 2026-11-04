@@ -76,6 +76,22 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-04 — Muse (ULTRON): Preview background changer + floating preview window, DRAFT PR.
+  Fields "Preview BG" row: ColorButton colour picker + Alpha slider
+  0-255. Alpha 0 (default) = checkerboard as before; 255 = solid
+  colour; in-between = colour over checkerboard. Preview-only:
+  baked Iso layers and exported .OBJ keep a transparent
+  background. Fields "Pop out Preview" button moves the same
+  preview widget into a moveable, sizeable floating window;
+  "Dock Preview" (or closing the floating window) brings it
+  back. Script action EasymetricStudio{ action="previewFloat",
+  mode="pop|dock|toggle" } does the same. Suites: 67/67 + 54/54
+  + 14/14 + 23/23. NOT yet GUI-verified: in the Linux harness
+  the Fields pane is covered by Aseprite's own floating
+  Preview window and its scrollbar drag did not scroll, so the
+  pop-out click could not be driven headless; Windows click
+  test still needed.
+
 - 2026-11-04 — Muse (ULTRON): Horizontal splitter cursor misalignment fixed.
   The horizontal separator was painted centred on the row boundary
   [botY-bh/2, botY+bh/2), while splitterGapAt() hit-tested only
