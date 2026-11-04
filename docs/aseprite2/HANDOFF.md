@@ -77,7 +77,8 @@ powershell -File tools\start-aseprite2.ps1
 
 ## Log (newest first)
 - 2026-11-04 — Muse (ULTRON): Horizontal splitter cursor misalignment fixed, DRAFT PR.
-  Branch fix/easymetric-splitter-cursor, base 2cee30d. The horizontal
+  Branch fix/easymetric-splitter-cursor, base 100895df5 (current
+  Aseprite-2.0 head, which already includes PR #19/#20). The horizontal
   separator was painted centred on the row boundary
   [botY-bh/2, botY+bh/2), while splitterGapAt() hit-tested only
   [botY-bh, botY), so the resize cursor appeared half a gap above
