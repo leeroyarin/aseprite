@@ -1125,11 +1125,20 @@ void Editor::drawSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& _rc)
   }
 
   // Aseprite 2.0: Easymetric pane clipping (hide everything outside the surface box)
+  // The cover must start exactly at the face rect edge. It used
+  // to be enlarged by 5*guiscale, which left a band of the
+  // shared sheet visible around every face — and that band is
+  // the neighbouring face's pixels (Top's right band is Front,
+  // Front's left band is Top, and so on in the 3x2 sheet).
+  // That is the "parts of another surface rendered in this
+  // surface" report (2026-11-04, William's screenshot, where
+  // every solid-coloured face had a neighbour-coloured strip
+  // on its edges). clipSpriteBounds is only set by Easymetric
+  // panels, so this change affects no other editor.
   if (!m_clipSpriteBounds.isEmpty() && m_sprite && m_clipSpriteBounds != m_sprite->bounds()) {
     auto theme = SkinTheme::get(this);
     gfx::Rect clipRc = editorToScreen(m_clipSpriteBounds);
     clipRc.offset(-bounds().origin());
-    clipRc.enlarge(5 * guiscale());
     gfx::Region outside(clientBounds());
     outside.createSubtraction(outside, gfx::Region(clipRc));
     g->fillRegion(theme->colors.editorFace(), outside);
