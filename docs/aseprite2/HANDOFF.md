@@ -76,6 +76,24 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-04 — Muse (ULTRON): Wheel zoom ACTUALLY fixed + PR #18 studio-open crash fixed, DRAFT PR, Linux GUI-verified, NOT Windows-verified.
+  Branch fix/easymetric-panel-wheel-zoom-revert, base 2cee30d (PR #18 merged).
+  (1) PR #18 crash: its Object W/H/D row called extractSixSurfaces() during
+  buildFieldsControls(), before m_useFaceDepthCheck was created later in the
+  same function; that member had no = nullptr initializer, so the guard read
+  garbage (0x101) and studio open segfaulted intermittently
+  (Widget::isSelected, gdb backtrace). Fix: nullptr-init all Fields pointer
+  members, and the Object row now uses sharedFaceSizes() for initial slider
+  values instead of extractSixSurfaces() during construction.
+  (2) Wheel zoom revert: EasymetricWheelZoomState fired, zoom went 12 -> 13
+  inside setZoomAndCenterInMouse, but updateEditor() -> Editor::onResize ->
+  fitClipSpriteBounds floored it back to 12 and displaced the canvas.
+  Fix: clear the panel editor's clip rect around the setZoomAndCenterInMouse
+  call (fitClip returns early on empty clip), restore it immediately after.
+  Linux wheel harness (Xvfb + XTest, workspace/wheel-test/full_test.py):
+  1 wheel-up over Top = face fills panel, status 200.0% (was 100.0%);
+  1 wheel-up over Front = Front zooms, Top untouched. Suites: 67/67 +
+  54/54 + 14/14 + 23/23. Windows wheel test still needed.
 - 2026-11-04 — Muse (ULTRON): Panel fixes, DRAFT, NOT Windows-verified.
   Branch fix/easymetric-panel-zoom-resize-dims, base e7dd611, 1 file
   (src/app/commands/cmd_easymetric.cpp) + this entry. (1) Wheel: view-level

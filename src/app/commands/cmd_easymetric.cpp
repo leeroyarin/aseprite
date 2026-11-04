@@ -2879,8 +2879,24 @@ public:
       return true;
     render::Zoom zoom = render::Zoom::fromLinearScale(
       editor->zoom().linearScale() - step);
+    // Wheel-zoom revert guard (proven by Linux wheel harness,
+    // 2026-11-04): setZoomAndCenterInMouse calls updateEditor,
+    // which resizes the viewport, which calls Editor::onResize,
+    // which calls fitClipSpriteBounds on a panel editor that
+    // has a clip rect — and that fit floors the zoom back to
+    // 1x and overwrites the scroll, so the panel displaced
+    // instead of zooming. Clearing the clip for the duration
+    // of this one call makes fitClip return early (empty
+    // clip), so the zoom and the mouse-centred scroll survive;
+    // the clip is restored immediately afterwards, in the
+    // same call, so panel editing confinement is unchanged.
+    // This touches only Easymetric panel editors, not the
+    // upstream Editor::onResize/fitClip behaviour.
+    const gfx::Rect savedClip = editor->clipSpriteBounds();
+    editor->setClipSpriteBounds(gfx::Rect());
     editor->setZoomAndCenterInMouse(zoom, msg->position(),
                                     Editor::ZoomBehavior::MOUSE);
+    editor->setClipSpriteBounds(savedClip);
     return true;
   }
 
@@ -3899,12 +3915,17 @@ private:
     objRow->setChildSpacing(4 * s);
     int curX = 24, curY = 24, curZ = 24;
     if (Doc* doc0 = m_docView->document()) {
-      SixSurfaceData d0;
-      if (extractSixSurfaces(doc0, 0, d0)) {
-        curX = d0.w[kFaceFront];
-        curY = d0.h[kFaceFront];
-        curZ = d0.w[kFaceRight];
-      }
+      // NOTE: do NOT call extractSixSurfaces() here. That member
+      // reads m_useFaceDepthCheck, which is only created later
+      // in this function; calling it during construction read
+      // an uninitialised pointer and segfaulted studio open
+      // intermittently (Widget::isSelected on 0x101). Face
+      // sizes alone are enough for the initial slider values.
+      int fw[kFaceCount], fh[kFaceCount];
+      sharedFaceSizes(doc0->sprite(), fw, fh);
+      curX = fw[kFaceFront];
+      curY = fh[kFaceFront];
+      curZ = fw[kFaceRight];
     }
     auto* objXSlider = new ui::Slider(4, 256, curX);
     auto* objYSlider = new ui::Slider(4, 256, curY);
@@ -4949,32 +4970,32 @@ private:
   std::array<bool, 3> m_colLinked = { false, false, false };
 
   // Preview & Fields
-  EasymetricPreviewWidget* m_previewWidget;
-  FieldsPanelBox* m_fieldsBox;
+  EasymetricPreviewWidget* m_previewWidget = nullptr;
+  FieldsPanelBox* m_fieldsBox = nullptr;
   ui::View* m_fieldsView = nullptr;
   bool m_savedZoomWithWheel = true;
   bool m_restoreZoomWithWheel = false;
 
   // Fields controls
-  ui::Slider* m_yawSlider;
-  ui::Slider* m_pitchSlider;
-  ui::Slider* m_pivXSlider;
-  ui::Slider* m_pivYSlider;
-  ui::Slider* m_pivZSlider;
-  ui::ComboBox* m_tagCombo;
-  ui::CheckBox* m_mapDiffuseCheck;
-  ui::CheckBox* m_mapNormalCheck;
-  ui::CheckBox* m_mapDepthCheck;
-  ui::ComboBox* m_renderTypeCombo;
+  ui::Slider* m_yawSlider = nullptr;
+  ui::Slider* m_pitchSlider = nullptr;
+  ui::Slider* m_pivXSlider = nullptr;
+  ui::Slider* m_pivYSlider = nullptr;
+  ui::Slider* m_pivZSlider = nullptr;
+  ui::ComboBox* m_tagCombo = nullptr;
+  ui::CheckBox* m_mapDiffuseCheck = nullptr;
+  ui::CheckBox* m_mapNormalCheck = nullptr;
+  ui::CheckBox* m_mapDepthCheck = nullptr;
+  ui::ComboBox* m_renderTypeCombo = nullptr;
   ui::Label* m_zoomLabel = nullptr;
-  ui::CheckBox* m_strokeCheck;
-  ui::CheckBox* m_cutoutCheck;
-  ui::CheckBox* m_lockBordersCheck;
-  ui::CheckBox* m_symXCheck;
-  ui::CheckBox* m_symYCheck;
-  ui::CheckBox* m_useFaceDepthCheck;
-  ui::CheckBox* m_liveBakeCheck;
-  ui::CheckBox* m_linkDimensionsCheck;
+  ui::CheckBox* m_strokeCheck = nullptr;
+  ui::CheckBox* m_cutoutCheck = nullptr;
+  ui::CheckBox* m_lockBordersCheck = nullptr;
+  ui::CheckBox* m_symXCheck = nullptr;
+  ui::CheckBox* m_symYCheck = nullptr;
+  ui::CheckBox* m_useFaceDepthCheck = nullptr;
+  ui::CheckBox* m_liveBakeCheck = nullptr;
+  ui::CheckBox* m_linkDimensionsCheck = nullptr;
 
   int m_lastFaceW[kFaceCount] = { 0, 0, 0, 0, 0, 0 };
   int m_lastFaceH[kFaceCount] = { 0, 0, 0, 0, 0, 0 };
