@@ -4135,7 +4135,7 @@ protected:
         continue;
       const bool active = (m_hoverSplitter == 10 + c || m_dragSplitter == 10 + c);
       g->fillRect(active ? activeCol : sepCol,
-                  gfx::Rect(colX[c], colBotY[c] - bh / 2, colW[c], bh));
+                  gfx::Rect(colX[c], colBotY[c] - bh, colW[c], bh));
     }
 
     // Vertical column separators, highlighted when hovered/dragged

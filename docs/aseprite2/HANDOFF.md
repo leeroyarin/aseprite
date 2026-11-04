@@ -76,6 +76,15 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-04 — Muse (ULTRON): Horizontal splitter cursor misalignment fixed.
+  The horizontal separator was painted centred on the row boundary
+  [botY-bh/2, botY+bh/2), while splitterGapAt() hit-tested only
+  [botY-bh, botY), so the resize cursor appeared half a gap above
+  the visible bar and the lower half of the bar did not resize.
+  Fix: paint the bar in the actual gap [botY-bh, botY). Vertical
+  bars already matched their gap and are unchanged. Suites:
+  67/67 + 54/54 + 14/14 + 23/23. Windows visual check still needed.
+
 - 2026-11-04 — Antigravity (arin-pc): Built fresh Aseprite 2.0 binaries after pulling PR #20 merge and docs update (`100895df5`).
   - Human build: `build/bin/aseprite.exe` (22,031,872 bytes) compiled cleanly via `tools/aseprite2-build.ps1`, reports `2.0-dev+100895df5`.
   - Testing build: `build-test/bin/aseprite.exe` synced and verified against test suites (Easymetric 68/68 PASS, Adversarial 54/54 PASS).
