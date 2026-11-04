@@ -4164,7 +4164,16 @@ protected:
     const gfx::Color activeCol = gfx::rgba(120, 170, 220);
 
     // Horizontal separators, one per column (its own row split),
-    // only for columns that are NOT linked (and Col 3)
+    // only for columns that are NOT linked (and Col 3).
+    // The bar must sit exactly in the gap between the panes:
+    // [colBotY-bh, colBotY), which is also what splitterGapAt()
+    // hit-tests. It used to be painted centred on colBotY,
+    // [colBotY-bh/2, colBotY+bh/2), so the resize cursor
+    // appeared half a gap above the bar you see, and the
+    // lower half of the visible bar did not resize at all —
+    // the "cursor changes at a different place" report
+    // (2026-11-04, William's screenshots). Vertical bars
+    // already matched their gap, so they are unchanged.
     for (int c = 0; c < 4; ++c) {
       if (c < 3 && m_colLinked[c])
         continue;
@@ -4533,11 +4542,16 @@ private:
     m_cutoutCheck->Click.connect(onParam);
     m_useFaceDepthCheck->Click.connect(onParam);
     m_liveBakeCheck->Click.connect(onParam);
+    // BG is composited into the preview image itself (see
+    // render3DModel), so changing it must re-render, not just
+    // update the widget fill that the opaque surface covers.
     auto applyBg = [this] {
       if (m_previewWidget && m_bgColorButton && m_bgAlphaSlider) {
         const app::Color c = m_bgColorButton->getColor();
         m_previewWidget->setBackgroundColor(c.getRed(), c.getGreen(), c.getBlue(),
                                             m_bgAlphaSlider->getValue());
+        m_lastHash = 0;
+        pollAndRender(true);
       }
     };
     m_bgColorButton->Change.connect([applyBg](const app::Color&) { applyBg(); });
@@ -5123,19 +5137,71 @@ private:
     if (!m_previewWidget)
       return;
 
-    auto makeSurface = [](const doc::Image* img) -> os::SurfaceRef {
+    // Preview images are RGB, so their background is opaque
+    // black (0,0,0) — and that black image completely covered
+    // the Preview BG colour/alpha fill drawn underneath it.
+    // That is why setting BG to #000000 / alpha 0 still showed
+    // a black background behind the model (2026-11-04).
+    // For the preview only (baked Iso layers keep the RGB
+    // images in m_last*Img unchanged), build RGBA copies
+    // where the background is transparent. Background is
+    // exactly the pixels no ray hit: diff, norm AND dept are
+    // all 0 there, while every hit pixel writes a non-zero
+    // dept (>=35) and a non-zero norm, so a genuinely black
+    // model pixel is never mistaken for background.
+    // Background is composited INTO the preview image, not
+    // relied on from surface alpha: in practice the scaled
+    // drawSurface path draws the image opaque (Linux harness
+    // screenshot, 2026-11-04: black rectangle, checkerboard
+    // only outside the image bounds, even though the image
+    // background pixels are alpha 0). So bg pixels here get
+    // the chosen BG colour (blended over a checkerboard when
+    // alpha is in-between), and alpha 0 gets the checkerboard
+    // itself — never black. Baked Iso layers are untouched.
+    int bgR = 0, bgG = 0, bgB = 0, bgA = 0;
+    if (m_bgColorButton && m_bgAlphaSlider) {
+      const app::Color c = m_bgColorButton->getColor();
+      bgR = c.getRed(); bgG = c.getGreen(); bgB = c.getBlue();
+      bgA = m_bgAlphaSlider->getValue();
+    }
+    auto makePreviewSurface = [](const doc::Image* img,
+                                 const doc::Image* diff,
+                                 const doc::Image* norm,
+                                 const doc::Image* dept,
+                                 int bgR, int bgG, int bgB, int bgA) -> os::SurfaceRef {
       if (!img) return nullptr;
       const int w = img->width();
       const int h = img->height();
+      doc::ImageRef rgba(doc::Image::create(doc::IMAGE_RGB, w, h));
+      for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+          const uint32_t dc = diff ? doc::get_pixel_fast<doc::RgbTraits>(diff, x, y) : 0;
+          const uint32_t nc = norm ? doc::get_pixel_fast<doc::RgbTraits>(norm, x, y) : 0;
+          const uint32_t tc = dept ? doc::get_pixel_fast<doc::RgbTraits>(dept, x, y) : 0;
+          const bool isBg = (dc == 0 && nc == 0 && tc == 0);
+          const uint32_t c = doc::get_pixel_fast<doc::RgbTraits>(img, x, y);
+          if (isBg) {
+            const int checker = (((x / 8) + (y / 8)) & 1) ? 192 : 128;
+            const int r = (bgR * bgA + checker * (255 - bgA)) / 255;
+            const int g = (bgG * bgA + checker * (255 - bgA)) / 255;
+            const int b = (bgB * bgA + checker * (255 - bgA)) / 255;
+            doc::put_pixel(rgba.get(), x, y, doc::rgba(r, g, b, 255));
+          }
+          else {
+            doc::put_pixel(rgba.get(), x, y,
+                           doc::rgba(doc::rgba_getr(c), doc::rgba_getg(c), doc::rgba_getb(c), 255));
+          }
+        }
+      }
       os::SurfaceRef surf = os::System::instance()->makeRgbaSurface(w, h);
-      convert_image_to_surface(img, nullptr, surf.get(), 0, 0, 0, 0, w, h);
+      convert_image_to_surface(rgba.get(), nullptr, surf.get(), 0, 0, 0, 0, w, h);
       return surf;
     };
 
     m_previewWidget->setSurfaces(
-      makeSurface(m_lastDiffImg.get()),
-      makeSurface(m_lastNormImg.get()),
-      makeSurface(m_lastDeptImg.get()),
+      makePreviewSurface(m_lastDiffImg.get(), m_lastDiffImg.get(), m_lastNormImg.get(), m_lastDeptImg.get(), bgR, bgG, bgB, bgA),
+      makePreviewSurface(m_lastNormImg.get(), m_lastDiffImg.get(), m_lastNormImg.get(), m_lastDeptImg.get(), bgR, bgG, bgB, bgA),
+      makePreviewSurface(m_lastDeptImg.get(), m_lastDiffImg.get(), m_lastNormImg.get(), m_lastDeptImg.get(), bgR, bgG, bgB, bgA),
       yawDeg,
       pitchDeg,
       int(res.cxScreen),
