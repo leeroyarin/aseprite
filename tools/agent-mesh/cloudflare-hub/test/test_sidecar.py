@@ -79,6 +79,16 @@ class OutboundClientTests(unittest.TestCase):
         from helpers import redact_payload
         value=redact_payload({"local-fixture":"amt_"+"a"*32},extra_secret="local-fixture")
         rendered=json.dumps(value);self.assertNotIn("local-fixture",rendered);self.assertNotIn("amt_",rendered)
+    def test_enrollment_report_is_explicit_header_authenticated_and_bounded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/"proof.json";path.write_text(json.dumps({"id":"proof-one","code":"c"*64,"script_sha256":"d"*64}))
+            fake=FakeClient({"success":True});client.post_enrollment("local-fixture",path,"proofs",opener=fake)
+            request=fake.requests[0];self.assertTrue(request.full_url.endswith('/api/v2/enrollment/proofs'));self.assertEqual(request.get_header('Authorization'),'Bearer local-fixture');self.assertEqual(json.loads(request.data)['code'],'c'*64)
+    def test_recorded_failed_enrollment_is_not_reported_as_client_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/"proof.json";path.write_text('{}')
+            with self.assertRaises(ValueError):client.post_enrollment('fixture',path,'proofs',opener=FakeClient({'success':False,'reason':'expired'}))
+            with self.assertRaises(ValueError):client.post_enrollment('fixture',path,'../tokens',opener=FakeClient({}))
     def test_reused_backoff_is_bounded(self):
         self.assertEqual(compute_backoff_delay(0,jitter_ratio=0),1)
         self.assertLessEqual(compute_backoff_delay(8,rng=random.Random(1)),60)

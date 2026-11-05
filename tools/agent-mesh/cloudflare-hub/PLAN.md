@@ -12,7 +12,7 @@ Agents connect out over HTTPS/WebSocket; there is no agent-hosted backend or tun
   task failover; versioned plan/onboarding and suggestions/acks; parent-authenticated sub labels;
   activity/search; portal live stream; portal assets on this same Worker, in that order.
 - Part 3, source implemented and awaiting review: owner-edited versioned rule book with SHA-256 text hash and separate command/chat records.
-- Part 4: explicit read/accept/install/prove enrollment and outbound-only hub_command_log.py;
+- Part 4, implemented and awaiting check: explicit read/accept/install/prove enrollment and outbound-only hub_command_log.py;
   discover actual device chat paths, never guess them. Log commands only, append-only, redact,
   deduplicate by message ID; never execute commands or modify original chats.
 - Part 5: record_only default; no access loss for unenrolled/failed challenge agents. Owner-only
@@ -56,3 +56,11 @@ incomplete work branches and final handoff evidence. Part 3 implements the rule 
 explicit additions; see PART3-REVIEW.md, API.md and docs/CONTINUATION.md. No hub message executes
 work, and usage/push evidence is honestly labelled agent-reported. Stop for the Part 3 owner check
 before enrollment. Production remains separately gated.
+
+
+## Part 4 checkpoint
+
+Arin approved Part 3 and its warning/freshness defaults. Enrollment and the actual standalone
+logger are implemented with private expiring challenges, packet-bound receipt checks, immutable
+history and record-only owner revocations. See PART4-REVIEW.md and docs/ENROLLMENT.md. Stop for
+Part 4 owner check before enforce/settings/periodic proof work. Production is unchanged.

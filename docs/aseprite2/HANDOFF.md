@@ -37,7 +37,9 @@ powershell -File tools\start-aseprite2.ps1
 - [x] Part 2 source and isolated verification: projects/channels, registry/supervisor/tasks, docs, labels, search and portal.
 - [x] Arin approved Part 2 coverage/permissions and requested continuation with usage/final-handoff support.
 - [x] Part 3 rule book and approved usage/handoff extension: 89 Worker + 14 Python tests, typecheck/dry-run.
-- [ ] Arin's Part 3 check (tools/agent-mesh/cloudflare-hub/PART3-REVIEW.md); Parts 4-6 remain gated.
+- [x] Arin approved Part 3 and the 15% usage warning / 10-minute freshness defaults.
+- [x] Part 4 enrollment/logger/private challenges: 109 Worker + 32 Python tests, typecheck/artifact/dry-run.
+- [ ] Arin's Part 4 check (tools/agent-mesh/cloudflare-hub/PART4-REVIEW.md); Parts 5-6 remain gated.
 - [ ] Production resource/configuration changes and merge/deploy remain separately approval-gated.
 
 ## Status
@@ -90,6 +92,15 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-05 — Codex: Part 4 source implements immutable read/accept/install/prove enrollment, exact
+  downloadable logger bytes, metadata-based local path discovery, disjoint folders, append-only
+  command receipts/statuses, private five-minute one-use challenges, packet/hash/path/receipt checks,
+  and record-only owner revoke/allow. No network/command execution in the standalone logger.
+  Actual this-PC Codex sessions metadata checked without copying chat text; real other-agent installs
+  remain pending. 109 Worker + 32 Python tests passed, typecheck/artifact/dry-run passed. No production
+  resources, secrets/tokens, native endpoints or C++/submodules changed. Stop for Part 4 check; Parts 5-6
+  remain required. See cloudflare-hub/PART4-REVIEW.md, docs/ENROLLMENT.md and docs/CONTINUATION.md.
+
 - 2026-11-05 — Codex: Arin approved Part 2 policies and added usage-aware final handoffs. Implemented
   Part 3 owner-only immutable rule-book versions/SHA-256/CAS plus real-or-unknown usage snapshots,
   <=15% warning, low-usage takeover exclusion, incomplete pushed/not-pushed checkpoint evidence and
@@ -326,7 +337,7 @@ powershell -File tools\start-aseprite2.ps1
   - **Defect 3 Fixed (Cel Offset Preservation)**: In `propagateLinkedDimensions()`, replaced hardcoded `api.setCelPosition(spr, cel, 0, 0)` with `api.setCelPosition(spr, cel, cel->x(), cel->y())`, preventing non-zero cel offsets from being clobbered away from slice boundaries.
   - **Defect 4 Fixed (Slice-Bounded 2-Layer Setup)**: In `setupTwoLayerStructure()`, initialized cels using `slice->bounds().w, h` and positioned them at `slice->bounds().x, y` instead of whole-canvas `sw x sh` at `(0, 0)`.
   - **Hardened Convert to Groups**: Implemented safe `while(true)` restart in `convertSmartObjectsToGroups()` to prevent iterator/pointer invalidation during batch layer conversion.
-  - **Verification**: Built with MSVC x64 + Ninja. 284/284 tests passed across all test suites (23/23 R1-R4 E2E, 67/67 Live Studio E2E, 54/54 Adversarial Stress, 140/140 Smart Object E2E).
+  - **Verification**: Built with MSVC x64 + Ninja. 284/284 tests passed across all test suites (23/23 R1-R4 E2E, 67/67 Live Studio E2E, 54/54 Adversarial Stress, 141/141 Smart Object E2E).
 - 2026-11-02 — Gemini (Antigravity): Easymetric 6-Surface Live Studio Shared UV Sheets & Versioning Fix:
   - **Unified Shared UV Sheets**: Replaced 6 per-face layer groups with single Surface_Base clipping layer and single Surface_Texture Smart Object layer over 3x2 UV grid matching user workflow specification.
   - **Dynamic Git Versioning**: Added CMAKE_CONFIGURE_DEPENDS (.git/HEAD, .git/index) in src/ver/CMakeLists.txt ensuring window title version string updates on every commit without manual cmake reconfigure.
@@ -337,7 +348,7 @@ powershell -File tools\start-aseprite2.ps1
   - **R2 Smart Object Hierarchy & Safety**: Fixed fake Smart Object creation by calling `ConvertLayer(to="smartobject")`, resolved headless null pointer crash via context fallback in `convertSmartObjectsToGroups()`, fixed layer discovery inside unpacked groups in `findSurfaceLayers()`, and protected editor pixel-editing lockout in `FacePaneBox`.
   - **R3 Canvas Isolation**: Fixed case-insensitive and prefix-stripped slice matching in `isEasymetricSurfaceSliceName()` (`tool_loop_impl.cpp`), preventing drawing bleed on shared layers.
   - **R4 Linked Dimensions Propagation**: Resurrected dead propagation code; integrated live propagation into `EasymetricMultiPaneView::pollAndRender()`, added interactive dimension spin controls in `FieldsPanelBox`, added CLI/script parameter support (`action="linkDims"`), multi-frame cel safe resize, canvas auto-expansion, and depth layer propagation.
-  - **Verification**: Built with MSVC x64 + Ninja. 277/277 tests passed across all suites (16/16 R1-R4 E2E, 67/67 Live Studio E2E, 54/54 Adversarial Stress, 140/140 Smart Object E2E).
+  - **Verification**: Built with MSVC x64 + Ninja. 277/277 tests passed across all suites (16/16 R1-R4 E2E, 67/67 Live Studio E2E, 54/54 Adversarial Stress, 141/141 Smart Object E2E).
 - 2026-11-01 — Gemini (Antigravity): Implemented **Smart Object Layers** ported from Rust Photoshop replica (https://github.com/leeroyarin/Photoshop.git) into native Aseprite 2.0 C++ (src/doc/layer_smart_object.{h,cpp}, src/app/commands/cmd_place_smart_object.cpp, src/app/commands/convert_layer.cpp, src/app/smart_object_manager.{h,cpp}, src/app/ui/editor/tool_loop_impl.cpp, src/render/render.cpp, src/dio/aseprite_decoder.cpp, data/gui.xml):
   - **External .aseprite Linking & Auto-Refresh**: Non-destructive doc::LayerSmartObject linked to external .aseprite files. SmartObjectManager tracks file modification timestamps and automatically re-renders linked layers on disk changes.
   - **Non-Destructive Pixel Protection**: Drawing tools (brush, pencil, eraser, paint bucket, stroke/fill, filters, script tool loops, Lua iterators) strictly blocked with UI warning; layer position translation and 2D affine transformations (scale, rotate, flip H/V, custom pivot) fully supported without rasterization.
@@ -345,7 +356,7 @@ powershell -File tools\start-aseprite2.ps1
   - **Context Menu & Conversion**:
     - File > Import > Place Linked (Smart Object)...
     - Right-click layer context menu: Convert To > Smart Object, Convert To > Separate Smart Objects, and Convert To > Group.
-  - **Verification**: 140/140 E2E tests and 1,145 adversarial/empirical assertions passed across 2 independent victory audits. Installed to %LOCALAPPDATA%\Programs\Aseprite 2.0\aseprite.exe.
+  - **Verification**: 141/141 E2E tests and 1,145 adversarial/empirical assertions passed across 2 independent victory audits. Installed to %LOCALAPPDATA%\Programs\Aseprite 2.0\aseprite.exe.
 - 2026-10-31 — Worker M1 (Teamwork): Implemented Milestone 1: Easymetric 6-Surface Live Studio Core Upgrade (R1 + R2):
   - **R1 Canvas Mount Box Framing & Slice Offset Removal**:
     - Eliminated artificial 112x96 atlas grid expansion in `setupSixSurfacesOnDoc`; canvas maintains user-specified dimensions (e.g. 24x24).
@@ -393,7 +404,7 @@ powershell -File tools\start-aseprite2.ps1
   - **R2/R3 Slice Auto-Creation**: Fixed `setupTwoLayerStructure` to automatically generate face slices on initial setup, preventing slice isolation bypass.
   - **R3 Dynamic Surface Isolation**: Fixed premature mouse cursor coordinate lock in headless/test mode in `ToolLoopBase` and `PointShape` inverted span clamping (`x1 > x2`).
   - **R1/R2 Translucent Texture Blending & Format Handling**: Fixed alpha blending math (`texA * texCol + (255 - texA) * baseCol`) and extended surface sampling to RGB, Grayscale, and Indexed sprite formats. Added headless `bake3D`/`render3D` command.
-  - **Full E2E Verification**: All 19 tests in `easymetric_four_requirements_test.lua`, 54 tests in `easymetric_adversarial_stress.lua`, and 140+ Smart Object tests pass cleanly with 0 failures.
+  - **Full E2E Verification**: All 19 tests in `easymetric_four_requirements_test.lua`, 54 tests in `easymetric_adversarial_stress.lua`, and 141+ Smart Object tests pass cleanly with 0 failures.
 - 2026-11-01 — SWE Light Implementer (Antigravity): Completed 4 core Easymetric 6-Surface Live Studio requirements:
   - **3D Preview Geometry Clipping Fix**: Fixed orthographic ray origin placement (`camDist = maxDepthRange * 2.5f`, `ox/oy/oz` pulled backwards along view vector), raymarch near/far plane intersection bounds (`nearPlane = 1.0f`, `farPlane = 2.0f * camDist + maxDepthRange`), and relative depth normalization `(tHit - camDist + maxDepthRange * 0.5) / maxDepthRange`.
   - **Two-Layer Smart Object & Clipping Structure**: Implemented base layer alpha clipping mask (`baseAlpha <= 16` masked out, `baseAlpha > 16` uses texture override or falls back to base), supporting `Surface_<Face>_Base` and `Surface_<Face>_Texture` smart objects/layers, plus one-click setup and unpack to groups.

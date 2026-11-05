@@ -7,7 +7,9 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test:sidecar": "python -m unittest discover -s test -p test_sidecar.py -v",
+    "build:logger": "python scripts/build_logger_artifact.py",
+    "pretest": "python scripts/build_logger_artifact.py --check",
+    "test:sidecar": "python -m unittest discover -s test -p test_*.py -v",
     "test": "node --test --test-concurrency=1 test/*.test.mjs"
   },
   "devDependencies": {

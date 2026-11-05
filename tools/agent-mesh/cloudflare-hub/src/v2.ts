@@ -107,6 +107,9 @@ export class V2Transport {
   private get features(): ProjectFeatures {
     return this.featuresService ||= new ProjectFeatures(this.db,this.state,async msg=>{
       this.prepareBookkeeping();
+      const legacy=this.sql.exec<LegacyRow>("SELECT * FROM messages WHERE id=?",msg.id).toArray()[0];
+      if(legacy&&(legacy.project!==msg.project||legacy.from_agent!==msg.from||legacy.to_agent!==msg.to||legacy.type!==msg.type||legacy.body!==msg.body||(legacy.sub||null)!==(msg.sub||null)))
+        throw new Failure(409,"Delivery id conflicts with legacy history");
       await this.db.batch([this.insert(msg,await digest(msg),"v2")]);
       const row=await this.db.prepare("SELECT * FROM mesh_messages WHERE id=?").bind(msg.id).first<Row>();
       if(!row || row.request_hash!==await digest(msg))throw new Failure(409,"Delivery id conflict");
@@ -363,6 +366,6 @@ export async function fetchV2(request: Request, portalOrigin: string,
   if (origin) headers.set("Access-Control-Allow-Origin",portalOrigin);
   headers.set("Vary","Origin");
   headers.set("Cache-Control","no-store");
-  headers.set("X-Hub-API-Version","2-part3");
+  headers.set("X-Hub-API-Version","2-part4");
   return new Response(response.body,{status:response.status,headers});
 }

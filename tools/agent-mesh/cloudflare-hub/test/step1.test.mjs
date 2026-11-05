@@ -12,7 +12,7 @@ const portal='https://agent-hub.slack-clone-arin.workers.dev';
 const admin='local-fixture-admin-only';
 let mf, db, workerScript, tokens={};
 async function migrate(database) {
-  for(const name of ['0001_v2_transport.sql','0002_foundation.sql','0003_project_features.sql','0004_search_backfill.sql','0005_governance.sql']) {
+  for(const name of ['0001_v2_transport.sql','0002_foundation.sql','0003_project_features.sql','0004_search_backfill.sql','0005_governance.sql','0006_enrollment.sql']) {
     const migration=await readFile('migrations/'+name,'utf8');
     for(const statement of migration.replace(/^--.*$/gm,'').split(name.startsWith('0004') ? /;\s*(?=INSERT)/i : /;\s*(?=CREATE)/i).filter(s=>s.trim())) await database.prepare(statement).run();
   }

@@ -6,6 +6,7 @@ import { PORTAL_HTML, PORTAL_JS } from "./portal";
 
 import { FeatureFailure } from "./errors";
 export { FeatureFailure } from "./errors";
+import { Enrollment } from "./enrollment";
 import { Governance, USAGE_FRESH_MS } from "./governance";
 type Data = Record<string, unknown>;
 interface Project { id:string; name:string; description:string; agents_json:string; roles_json:string; created_at:number }
@@ -34,6 +35,10 @@ function paged<T>(rows:T[],limit:number,cursor:(row:T)=>number){
   const items=rows.slice(0,limit);return {items,has_more:rows.length>limit,next_cursor:rows.length>limit?String(cursor(items[items.length-1])):null};
 }
 export class ProjectFeatures {
+  private enrollmentService?: Enrollment;
+  private get enrollment(): Enrollment {
+    return this.enrollmentService ||= new Enrollment(this.db,async (id,p)=>{await this.project(id,p);},statements=>this.write(statements),(agent,kind,title,actor=agent)=>this.event("_hub",actor,kind,title));
+  }
   private governanceService?: Governance;
   private get governance(): Governance {
     return this.governanceService ||= new Governance(this.db,
@@ -164,6 +169,8 @@ export class ProjectFeatures {
     const get=request.method==="GET",post=request.method==="POST";
     if(!get&&!post)fail(405,"Method not allowed");
     await this.flush();
+    const enrolled=await this.enrollment.route(request,p,b,path);
+    if(enrolled){await this.flush();return enrolled;}
     const governed=await this.governance.route(request,p,b,path);
     if(governed){await this.flush();return governed;}
     if(path[0]==="portal"&&admin&&get&&(path.length===1||(path.length===2&&path[1]==="app.js")))return new Response(path[1]==="app.js"?PORTAL_JS:PORTAL_HTML,{headers:{"Content-Type":path[1]==="app.js"?"text/javascript; charset=utf-8":"text/html; charset=utf-8","Content-Security-Policy":"default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'","X-Content-Type-Options":"nosniff"}});

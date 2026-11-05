@@ -1,6 +1,6 @@
 # Agent Hub unfinished branch handoff
 
-Status: INCOMPLETE. Parts 1-3 are implemented and tested; Parts 4-6 remain required.
+Status: INCOMPLETE. Parts 1-4 are implemented and tested; Parts 5-6 remain required.
 Source repository: https://github.com/leeroyarin/aseprite
 Work branch: codex/agent-hub-v2-step1
 Baseline tag: agent-mesh-hub-v2.1.0-baseline-20261105 at 70fcbdd51 (source baseline only).
@@ -25,12 +25,14 @@ retirement has occurred. The Worker name/address and existing native endpoints m
 - Part 3 owner-published immutable rule book with exact UTF-8 SHA-256 and version CAS.
 - Arin's added usage awareness and final-handoff protocol: real/unknown metrics, warning and
   fresh low-usage selection, append-only branch/checkpoint/test evidence and successor receipts.
+- Part 4 exact logger artifact, path evidence/install, immutable enrollment accept/challenge/proof/audit,
+  private one-use packet delivery and owner revoke/allow in record-only mode.
 - Optional outbound report-file uploads; no local server, automatic execution or guessed paths.
 - Permission policies confirmed by Arin: read-all owner, owner-only announcements and doc approval.
 
 ## Tests and evidence
 
-89 Worker tests + 14 Python tests = 103 passed, 0 failed/skipped. Typecheck and local dry-run pass.
+109 Worker tests + 32 Python tests = 141 passed, 0 failed/skipped. Typecheck and local dry-run pass.
 Run from tools/agent-mesh/cloudflare-hub: npm run typecheck; npm test; npm run test:sidecar.
 Dry-run only: npm exec -- wrangler deploy --dry-run --outdir .test-build.
 Fixtures run actual workerd/local D1/DO; external networking in the client tests is mocked.
@@ -38,10 +40,9 @@ No test result proves production or actual agent adoption. Never use live tokens
 
 ## Remaining work and gates
 
-1. Wait for Arin's Part 3 check. Then implement Part 4 enrollment and hub_command_log.py, with
-   actual device chat-directory research, separate command folder, redaction/dedup/status records,
-   expiring random challenge and script/path/rule hash proof. Never execute hub message text.
-2. Stop for check; Part 5 is record_only default, owner settings/grace, append-only enrollment audit,
+1. Part 4 enrollment/logger/challenges are implemented; review PART4-REVIEW.md and docs/ENROLLMENT.md.
+   Arin approved Part 3 and the 15%/10-minute defaults. Wait for the Part 4 check.
+2. After that check, Part 5 is record_only default, owner settings/grace, append-only enrollment audit,
    periodic proof and enforce tests only in isolation. Never enable enforce in production.
 3. Stop for check; Part 6 onboarding includes actual rule-book version/hash, connected + acknowledged
    document + successful challenge criteria, and preserves Connect your agent.
@@ -56,4 +57,4 @@ Usage is reported, not privately inferred. Unknown remains unknown. Initial warn
 remaining; freshness is 10 minutes. Remote-ref/test/checkout evidence is also agent-reported,
 not independently verified by the hub. Pushing a branch does not prove task completion.
 Do not merge or deploy this incomplete branch. Read docs/USER-REQUIREMENTS.md as task authority,
-API.md for contracts and PART3-REVIEW.md for scope/limitations. Record exact failures and blockers.
+API.md for contracts and PART4-REVIEW.md for scope/limitations. Record exact failures and blockers.

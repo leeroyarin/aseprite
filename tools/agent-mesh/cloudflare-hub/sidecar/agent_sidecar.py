@@ -76,6 +76,35 @@ def post_report(token, project, report_path, kind, task=None, opener=None):
         raise ValueError("Invalid report response")
     return result
 
+def post_enrollment(token, report_path, phase, opener=None):
+    """Send an explicit acceptance/challenge/proof file; never run the logger."""
+    if phase not in ("accept", "challenges", "proofs"):
+        raise ValueError("Invalid enrollment phase")
+    with Path(report_path).open("rb") as source:
+        raw = source.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("Enrollment report too large")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("Enrollment report must be an object")
+    body = json.dumps(redact_payload(payload, extra_secret=token), ensure_ascii=False).encode("utf-8")
+    if len(body) > 65536:
+        raise ValueError("Enrollment report too large")
+    request = urllib.request.Request(HUB_URL + "/api/v2/enrollment/" + phase, data=body, method="POST",
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+    client = opener or urllib.request.build_opener(NoRedirect())
+    with client.open(request, timeout=30) as response:
+        raw = response.read(MAX_RESPONSE + 1)
+    if len(raw) > MAX_RESPONSE:
+        raise ValueError("Enrollment response too large")
+    result = json.loads(raw)
+    if not isinstance(result, dict):
+        raise ValueError("Invalid enrollment response")
+    # An HTTP success may still contain a recorded failed proof.
+    if phase == "proofs" and result.get("success") is not True:
+        raise ValueError("Enrollment proof was recorded as failed")
+    return result
+
 def save_page(path, page, token):
     """Append and fsync before advancing cursor. Retry after crash deduplicates IDs."""
     path = Path(path)
@@ -127,6 +156,9 @@ def main(argv=None):
     parser.add_argument("--usage-report", type=Path, help="Explicit agent-produced usage JSON; missing counters remain unknown")
     parser.add_argument("--handoff-report", type=Path, help="Explicit handoff JSON; this client never commits or pushes")
     parser.add_argument("--task", help="Task id for --handoff-report")
+    parser.add_argument("--enrollment-accept", type=Path)
+    parser.add_argument("--enrollment-challenge", type=Path)
+    parser.add_argument("--enrollment-proof", type=Path)
     options = parser.parse_args(args)
     if bool(options.handoff_report) != bool(options.task):
         raise ValueError("Handoff report and task must be specified together")
@@ -146,6 +178,13 @@ def main(argv=None):
                         post_report(token, options.project, report_path, kind, task=options.task)
                     except Exception:
                         print("Evidence report failed; inbox polling remains available", file=sys.stderr)
+                        report_failed = True
+            for report_path, phase in [(options.enrollment_accept, "accept"), (options.enrollment_challenge, "challenges"), (options.enrollment_proof, "proofs")]:
+                if report_path:
+                    try:
+                        post_enrollment(token, report_path, phase)
+                    except Exception:
+                        print("Enrollment report failed; inbox polling remains available", file=sys.stderr)
                         report_failed = True
             if options.once: return 1 if report_failed else 0
             if not more: time.sleep(15)

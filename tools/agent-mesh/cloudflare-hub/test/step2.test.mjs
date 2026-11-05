@@ -11,7 +11,7 @@ const portal='https://agent-hub.slack-clone-arin.workers.dev';
 // Disposable local fixtures only. Do not load .dev.vars, shell credentials, or live tokens.
 const admin='local-fixture-admin-only';
 let mf, db, workerScript, tokens={};
-async function migrate(database, names=['0001_v2_transport.sql','0002_foundation.sql','0003_project_features.sql','0004_search_backfill.sql','0005_governance.sql']) {
+async function migrate(database, names=['0001_v2_transport.sql','0002_foundation.sql','0003_project_features.sql','0004_search_backfill.sql','0005_governance.sql','0006_enrollment.sql']) {
   for(const name of names) {
     const migration=await readFile('migrations/'+name,'utf8');
     for(const statement of migration.replace(/^--.*$/gm,'').split(name.startsWith('0004') ? /;\s*(?=INSERT)/i : /;\s*(?=CREATE)/i).filter(s=>s.trim())) await database.prepare(statement).run();
@@ -279,7 +279,7 @@ it('backfills earlier D1 transport history without rewriting it, including old t
     await migrate(database,['0001_v2_transport.sql','0002_foundation.sql']);
     await database.prepare("INSERT INTO mesh_messages(id,project,from_agent,to_agent,type,body,timestamp,subject,request_hash,source) VALUES('older-id','alpha','alice','bob','task','existing marmot','older non-ISO timestamp','older','fixture-hash','legacy')").run();
     const before=await database.prepare('SELECT * FROM mesh_messages').first();
-    await migrate(database,['0003_project_features.sql','0004_search_backfill.sql','0005_governance.sql']);
+    await migrate(database,['0003_project_features.sql','0004_search_backfill.sql','0005_governance.sql','0006_enrollment.sql']);
     const after=await database.prepare('SELECT * FROM mesh_messages').first();delete after.sub;assert.deepEqual(after,before);
     assert.equal((await database.prepare("SELECT count(*) n FROM search_fts WHERE search_fts MATCH 'marmot'").first()).n,1);
     assert.equal((await database.prepare('SELECT count(*) n FROM activity_log').first()).n,1);
