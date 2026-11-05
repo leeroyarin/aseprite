@@ -3838,20 +3838,20 @@ protected:
       m_colInit = true;
     }
 
-    colW[0] = std::clamp(m_colWpx[0], minCol, std::max(minCol, totalW - 3 * minCol));
-    colW[1] = std::clamp(m_colWpx[1], minCol,
-                         std::max(minCol, totalW - colW[0] - 2 * minCol));
-    colW[2] = std::clamp(m_colWpx[2], minCol,
-                         std::max(minCol, totalW - colW[0] - colW[1] - minCol));
-    // Narrow window: surface columns alone already exceed the
-    // width, so shrink them from the rightmost backwards
-    // (Preview keeps its minimum) instead of overflowing.
-    int excess = colW[0] + colW[1] + colW[2] + minCol - totalW;
-    for (int c = 2; excess > 0 && c >= 0; --c) {
-      const int shrink = std::min(excess, colW[c] - minCol);
-      colW[c] -= shrink;
-      excess -= shrink;
-    }
+    // 2026-11-04, William: surface splitters are REMOVED.
+    // Sizing now lives in Fields (W/H/D, Size sliders), so
+    // dragging a pane boundary only entangled drawing: the
+    // resize cursor appeared over surface panels, a drag
+    // started from a gap could resize a panel mid-stroke,
+    // and the hit area was never where the bar looked to be.
+    // Surface columns are now fixed equal widths and surface
+    // rows fixed equal heights. The ONLY remaining splitter
+    // is Preview/Fields (column 3, horizontal), which is not
+    // a surface panel, so it can never entangle a drawing
+    // stroke. Its stored split is rowHpx[3] only.
+    colW[0] = totalW / 4;
+    colW[1] = totalW / 4;
+    colW[2] = totalW / 4;
     colW[3] = std::max(minCol, totalW - colW[0] - colW[1] - colW[2]);
 
     colX[0] = rc.x;
@@ -3860,7 +3860,12 @@ protected:
     colX[3] = rc.x + colW[0] + bw + colW[1] + bw + colW[2] + bw;
 
     for (int c = 0; c < 4; ++c) {
-      colRowTopH[c] = std::clamp(m_rowHpx[c], minRow, std::max(minRow, totalH - minRow));
+      if (c == 3) {
+        colRowTopH[c] = std::clamp(m_rowHpx[c], minRow, std::max(minRow, totalH - minRow));
+      }
+      else {
+        colRowTopH[c] = totalH / 2;
+      }
       colRowBotH[c] = std::max(minRow, totalH - colRowTopH[c]);
       colRowBotY[c] = rc.y + colRowTopH[c] + bh;
     }
@@ -3877,25 +3882,24 @@ protected:
   // splitter drag and resized a panel while drawing. A drag
   // may only start in [colX[c]-bw, colX[c]) vertically, or
   // [botY[c]-bh, botY[c]) horizontally within that column.
+  // Only remaining splitter: 13 = horizontal boundary
+  // between Preview and Fields in column 3. Everything
+  // else returns 0, so no resize cursor ever appears over
+  // a surface panel, and no surface-panel drag can start.
+  // The hit area is exactly the painted bar, no extension
+  // into either neighbouring pane.
   int splitterGapAt(const gfx::Point& pos) const
   {
     const gfx::Rect rc = clientBounds();
     const int s = std::max(1, ui::guiscale());
-    const int bw = 6 * s;
     const int bh = 6 * s;
     int colX[4], colW[4], colTopH[4], colBotY[4], colBotH[4];
     computePaneLayout(rc, colX, colW, colTopH, colBotY, colBotH);
     if (!rc.contains(pos))
       return 0;
-    for (int c = 1; c < 4; ++c) {
-      if (pos.x >= colX[c] - bw && pos.x < colX[c])
-        return c;
-    }
-    for (int c = 0; c < 4; ++c) {
-      if (pos.x >= colX[c] && pos.x < colX[c] + colW[c] && pos.y >= colBotY[c] - bh &&
-          pos.y < colBotY[c])
-        return 10 + c;
-    }
+    if (pos.x >= colX[3] && pos.x < colX[3] + colW[3] && pos.y >= colBotY[3] - bh &&
+        pos.y < colBotY[3])
+      return 13;
     return 0;
   }
 
@@ -4174,22 +4178,16 @@ protected:
     // the "cursor changes at a different place" report
     // (2026-11-04, William's screenshots). Vertical bars
     // already matched their gap, so they are unchanged.
-    for (int c = 0; c < 4; ++c) {
-      if (c < 3 && m_colLinked[c])
-        continue;
-      const bool active = (m_hoverSplitter == 10 + c || m_dragSplitter == 10 + c);
+    // Only remaining splitter bar: Preview/Fields, column 3.
+    // Surface columns have no bars and no hit area any more,
+    // so their boundaries are just the dark surround.
+    {
+      const bool active = (m_hoverSplitter == 13 || m_dragSplitter == 13);
       g->fillRect(active ? activeCol : sepCol,
-                  gfx::Rect(colX[c], colBotY[c] - bh, colW[c], bh));
-    }
-
-    // Vertical column separators, highlighted when hovered/dragged
-    for (int c = 1; c < 4; ++c) {
-      const int sepX = colX[c] - bw / 2;
-      const bool active = (m_hoverSplitter == c || m_dragSplitter == c);
-      const int midY = colBotY[c - 1] - bh / 2;
-      g->fillRect(active ? activeCol : sepCol, gfx::Rect(sepX - bw / 2, rc.y, bw, rc.h));
-      g->fillRect(active ? activeCol : gripCol, gfx::Rect(sepX - 2 * s, midY - 6 * s, 4 * s, s));
-      g->fillRect(active ? activeCol : gripCol, gfx::Rect(sepX - 2 * s, midY + 5 * s, 4 * s, s));
+                  gfx::Rect(colX[3], colBotY[3] - bh, colW[3], bh));
+      const int midX = colX[3] + colW[3] / 2;
+      const int midY = colBotY[3] - bh / 2;
+      g->fillRect(active ? activeCol : gripCol, gfx::Rect(midX - 12 * s, midY - 1 * s, 24 * s, 2 * s));
     }
   }
 
