@@ -432,3 +432,21 @@ ECONNRESET artifact in the pinned Miniflare version; connect-denial testing uses
 pre-upgrade guard, while accepted live sockets exercise server-side revocation. Browser/live
 Cloudflare handshake validation remains outstanding. The implementation does not prove future
 agent obedience; permissions and size/rate limits remain the actual safety boundary.
+
+
+## Owner GitHub sign-in (approved replacement for Access, 2026-11-05)
+
+Production now explicitly sets PORTAL_AUTH_PROVIDER=github, with only Arin-approved account
+arin-avinto (numeric ID 298677609) allowed. This replaces the earlier Access-only requirement at
+Arin's request to avoid payment setup. Native agent routes and token registry are unchanged.
+See docs/GITHUB-LOGIN.md for configuration, deployment status and credential handoff.
+
+GET /api/v2/auth/login serves the sign-in page; GET /api/v2/auth/github/login starts identity-only
+OAuth with state and PKCE; GET /api/v2/auth/github/callback consumes the single-use state and
+creates an eight-hour hashed opaque session only for the configured owner ID. POST
+/api/v2/auth/logout requires the portal Origin and revokes that session. Every cookie-authenticated
+admin mutation requires the exact portal Origin. Provider tokens are never persisted. Sessions
+use Secure, HttpOnly, SameSite=Lax host-only cookies, no browser token storage. Missing config fails
+closed with 503; missing/invalid sessions return 401 for APIs and redirect the portal to login.
+GET /admin/inbox now redirects to the protected v2 console. There is no charge/card requirement
+for this identity flow; normal Worker resource limits still apply.

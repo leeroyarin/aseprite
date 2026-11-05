@@ -1,5 +1,6 @@
+import { verifyGithubSession, GithubAuthFailure, type GithubConfig } from "./github-auth";
 /** Verify the portal's Cloudflare Access JWT; never trust identity headers alone. */
-export interface AccessConfig {
+export interface AccessConfig extends GithubConfig {
   ACCESS_TEAM_DOMAIN?: string;
   ACCESS_AUD?: string;
   PORTAL_ADMIN_EMAIL?: string;
@@ -18,6 +19,10 @@ function decode(part: string): Record<string,unknown> {
   return value;
 }
 export async function verifyPortalAccess(request: Request, env: AccessConfig): Promise<void> {
+  if(env.PORTAL_AUTH_PROVIDER==="github") {
+    try { return await verifyGithubSession(request,env); }
+    catch(error) { if(error instanceof GithubAuthFailure)throw new AccessFailure(error.status,error.message);throw error; }
+  }
   if (!env.ACCESS_TEAM_DOMAIN || !/^[a-z0-9-]+\.cloudflareaccess\.com$/.test(env.ACCESS_TEAM_DOMAIN) ||
       !env.ACCESS_AUD || !env.PORTAL_ADMIN_EMAIL)
     throw new AccessFailure(503,"Portal Access authentication is not configured");

@@ -42,7 +42,8 @@ powershell -File tools\start-aseprite2.ps1
 - [x] Arin authorized Parts 5 and 6 together; enforcement/recovery and versioned onboarding implemented.
 - [x] 113 Worker + 33 Python tests pass; source remains record_only.
 - [x] Arin approved production deployment; Worker and seven additive D1 migrations deployed on 2026-11-05.
-- [ ] Owner Access activation needs Arin at Cloudflare billing/terms form; admin routes remain locked (503).
+- [x] Arin rejected payment setup; approved GitHub provider deployed with owner ID 298677609 (arin-avinto).
+- [ ] GitHub OAuth secret must be entered by Arin in prepared encrypted Worker field; admin stays locked.
 - [ ] Real-agent WebSocket, scheduled Cron execution and owner browser acceptance remain pending; no merge.
 
 ## Status
@@ -95,6 +96,14 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-05 — Codex: Replaced payment-gated owner Access setup with Arin-approved GitHub OAuth.
+  Only arin-avinto (numeric ID 298677609) is allowed. Added single-use state/PKCE, hashed eight-hour
+  sessions, same-origin mutation checks, logout and /admin/inbox redirect. Existing transport and
+  Access-mode regression tests pass: 127 Worker + 33 Python = 160, zero failures/skips; typecheck,
+  exact artifact and dry-run pass. Additive migration 0008 and version 4551ae52-ac2b-4db1-8857-bac7c51e86b9
+  deployed. Live native connections/inbox still return 200; login remains fail-closed until Arin
+  generates and enters the client secret in the prepared browser forms. No payment info, secrets
+  or existing agent tokens changed. See tools/agent-mesh/cloudflare-hub/docs/GITHUB-LOGIN.md.
 - 2026-11-05 — Codex: Deployed approved Agent Hub backend version e08e087c-bdc7-4077-b7db-d811e689ed7f,
   seven additive D1 migrations and five-minute Cron. Existing DO namespace and both secret bindings
   preserved. Read-only live root, legacy admin connections/inbox and per-agent v2 inbox pass.

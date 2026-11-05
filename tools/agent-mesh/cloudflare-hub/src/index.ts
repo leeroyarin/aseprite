@@ -1,3 +1,4 @@
+import { githubAuthRoute, verifyGithubSession, GithubAuthFailure } from "./github-auth";
 import { redact } from "./redaction";
 import { V2Transport, fetchV2 } from "./v2";
 
@@ -7,6 +8,10 @@ export interface Env {
   ADMIN_TOKEN?: string;
   HUB_DB?: D1Database;
   PORTAL_ORIGIN?: string;
+  PORTAL_AUTH_PROVIDER?: string;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  GITHUB_OWNER_ID?: string;
   ACCESS_TEAM_DOMAIN?: string;
   ACCESS_AUD?: string;
   PORTAL_ADMIN_EMAIL?: string;
@@ -1553,6 +1558,19 @@ export default {
     const origin = request.headers.get("Origin");
     if (origin && origin !== portalOrigin) return Response.json({error:"Origin is not allowed"},{status:403});
     const url = new URL(request.url);
+    const authResponse=await githubAuthRoute(request,env);
+    if(authResponse)return authResponse;
+    if(env.PORTAL_AUTH_PROVIDER==="github"&&request.method==="GET") {
+      if(url.pathname==="/admin/inbox")return new Response(null,{status:303,headers:{Location:"/api/v2/admin/portal","Cache-Control":"no-store"}});
+      if(url.pathname==="/api/v2/admin/portal") {
+        try { await verifyGithubSession(request,env); }
+        catch(error) {
+          if(error instanceof GithubAuthFailure && [401,503].includes(error.status))
+            return new Response(null,{status:303,headers:{Location:"/api/v2/auth/login","Cache-Control":"no-store"}});
+          return Response.json({error:"Portal authentication failed"},{status:403});
+        }
+      }
+    }
     if(url.pathname.startsWith("/api/v2/internal"))return new Response(null,{status:404});
     if (url.pathname === "/api/v2" || url.pathname.startsWith("/api/v2/") || (url.pathname==="/send"&&request.method==="POST")) {
       return fetchV2(request, portalOrigin, async (req) => {

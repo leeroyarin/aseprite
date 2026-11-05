@@ -16,6 +16,9 @@ tag = "v1"
 new_sqlite_classes = ["AgentMeshHub"]
 
 [vars]
+PORTAL_AUTH_PROVIDER = "github"
+GITHUB_CLIENT_ID = "Ov23lilesbFo3JQJo1Kf"
+GITHUB_OWNER_ID = "298677609"
 PORTAL_ORIGIN = "https://agent-mesh-hub.slack-clone-arin.workers.dev"
 
 [[d1_databases]]
