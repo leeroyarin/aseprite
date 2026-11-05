@@ -446,11 +446,10 @@ void MovingPixelsState::onCommitMouseMove(Editor* editor, const gfx::PointF& spr
 
 bool MovingPixelsState::onSetCursor(Editor* editor, const gfx::Point& mouseScreenPos)
 {
-  ASSERT(m_pixelsMovement);
   ASSERT(editor == m_editor);
 
   // Move selection
-  if (m_pixelsMovement->isDragging()) {
+  if (m_pixelsMovement && m_pixelsMovement->isDragging()) {
     editor->showMouseCursor(kMoveCursor);
     return true;
   }
@@ -896,6 +895,9 @@ void MovingPixelsState::removePixelsMovement()
 
 KeyAction MovingPixelsState::getCurrentKeyAction() const
 {
+  if (!m_pixelsMovement)
+    return KeyAction::None;
+
   KeyContext keyContext = KeyContext::Normal;
   switch (m_pixelsMovement->handle()) {
     case MovePixelsHandle: keyContext = KeyContext::TranslatingSelection; break;

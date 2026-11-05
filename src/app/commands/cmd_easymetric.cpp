@@ -948,6 +948,26 @@ static SharedSurfaceLayers findSharedLayers(doc::Sprite* spr)
   shared.baseLayer = findLayerByName(spr, "Surface_Base");
   shared.textureLayer = findLayerByName(spr, "Surface_Texture");
   shared.depthLayer = findLayerByName(spr, "Surface_DEPTH");
+
+  if (!shared.baseLayer && !shared.textureLayer) {
+    shared.baseLayer = findLayerByName(spr, "Base");
+    if (!shared.baseLayer)
+      shared.baseLayer = findLayerByName(spr, "base");
+
+    if (!shared.baseLayer) {
+      doc::LayerImage* soleImg = nullptr;
+      int imgCount = 0;
+      for (doc::Layer* lyr : spr->allLayers()) {
+        if (lyr->isImage()) {
+          soleImg = static_cast<doc::LayerImage*>(lyr);
+          imgCount++;
+        }
+      }
+      if (imgCount == 1 && soleImg) {
+        shared.baseLayer = soleImg;
+      }
+    }
+  }
   return shared;
 }
 
@@ -1140,7 +1160,11 @@ static void setupSharedSurfaceLayers(Doc* doc, bool seedStarterIfBlank,
   // see rebuildSharedSheets) instead of leaving padding/gaps
   // between the canvas and the UV mapping.
   SharedSurfaceLayers existing = findSharedLayers(spr);
-  if (existing.baseLayer && existing.textureLayer) {
+  if (existing.baseLayer || existing.textureLayer) {
+    if (existing.baseLayer && existing.baseLayer->name() != "Surface_Base" &&
+        !existing.textureLayer) {
+      existing.baseLayer->setName("Surface_Base");
+    }
     const gfx::Size exact = sharedSheetSize(spr);
     if (exact.w > 0 && (spr->width() != exact.w || spr->height() != exact.h)) {
       int w[kFaceCount], h[kFaceCount];
@@ -3524,6 +3548,8 @@ public:
           SharedSurfaceLayers shared = findSharedLayers(spr);
           if (shared.textureLayer)
             m_editors[topFace]->setLayer(shared.textureLayer);
+          else if (shared.baseLayer)
+            m_editors[topFace]->setLayer(shared.baseLayer);
           else {
             const std::string topLyrName = std::string("Surface_") + kFaceSpecs[topFace].sliceName;
             if (doc::LayerImage* lyr = findLayerByName(spr, topLyrName))

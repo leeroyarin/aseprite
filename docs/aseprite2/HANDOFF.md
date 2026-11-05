@@ -1,3 +1,8 @@
+## 2026-11-05 — Fix crash on state change cursor check + preserve single layer in Easymetric
+- Fix Access Violation crash: in `src/app/ui/editor/moving_pixels_state.cpp:453` `MovingPixelsState::onSetCursor()`, added null check for `m_pixelsMovement` before calling `isDragging()`. When leaving state on frame/layer change or command execution, `removePixelsMovement()` resets `m_pixelsMovement` before `notifyGeneralUpdate()` triggers cursor updates while state is still `MovingPixelsState`. Also added null guard in `getCurrentKeyAction()`.
+- Fix Easymetric single-layer preservation: in `src/app/commands/cmd_easymetric.cpp`, `setupSharedSurfaceLayers` previously required BOTH `existing.baseLayer && existing.textureLayer`. If user deleted extra/depth layers, it re-ran migration, recreating `Surface_Texture` and `Surface_DEPTH` and overwriting cel 0 of `Surface_Base`. Updated to `existing.baseLayer || existing.textureLayer` and added fallback in `findSharedLayers` to support a single base layer (`Surface_Base`, `Base`, or sole image layer) without adding unneeded layers or replacing existing frames/cels.
+- Verified: clean build, all 68 Easymetric E2E tests passing, installed new executable to `%LOCALAPPDATA%\Programs\Aseprite 2.0\aseprite.exe`.
+
 ## 2026-11-04 — Remove surface splitters, keep only Preview/Fields splitter (PR, draft)
 - William, 2026-11-04: resize cursor kept appearing over surface panels (including at canvas edges and slightly left of a bar), a drag could entangle drawing, and the horizontal/vertical splitters never lined up with where the bar looked to be. Sizing already lives in Fields (W/H/D, Size sliders), so surface splitters are removed entirely: no resize cursor, no drag, no painted bars for vertical boundaries 1-3 or horizontal boundaries 0-2. Surface columns are fixed equal widths, surface rows fixed equal heights.
 - Only remaining splitter is Preview/Fields (column 3, horizontal, hit area exactly the painted bar, centre grip). It is not a surface panel, so it cannot entangle a drawing stroke. Linux harness drag test: dragging that bar up shrank Preview and grew Fields, so Fields vertical resizing does work through that bar (previous per-column row splits meant dragging a surface column's bar did NOT move Fields, which is why Fields seemed not to resize).
@@ -86,6 +91,9 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-05 — Codex: Built and reinstalled the current Windows app at
+  `b9cb6c7c8`; the installed executable matches the build and remained running
+  during a launch check. No regression suites were run in this install check.
 - 2026-11-04 — Codex: Pulled `f4439b4c2` and built it with MSVC x64. Windows
   suites passed: Easymetric 68/68, adversarial 54/54, four requirements 23/23,
   texture/layer/panel 14/14, all exit 0. PR #19 was closed as superseded;
