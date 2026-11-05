@@ -11,6 +11,7 @@
 #include "app/app.h"
 #include "app/cmd/add_slice.h"
 #include "app/cmd/add_tag.h"
+#include "app/cmd/flip_image.h"
 #include "app/cmd/set_slice_key.h"
 #include "app/commands/command.h"
 #include "app/commands/commands.h"
@@ -28,6 +29,7 @@
 #include "app/ui/doc_view.h"
 #include "ui/window.h"
 #include "app/ui/editor/editor.h"
+#include "app/ui/editor/editor_observer.h"
 #include "app/ui/editor/standby_state.h"
 #include "doc/mask.h"
 #include "app/ui/editor/editor_view.h"
@@ -36,6 +38,7 @@
 #include "app/ui_context.h"
 #include "app/util/conversion_to_surface.h"
 #include "base/fs.h"
+#include "doc/algorithm/flip_type.h"
 #include "doc/cel.h"
 #include "doc/cels_range.h"
 #include "doc/color.h"
@@ -1715,6 +1718,77 @@ private:
   bool m_linked;
 };
 
+// Small text action button for a panel header (Link / Sym X / Sym Y /
+// Flip H / Flip V). Same visual family as LinkToggleButton: blue when
+// ON (toggle), slate when off. Action buttons (Flip) are momentary —
+// they have no persistent state, they just run on Click.
+class PaneActionButton : public ui::Button {
+public:
+  PaneActionButton(const std::string& label, bool isToggle)
+    : ui::Button(label)
+    , m_isToggle(isToggle)
+    , m_on(false)
+  {
+    setFocusStop(false);
+  }
+
+  bool isOn() const { return m_on; }
+
+  void setOn(bool on)
+  {
+    if (!m_isToggle)
+      return;
+    if (m_on != on) {
+      m_on = on;
+      setSelected(on);
+      invalidate();
+    }
+  }
+
+protected:
+  void onSizeHint(ui::SizeHintEvent& ev) override
+  {
+    // Base Button measures the label text; keep its width, but force
+    // the compact LinkToggleButton height so a row of them fits.
+    ui::Button::onSizeHint(ev);
+    gfx::Size sz = ev.sizeHint();
+    const int s = ui::guiscale();
+    sz.h = 14 * s;
+    ev.setSizeHint(sz);
+  }
+
+  void onPaint(ui::PaintEvent& ev) override
+  {
+    ui::Graphics* g = ev.graphics();
+    const gfx::Rect rc = clientBounds();
+
+    gfx::Color bg, borderCol, textCol;
+    if (m_isToggle && m_on) {
+      bg = hasMouse() ? gfx::rgba(14, 165, 233) : gfx::rgba(2, 132, 199);
+      borderCol = gfx::rgba(56, 189, 248);
+      textCol = gfx::rgba(255, 255, 255);
+    }
+    else {
+      bg = hasMouse() ? gfx::rgba(100, 116, 139) : gfx::rgba(64, 78, 94);
+      borderCol = hasMouse() ? gfx::rgba(148, 163, 184) : gfx::rgba(45, 55, 66);
+      textCol = hasMouse() ? gfx::rgba(241, 245, 249) : gfx::rgba(180, 195, 210);
+    }
+
+    g->fillRect(bg, rc);
+    g->drawRect(borderCol, rc);
+    const gfx::Size textSz = g->measureText(text());
+    g->drawText(text(),
+                textCol,
+                gfx::ColorNone,
+                gfx::Point(rc.x + (rc.w - textSz.w) / 2,
+                           rc.y + (rc.h - textSz.h) / 2));
+  }
+
+private:
+  bool m_isToggle;
+  bool m_on;
+};
+
 // Folder-tab ear header bar matching reference UI
 class PaneHeader : public ui::Widget {
 public:
@@ -1751,6 +1825,18 @@ public:
       addChild(btn);
   }
 
+  // Panel action buttons (Link / Sym X / Sym Y / Flip H / Flip V).
+  // Added in priority order: index 0 is laid out rightmost (after the
+  // dimension-link button, if any) and survives longest when the
+  // header is too narrow; later ones hide first.
+  void addActionButton(PaneActionButton* btn)
+  {
+    if (!btn)
+      return;
+    m_actionButtons.push_back(btn);
+    addChild(btn);
+  }
+
 protected:
   void onSizeHint(ui::SizeHintEvent& ev) override
   {
@@ -1760,15 +1846,41 @@ protected:
   void onResize(ui::ResizeEvent& ev) override
   {
     setBoundsQuietly(ev.bounds());
+    const gfx::Rect rc = childrenBounds();
+    const int s = ui::guiscale();
+    const int btnH = 14 * s;
+    const int gap = 2 * s;
+    // Right edge for the next button, moving left as buttons are placed.
+    int right = rc.x + rc.w - 3 * s;
     if (m_linkBtn) {
-      const gfx::Rect rc = childrenBounds();
-      const int s = ui::guiscale();
       const int btnW = 20 * s;
-      const int btnH = 14 * s;
-      m_linkBtn->setBounds(gfx::Rect(rc.x + rc.w - btnW - 3 * s,
+      m_linkBtn->setBounds(gfx::Rect(right - btnW,
                                      rc.y + (rc.h - btnH) / 2,
                                      btnW,
                                      btnH));
+      right -= btnW + gap;
+    }
+    // Action buttons, right-to-left in priority order. A button is
+    // hidden (and every lower-priority one after it) when its left
+    // edge would cross into the title tab plus a small margin.
+    // The tab is at least 48*guiscale wide (see onPaint), which is
+    // within a few px of its real width for the short face names.
+    const int minLeft = rc.x + 48 * s + 4 * s;
+    for (PaneActionButton* btn : m_actionButtons) {
+      if (!btn)
+        continue;
+      const int btnW = btn->sizeHint().w;
+      const int left = right - btnW;
+      if (left < minLeft) {
+        btn->setVisible(false);
+        continue;
+      }
+      btn->setVisible(true);
+      btn->setBounds(gfx::Rect(left,
+                                rc.y + (rc.h - btnH) / 2,
+                                btnW,
+                                btnH));
+      right = left - gap;
     }
   }
 
@@ -1792,18 +1904,9 @@ protected:
       g->fillRect(m_accentCol, gfx::Rect(tabRc.x + 1, tabRc.y + 1, 3 * s, tabRc.h - 2));
     }
 
-    // Grip dots ":::"
-    const int rightReserve = (m_linkBtn ? 26 * s : 4 * s);
-    if (rc.w > tabW + rightReserve + 16 * s) {
-      const int availableSpace = rc.w - tabW - rightReserve;
-      const int gx = rc.x + tabW + availableSpace / 2 - 4 * s;
-      const int gy = rc.y + rc.h / 2 - 1 * s;
-      const gfx::Color dotCol = gfx::rgba(45, 55, 66);
-      for (int dx = 0; dx < 3; ++dx) {
-        g->fillRect(dotCol, gfx::Rect(gx + dx * 3 * s, gy, s, s));
-        g->fillRect(dotCol, gfx::Rect(gx + dx * 3 * s, gy + 2 * s, s, s));
-      }
-    }
+    // No grip dots: the header's dead space is now panel action
+    // buttons (Link / Sym X / Sym Y / Flip H / Flip V), laid out
+    // as children in onResize.
 
     g->drawText(m_title,
                 gfx::rgba(255, 255, 255),
@@ -1817,6 +1920,7 @@ private:
   gfx::Color m_accentCol;
   bool m_active;
   LinkToggleButton* m_linkBtn;
+  std::vector<PaneActionButton*> m_actionButtons;
 };
 
 class FacePaneBox : public ui::VBox {
@@ -3200,7 +3304,7 @@ static bool sculptDepthDabOnDoc(app::Doc* doc, doc::frame_t fr, int face,
   }
 }
 
-class EasymetricMultiPaneView : public ui::Widget {
+class EasymetricMultiPaneView : public ui::Widget, public EditorObserver {
 public:
   EasymetricMultiPaneView(DocView* docView)
     : ui::Widget(ui::kGenericWidget)
@@ -3241,6 +3345,38 @@ public:
     for (int f = 0; f < kFaceCount; ++f) {
       m_headers[f] = new PaneHeader(kFaceSpecs[f].displayName,
                                     gfx::rgba(kFaceSpecs[f].r, kFaceSpecs[f].g, kFaceSpecs[f].b));
+
+      // Panel action buttons, replacing the dead six-dot gripper.
+      // Added in priority order (rightmost first): Link, Sym X,
+      // Sym Y, Flip H, Flip V. The header hides lower-priority
+      // ones when it is too narrow. Labels are abbreviated (SX =
+      // Symmetry X, SY = Symmetry Y, FH = Flip Horizontal, FV =
+      // Flip Vertical) so all five fit in a face header alongside
+      // the title tab and, on top faces, the dimension-link button;
+      // the Fields panel still shows the full "Sym X"/"Sym Y" names.
+      m_animLinkButtons[f] = new PaneActionButton("Link", true);
+      m_animLinkButtons[f]->setOn(true);
+      m_animLinkButtons[f]->Click.connect([this, f] {
+        setAnimLinked(f, !m_animLinked[f]);
+      });
+      m_headers[f]->addActionButton(m_animLinkButtons[f]);
+
+      m_symXButtons[f] = new PaneActionButton("SX", true);
+      m_symXButtons[f]->Click.connect([this] { toggleSymmetryAxis(true); });
+      m_headers[f]->addActionButton(m_symXButtons[f]);
+
+      m_symYButtons[f] = new PaneActionButton("SY", true);
+      m_symYButtons[f]->Click.connect([this] { toggleSymmetryAxis(false); });
+      m_headers[f]->addActionButton(m_symYButtons[f]);
+
+      m_flipHButtons[f] = new PaneActionButton("FH", false);
+      m_flipHButtons[f]->Click.connect([this, f] { flipFace(f, true); });
+      m_headers[f]->addActionButton(m_flipHButtons[f]);
+
+      m_flipVButtons[f] = new PaneActionButton("FV", false);
+      m_flipVButtons[f]->Click.connect([this, f] { flipFace(f, false); });
+      m_headers[f]->addActionButton(m_flipVButtons[f]);
+
       Editor* ed = nullptr;
       ui::View* view = m_docView->createPaneEditorView(&ed);
       // Scrollbars on: each surface panel must be scrollable
@@ -3324,6 +3460,16 @@ public:
     m_headers[2]->setLinkButton(m_linkButtons[1]);
     m_headers[4]->setLinkButton(m_linkButtons[2]);
 
+    // Animation link: follow frame changes on every panel editor so
+    // linked panels stay on the active editor's frame and unlinked
+    // ones stay pinned. Unregistered in the destructor.
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (m_editors[f]) {
+        m_animPinnedFrame[f] = m_editors[f]->frame();
+        m_editors[f]->add_observer(this);
+      }
+    }
+
     // 2. Column 4 Row 0: Preview Pane
     m_headers[kFaceCount] = new PaneHeader("Preview");
     m_previewWidget = new EasymetricPreviewWidget;
@@ -3380,6 +3526,12 @@ public:
   ~EasymetricMultiPaneView() override
   {
     m_timer.stop();
+    // Animation link: unregister first, so a later frame change on a
+    // surviving panel editor can never call back into this dead view.
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (m_editors[f])
+        m_editors[f]->remove_observer(this);
+    }
     // A popped-out preview is a separate top-level window that
     // owns no studio members, but it does hold the preview
     // widget: dock it back first, then delete the window,
@@ -3580,6 +3732,211 @@ public:
         m_editors[f]->fitClipSpriteBounds();
     }
     invalidate();
+    m_lastHash = 0;
+    pollAndRender(true);
+  }
+
+  // --- Panel action buttons ---
+
+  // EditorObserver: keep linked panels on the active editor's frame
+  // and unlinked ones pinned. setFrame is a no-op when the frame is
+  // already equal, so the sync below cannot loop.
+  void onAfterFrameChanged(Editor* editor) override
+  {
+    if (!editor || !m_docView)
+      return;
+    int face = -1;
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (m_editors[f] == editor) { face = f; break; }
+    }
+    if (face < 0)
+      return;
+    const doc::frame_t newFrame = editor->frame();
+    Editor* activeEd = m_docView->editor();
+    if (editor == activeEd) {
+      // User intent (or playback on the active editor): this frame
+      // is the new reference. An unlinked active panel adopts it as
+      // its new pinned frame; every LINKED panel follows it.
+      if (!m_animLinked[face])
+        m_animPinnedFrame[face] = newFrame;
+      for (int f = 0; f < kFaceCount; ++f) {
+        if (f == face || !m_animLinked[f] || !m_editors[f])
+          continue;
+        if (m_editors[f]->frame() != newFrame)
+          m_editors[f]->setFrame(newFrame);
+      }
+    }
+    else {
+      // Not the active editor. An unlinked panel that is not itself
+      // the playback editor stays pinned: restore it. This also
+      // catches DocView::setActivePaneEditor, which forces the
+      // clicked panel to the old active frame BEFORE making it
+      // active — restoring inside this handler is flicker-free.
+      // A linked panel needs nothing (the active editor already
+      // synced it). An unlinked panel that IS the playback editor
+      // still advances during playback: PlayState drives the editor
+      // captured at Play start, and pinning it would need an
+      // upstream timeline/playback change (out of scope).
+      if (!m_animLinked[face] && !editor->isPlaying() &&
+          editor->frame() != m_animPinnedFrame[face]) {
+        editor->setFrame(m_animPinnedFrame[face]);
+      }
+    }
+  }
+
+  void setAnimLinked(int face, bool linked)
+  {
+    if (face < 0 || face >= kFaceCount)
+      return;
+    m_animLinked[face] = linked;
+    if (m_animLinkButtons[face])
+      m_animLinkButtons[face]->setOn(linked);
+    if (linked) {
+      // Re-link: sync immediately to the active editor's frame.
+      Editor* activeEd = m_docView ? m_docView->editor() : nullptr;
+      if (activeEd && m_editors[face] &&
+          m_editors[face]->frame() != activeEd->frame()) {
+        m_editors[face]->setFrame(activeEd->frame());
+      }
+    }
+    else {
+      // Unlink: pin the panel at its current frame.
+      if (m_editors[face])
+        m_animPinnedFrame[face] = m_editors[face]->frame();
+    }
+  }
+
+  // Symmetry is document-wide, so a Sym X/Y header button toggles
+  // the same document bit as the Fields checkbox, and every header
+  // button plus both Fields checkboxes show the new state.
+  void toggleSymmetryAxis(bool isX)
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    if (!doc || !doc->sprite())
+      return;
+    auto& docPref = Preferences::instance().document(doc);
+    int mode = int(docPref.symmetry.mode());
+    const int bit = isX ? int(app::gen::SymmetryMode::HORIZONTAL)
+                        : int(app::gen::SymmetryMode::VERTICAL);
+    mode ^= bit;
+    applySymmetryState(
+      (mode & int(app::gen::SymmetryMode::HORIZONTAL)) != 0,
+      (mode & int(app::gen::SymmetryMode::VERTICAL)) != 0,
+      false);
+  }
+
+  void applySymmetryState(bool symX, bool symY, bool recenter)
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    if (!doc || !doc->sprite())
+      return;
+    auto& pref = Preferences::instance();
+    auto& docPref = pref.document(doc);
+    int mode = int(app::gen::SymmetryMode::NONE);
+    if (symX)
+      mode |= int(app::gen::SymmetryMode::HORIZONTAL);
+    if (symY)
+      mode |= int(app::gen::SymmetryMode::VERTICAL);
+    if (mode != int(app::gen::SymmetryMode::NONE))
+      pref.symmetryMode.enabled(true);
+    docPref.symmetry.mode(static_cast<app::gen::SymmetryMode>(mode));
+
+    const int sprW = doc->sprite()->width();
+    const int sprH = doc->sprite()->height();
+    if (recenter ||
+        docPref.symmetry.xAxis() < 0 || docPref.symmetry.xAxis() > sprW ||
+        docPref.symmetry.yAxis() < 0 || docPref.symmetry.yAxis() > sprH) {
+      docPref.symmetry.xAxis(sprW * 0.5);
+      docPref.symmetry.yAxis(sprH * 0.5);
+    }
+
+    if (m_symXCheck)
+      m_symXCheck->setSelected(symX);
+    if (m_symYCheck)
+      m_symYCheck->setSelected(symY);
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (m_symXButtons[f])
+        m_symXButtons[f]->setOn(symX);
+      if (m_symYButtons[f])
+        m_symYButtons[f]->setOn(symY);
+    }
+    for (Editor* ed : m_editors) {
+      if (ed)
+        ed->invalidate();
+    }
+  }
+
+  // Read the document's symmetry mode and show it in the Fields
+  // checkboxes and every header Sym button. Called once after the
+  // Fields controls are built, so the studio opens consistent with
+  // the document instead of always showing symmetry off.
+  void syncSymmetryButtons()
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    if (!doc || !doc->sprite())
+      return;
+    auto& docPref = Preferences::instance().document(doc);
+    const int mode = int(docPref.symmetry.mode());
+    const bool symX = (mode & int(app::gen::SymmetryMode::HORIZONTAL)) != 0;
+    const bool symY = (mode & int(app::gen::SymmetryMode::VERTICAL)) != 0;
+    if (m_symXCheck)
+      m_symXCheck->setSelected(symX);
+    if (m_symYCheck)
+      m_symYCheck->setSelected(symY);
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (m_symXButtons[f])
+        m_symXButtons[f]->setOn(symX);
+      if (m_symYButtons[f])
+        m_symYButtons[f]->setOn(symY);
+    }
+  }
+
+  // Mirror one face's pixels within its UV rect, on the CURRENT
+  // frame, on every shared layer that has a cel on that frame
+  // (Base, Texture, Depth), in one transaction = one undo. Slice
+  // bounds are unchanged. The preview refreshes via the poll.
+  void flipFace(int face, bool horizontal)
+  {
+    if (face < 0 || face >= kFaceCount)
+      return;
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    if (!doc || !doc->sprite())
+      return;
+    doc::Sprite* spr = doc->sprite();
+    const gfx::Rect faceRect = sharedFaceRect(spr, face);
+    if (faceRect.isEmpty())
+      return;
+    const doc::frame_t fr =
+      (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
+    SharedSurfaceLayers shared = findSharedLayers(spr);
+    doc::LayerImage* layers[3] = {
+      shared.baseLayer, shared.textureLayer, shared.depthLayer
+    };
+    bool any = false;
+    for (doc::LayerImage* lyr : layers) {
+      if (lyr && lyr->cel(fr) && lyr->cel(fr)->image()) {
+        any = true;
+        break;
+      }
+    }
+    if (!any)
+      return;
+    Tx tx(doc,
+          horizontal ? "Flip Easymetric Face Horizontally"
+                     : "Flip Easymetric Face Vertically",
+          ModifyDocument);
+    const doc::algorithm::FlipType type = horizontal
+      ? doc::algorithm::FlipHorizontal
+      : doc::algorithm::FlipVertical;
+    for (doc::LayerImage* lyr : layers) {
+      if (!lyr)
+        continue;
+      doc::Cel* cel = lyr->cel(fr);
+      if (!cel || !cel->image())
+        continue;
+      tx(new cmd::FlipImage(cel->image(), faceRect, type));
+    }
+    tx.commit();
     m_lastHash = 0;
     pollAndRender(true);
   }
@@ -4671,39 +5028,24 @@ private:
       }
     });
 
+    // Fields checkboxes and header Sym buttons share one state (see
+    // applySymmetryState): the checkbox Click reads its own new
+    // state and applies it everywhere.
     auto applySymmetry = [this](bool recenter) {
-      Doc* doc = m_docView->document();
-      if (!doc || !doc->sprite()) return;
-      auto& pref = Preferences::instance();
-      auto& docPref = pref.document(doc);
-      int mode = int(app::gen::SymmetryMode::NONE);
-      if (m_symXCheck->isSelected()) mode |= int(app::gen::SymmetryMode::HORIZONTAL);
-      if (m_symYCheck->isSelected()) mode |= int(app::gen::SymmetryMode::VERTICAL);
-      if (mode != int(app::gen::SymmetryMode::NONE))
-        pref.symmetryMode.enabled(true);
-      docPref.symmetry.mode(static_cast<app::gen::SymmetryMode>(mode));
-
-      Editor* curEd = m_docView->editor();
-      int activeFace = 0;
-      for (int f = 0; f < kFaceCount; ++f) {
-        if (m_editors[f] == curEd) { activeFace = f; break; }
-      }
-      const int sprW = doc->sprite()->width();
-      const int sprH = doc->sprite()->height();
-      if (recenter ||
-          docPref.symmetry.xAxis() < 0 || docPref.symmetry.xAxis() > sprW ||
-          docPref.symmetry.yAxis() < 0 || docPref.symmetry.yAxis() > sprH) {
-        docPref.symmetry.xAxis(sprW * 0.5);
-        docPref.symmetry.yAxis(sprH * 0.5);
-      }
-      for (Editor* ed : m_editors) {
-        if (ed) ed->invalidate();
-      }
+      if (!m_symXCheck || !m_symYCheck)
+        return;
+      applySymmetryState(m_symXCheck->isSelected(),
+                         m_symYCheck->isSelected(),
+                         recenter);
     };
 
     m_symXCheck->Click.connect([applySymmetry] { applySymmetry(false); });
     m_symYCheck->Click.connect([applySymmetry] { applySymmetry(false); });
     centerSymBtn->Click.connect([applySymmetry] { applySymmetry(true); });
+
+    // Show the document's actual symmetry mode in the Fields
+    // checkboxes and the header Sym buttons on open.
+    syncSymmetryButtons();
 
     genFaceDepthBtn->Click.connect([this] { generateEditableFaceDepthLayer(); });
     renderBtn->Click.connect([this] { bakeToActiveDocLayers(); });
@@ -5551,6 +5893,22 @@ private:
   std::array<ui::View*, kFaceCount> m_views;
   std::array<LinkToggleButton*, 3> m_linkButtons;
   std::array<bool, 3> m_colLinked = { false, false, false };
+
+  // Panel action buttons, one set per face header (priority order in
+  // each header: Link, Sym X, Sym Y, Flip H, Flip V).
+  std::array<PaneActionButton*, kFaceCount> m_animLinkButtons = {};
+  std::array<PaneActionButton*, kFaceCount> m_symXButtons = {};
+  std::array<PaneActionButton*, kFaceCount> m_symYButtons = {};
+  std::array<PaneActionButton*, kFaceCount> m_flipHButtons = {};
+  std::array<PaneActionButton*, kFaceCount> m_flipVButtons = {};
+
+  // Animation link: per-panel follow state (default linked) and the
+  // frame an unlinked panel is pinned to. See onAfterFrameChanged.
+  std::array<bool, kFaceCount> m_animLinked = { true, true, true, true, true, true };
+  std::array<doc::frame_t, kFaceCount> m_animPinnedFrame = {
+    doc::frame_t(0), doc::frame_t(0), doc::frame_t(0),
+    doc::frame_t(0), doc::frame_t(0), doc::frame_t(0)
+  };
 
   // Preview & Fields
   EasymetricPreviewWidget* m_previewWidget = nullptr;
