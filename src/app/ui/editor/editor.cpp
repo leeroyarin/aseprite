@@ -2889,6 +2889,25 @@ bool Editor::keepTimelineRange()
 
 EditorHit Editor::calcHit(const gfx::Point& mouseScreenPos)
 {
+  // Aseprite 2.0, Easymetric panels only: never hit-test slice
+  // borders in a clipped editor. clipSpriteBounds is only set
+  // by Easymetric surface panels, and every Easymetric face IS
+  // a document slice (its bounds are the face UV rect). Without
+  // this, hovering within 4*guiscale of a face edge returned
+  // SliceBounds, so StandbyState showed a resize cursor there
+  // (BOTTOM = the vertical double-arrow in William's 2026-11-05
+  // screenshot, build b9cb6c7c8, at the bottom edge of the Top
+  // face) and a drag there started MovingSliceState, resizing
+  // the slice / face from the canvas. Sizing lives in Fields
+  // only (W/H/D, Size sliders) — never from a canvas edge.
+  // This returns None, so the cursor falls through to the
+  // normal brush preview and a click there starts drawing,
+  // not a slice drag. Slice borders are still drawn, only
+  // their hit-test is off, and the main editor (empty clip)
+  // is unchanged.
+  if (!m_clipSpriteBounds.isEmpty())
+    return EditorHit(EditorHit::None);
+
   tools::Ink* ink = getCurrentEditorInk();
 
   if (ink && m_sprite) {
