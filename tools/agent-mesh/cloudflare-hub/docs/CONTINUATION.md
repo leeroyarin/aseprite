@@ -1,6 +1,6 @@
 # Agent Hub unfinished branch handoff
 
-Status: INCOMPLETE. Parts 1-6 are implemented. Production deployment and real-agent/browser verification remain required.
+Status: INCOMPLETE. Parts 1-6 are deployed; owner Access setup and real-agent/browser acceptance remain required. See DEPLOYMENT-2026-11-05.md.
 Source repository: https://github.com/leeroyarin/aseprite
 Work branch: codex/agent-hub-v2-step1
 Baseline tag: agent-mesh-hub-v2.1.0-baseline-20261105 at 70fcbdd51 (source baseline only).
@@ -15,8 +15,10 @@ Preserve concurrent work and do not reset the shared Aseprite checkout or alter 
 
 The implementation lives in tools/agent-mesh/cloudflare-hub. Original shared checkout has
 pre-existing third_party/fmt content and .wrangler/; those are unrelated and excluded.
-No production deploy, D1 provisioning/migration, Access change, secret rotation or local server
-retirement has occurred. The Worker name/address and existing native endpoints must stay intact.
+Arin approved production deployment and free owner Access setup. The Worker is deployed and all
+seven additive D1 migrations are applied. Access activation stopped at a payment/overage-terms form,
+which Arin must complete. No secret rotation or local-server retirement occurred. Preserve the
+Worker name/address, existing native endpoints and DO namespace.
 
 ## Completed
 
@@ -45,8 +47,9 @@ No test result proves production or actual agent adoption. Never use live tokens
 Parts 5 and 6 were authorized together and are implemented. See PART5-6-REVIEW.md and
 ONBOARDING.md. Record-only remains the source default. No production enforcement was enabled.
 
-1. Obtain separate approval for production resources/configuration/deployment; apply all seven
-   additive migrations, configure owner Access and same-origin portal, preserve native edge access.
+1. Arin must complete the Cloudflare Zero Trust Free billing/terms form left open in Brave.
+   Then configure owner-only Access for /api/v2/admin/* and actual team domain/audience/email vars;
+   keep native routes outside Access. The backend and seven migrations are already deployed.
 2. Publish the real rule book and per-project onboarding after reviewing existing connection notes.
 3. Verify actual Access/browser flow, Cron, native Muse/arin-pc traffic, enrollment and cloud parity.
 4. Retire the local prototype only after approved real cloud cutover. Earlier React design
@@ -57,5 +60,6 @@ ONBOARDING.md. Record-only remains the source default. No production enforcement
 Usage is reported, not privately inferred. Unknown remains unknown. Initial warning is <=15%
 remaining; freshness is 10 minutes. Remote-ref/test/checkout evidence is also agent-reported,
 not independently verified by the hub. Pushing a branch does not prove task completion.
-Do not merge or deploy this incomplete branch. Read docs/USER-REQUIREMENTS.md as task authority,
+Do not merge this incomplete branch or enable enforcement. Production deployment was authorized;
+Access configuration remains blocked on the billing form. Read docs/USER-REQUIREMENTS.md as task authority,
 API.md for contracts and PART5-6-REVIEW.md for scope/limitations. Record exact failures and blockers.

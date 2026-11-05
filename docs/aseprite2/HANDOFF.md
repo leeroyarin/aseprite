@@ -41,8 +41,9 @@ powershell -File tools\start-aseprite2.ps1
 - [x] Part 4 enrollment/logger/private challenges: 109 Worker + 32 Python tests, typecheck/artifact/dry-run.
 - [x] Arin authorized Parts 5 and 6 together; enforcement/recovery and versioned onboarding implemented.
 - [x] 113 Worker + 33 Python tests pass; source remains record_only.
-- [ ] Production approval and actual cloud/agent/browser parity remain pending; see PART5-6-REVIEW.md.
-- [ ] Production resource/configuration changes and merge/deploy remain separately approval-gated.
+- [x] Arin approved production deployment; Worker and seven additive D1 migrations deployed on 2026-11-05.
+- [ ] Owner Access activation needs Arin at Cloudflare billing/terms form; admin routes remain locked (503).
+- [ ] Real-agent WebSocket, scheduled Cron execution and owner browser acceptance remain pending; no merge.
 
 ## Status
 - [x] **Phase 0** docs (AGENTS.md, docs/aseprite2/*) — fully completed and current
@@ -94,6 +95,13 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-05 — Codex: Deployed approved Agent Hub backend version e08e087c-bdc7-4077-b7db-d811e689ed7f,
+  seven additive D1 migrations and five-minute Cron. Existing DO namespace and both secret bindings
+  preserved. Read-only live root, legacy admin connections/inbox and per-agent v2 inbox pass.
+  Record-only default verified; owner routes fail closed until Access is configured. Free Zero Trust
+  activation requires user payment details/overage terms; left form open for Arin. Existing native
+  sockets reported zero at the check; live agent reconnect and Cron invocation are unverified.
+  See tools/agent-mesh/cloudflare-hub/docs/DEPLOYMENT-2026-11-05.md. No local server retired.
 - 2026-11-05 — Codex: Implemented Parts 5 and 6 together as Arin requested. Owner-only immutable
   enrollment settings/grace, enforce gates/socket closure, periodic fresh proofs and private recovery;
   real-rulebook onboarding revisions preserve custom Connect your agent and require connection +
