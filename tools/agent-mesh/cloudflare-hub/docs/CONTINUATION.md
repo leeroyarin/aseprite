@@ -1,6 +1,6 @@
 # Agent Hub unfinished branch handoff
 
-Status: INCOMPLETE. Parts 1-6 are deployed; GitHub credential activation and real-agent/browser acceptance remain required. See DEPLOYMENT-2026-11-05.md.
+Status: INCOMPLETE. Parts 1-6 are deployed; GitHub owner login and portal/SSE verified live; real-agent/Cron acceptance remains required. See DEPLOYMENT-2026-11-05.md.
 Source repository: https://github.com/leeroyarin/aseprite
 Work branch: codex/agent-hub-v2-step1
 Baseline tag: agent-mesh-hub-v2.1.0-baseline-20261105 at 70fcbdd51 (source baseline only).
@@ -17,7 +17,8 @@ The implementation lives in tools/agent-mesh/cloudflare-hub. Original shared che
 pre-existing third_party/fmt content and .wrangler/; those are unrelated and excluded.
 Arin approved production deployment and free owner Access setup. The Worker is deployed and all
 seven additive D1 migrations are applied. Arin rejected payment setup and approved GitHub login instead. The new provider is deployed;
-Arin must enter the new OAuth client secret directly into Cloudflare. See GITHUB-LOGIN.md. No secret rotation or local-server retirement occurred. Preserve the
+Arin entered the OAuth client secret directly into Cloudflare; live owner login and portal/SSE are
+verified. See GITHUB-LOGIN.md. No secret rotation or local-server retirement occurred. Preserve the
 Worker name/address, existing native endpoints and DO namespace.
 
 ## Completed
@@ -47,11 +48,12 @@ No test result proves production or actual agent adoption. Never use live tokens
 Parts 5 and 6 were authorized together and are implemented. See PART5-6-REVIEW.md and
 ONBOARDING.md. Record-only remains the source default. No production enforcement was enabled.
 
-1. Complete the GitHub secret-entry handoff in docs/GITHUB-LOGIN.md. Owner account is arin-avinto
-   (298677609), explicitly confirmed by Arin. Eight migrations and the GitHub-provider code are
-   deployed. Never return to the rejected Cloudflare payment setup or relax owner authentication.
+1. GitHub sign-in is activated and verified for arin-avinto (298677609). Eight migrations and the
+   provider code are deployed. Preserve the encrypted secret and owner restriction; no payment
+   setup is needed. See GITHUB-LOGIN.md for the current deployed version and live evidence.
 2. Publish the real rule book and per-project onboarding after reviewing existing connection notes.
-3. Verify actual GitHub owner login/browser flow, Cron, native Muse/arin-pc traffic, enrollment and cloud parity.
+3. Verify Cron, native Muse/arin-pc traffic, enrollment and cloud parity. Owner login/browser/SSE
+   initialization have passed live verification.
 4. Retire the local prototype only after approved real cloud cutover. Earlier React design
    integration remains separate; this branch serves a functional Worker console.
 
@@ -61,5 +63,5 @@ Usage is reported, not privately inferred. Unknown remains unknown. Initial warn
 remaining; freshness is 10 minutes. Remote-ref/test/checkout evidence is also agent-reported,
 not independently verified by the hub. Pushing a branch does not prove task completion.
 Do not merge this incomplete branch or enable enforcement. Production deployment was authorized;
-GitHub activation remains blocked on the user credential-entry step. Read docs/USER-REQUIREMENTS.md as task authority,
+GitHub activation is complete; real-agent and Cron acceptance remains outstanding. Read docs/USER-REQUIREMENTS.md as task authority,
 API.md for contracts and PART5-6-REVIEW.md for scope/limitations. Record exact failures and blockers.

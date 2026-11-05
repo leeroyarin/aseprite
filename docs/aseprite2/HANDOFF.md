@@ -43,8 +43,8 @@ powershell -File tools\start-aseprite2.ps1
 - [x] 113 Worker + 33 Python tests pass; source remains record_only.
 - [x] Arin approved production deployment; Worker and seven additive D1 migrations deployed on 2026-11-05.
 - [x] Arin rejected payment setup; approved GitHub provider deployed with owner ID 298677609 (arin-avinto).
-- [ ] GitHub OAuth secret must be entered by Arin in prepared encrypted Worker field; admin stays locked.
-- [ ] Real-agent WebSocket, scheduled Cron execution and owner browser acceptance remain pending; no merge.
+- [x] Arin entered encrypted OAuth secret; actual arin-avinto login, portal assets/data and SSE verified live.
+- [ ] Real-agent WebSocket and scheduled Cron execution acceptance remain pending; no merge.
 
 ## Status
 - [x] **Phase 0** docs (AGENTS.md, docs/aseprite2/*) — fully completed and current
@@ -96,6 +96,14 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-05 — Codex: Verified user-completed encrypted GitHub credential setup without retrieving
+  any secret. Actual arin-avinto authorization/callback succeeds; live owner portal shows active
+  stream, 50 existing mesh messages and no UI errors. Anonymous admin session denied (401), login
+  page 200, GitHub-start 303, original authenticated connections and agent inbox both 200. Current
+  dashboard version 2fa814ad-2537-4512-901a-62d829416881 preserves the DO namespace. Owner login is
+  activated without Cloudflare Access payment setup. No test messages, policy changes or project
+  fixtures created. Native WebSocket/Cron acceptance remains separate. See docs/GITHUB-LOGIN.md
+  under tools/agent-mesh/cloudflare-hub for evidence and outstanding production checks.
 - 2026-11-05 — Codex: Replaced payment-gated owner Access setup with Arin-approved GitHub OAuth.
   Only arin-avinto (numeric ID 298677609) is allowed. Added single-use state/PKCE, hashed eight-hour
   sessions, same-origin mutation checks, logout and /admin/inbox redirect. Existing transport and

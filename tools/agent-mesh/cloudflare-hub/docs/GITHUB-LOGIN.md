@@ -13,17 +13,15 @@ No Cloudflare Access subscription, payment details or terms acceptance was submi
 - GITHUB_CLIENT_ID=Ov23lilesbFo3JQJo1Kf (public application ID).
 - GITHUB_OWNER_ID=298677609 (arin-avinto, confirmed by Arin).
 - PORTAL_ORIGIN=https://agent-mesh-hub.slack-clone-arin.workers.dev.
-- GITHUB_CLIENT_SECRET must be entered by Arin into an encrypted Worker secret, never source,
+- GITHUB_CLIENT_SECRET was entered by Arin into an encrypted Worker secret, never source,
   a command argument, logs or chat. Existing HUB_TOKEN and other secrets stay unchanged.
 
 GitHub application: https://github.com/settings/applications/3994841
 Callback: https://agent-mesh-hub.slack-clone-arin.workers.dev/api/v2/auth/github/callback
 
-Arin must click Generate a new client secret in the GitHub application, copy it directly into the
-prepared Cloudflare GITHUB_CLIENT_SECRET Value field (Secret checked; Production only), and click
-Add 1 variable and deploy. These tabs are left open for credential-entry handoff. Do not inspect
-or screenshot a revealed secret. Browser credential security requires user entry/submission.
-Afterward sign in as arin-avinto, not the app-registration account leeroyarin.
+Arin completed client-secret generation and encrypted Worker entry, then confirmed done.
+Credential presence was verified through binding metadata only; its value was never retrieved.
+Sign in as arin-avinto, not the app-registration account leeroyarin.
 
 ## Routes and security
 
@@ -63,3 +61,23 @@ owner browser session/CSRF/logout/SSE and wrong-account rejection are tested loc
 Arin's credential entry and real login. Do not claim authentication activation is complete yet.
 
 Provider reference: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps
+
+
+## Activation verified after Arin completed credential entry
+
+Current dashboard-deployed version: 2fa814ad-2537-4512-901a-62d829416881.
+Deployment: 4e5e7f09-3b03-405f-9bd3-ddcef2214254, at 100%.
+Metadata confirms provider github, owner ID 298677609, encrypted GITHUB_CLIENT_SECRET presence,
+and the preserved DO namespace. No credential value read or logged.
+
+Five live HTTP checks passed: login page 200; GitHub-start 303 to github.com; unauthenticated admin
+session 401; existing admin /connections 200; existing per-agent v2 inbox 200.
+Real browser flow selected arin-avinto from GitHub's account picker and authorized the registered
+app with Public data only. Callback returned to the protected portal successfully. Portal UI
+showed Live connection active, empty error text, 50 real mesh history entries and zero project
+options (no fabricated projects). This verifies actual client-secret exchange, permitted owner
+identity, browser session, authenticated portal assets/data and SSE initialization end to end.
+The authenticated portal tab is left open for Arin. No messages sent, policies enabled or projects
+created for verification. Live logout, session expiry, wrong-owner rejection and CSRF denial remain
+covered by local runtime tests, not additional production mutations. Native agent WebSocket and
+scheduled Cron execution acceptance remain separate from this owner-login check.
