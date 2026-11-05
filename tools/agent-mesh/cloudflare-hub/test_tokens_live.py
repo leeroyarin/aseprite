@@ -4,6 +4,9 @@ import json
 import sys
 import os
 
+if os.environ.get("ALLOW_LIVE_TOKEN_MUTATIONS") != "explicitly-approved":
+    raise SystemExit("Live mutation tests require Arin approval; use npm test for isolated checks.")
+
 BASE_URL = "https://agent-mesh-hub.slack-clone-arin.workers.dev"
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "") or os.environ.get("HUB_TOKEN", "") or os.environ.get("HUB_TOKEN", "")
 if not ADMIN_TOKEN:
@@ -41,7 +44,7 @@ def run_tests():
 
     # 2. Status with Admin Token
     st, res = req("/status", token=ADMIN_TOKEN)
-    print(f"2. Status with admin token: status={st}, tokens={res.get('tokens')}")
+    print(f"2. Authenticated status: status={st}")
     assert st == 200, f"Expected 200, got {st}"
 
     # 3. List tokens with Admin Token
@@ -66,7 +69,7 @@ def run_tests():
     print(f"5. Create token: status={st}, ok={res.get('ok')}")
     assert st == 201, f"Expected 201, got {st}: {res}"
     alpha_token = res["token"]["token"]
-    print(f"   Created token: {alpha_token}")
+    print("   Created test credential (redacted)")
 
     # 6. Agent token CANNOT access admin /tokens endpoint
     st, res = req("/tokens", token=alpha_token)
@@ -131,7 +134,7 @@ def run_tests():
     }, token=ADMIN_TOKEN)
     assert st == 201
     alpha_token_2 = res["token"]["token"]
-    print(f"13. Created second token for alpha: {alpha_token_2}")
+    print("13. Created second test credential (redacted)")
 
     # 14. Revoke only alpha_token with both token and agent specified
     st, res = req("/tokens/revoke", method="POST", data={"token": alpha_token, "agent": "test-agent-alpha"}, token=ADMIN_TOKEN)

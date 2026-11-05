@@ -31,6 +31,15 @@ powershell -File tools\install-aseprite2.ps1
 powershell -File tools\start-aseprite2.ps1
 ```
 
+## Agent Hub cloud review gate
+- [x] Part 1 source, D1 migrations and isolated verification implemented on codex/agent-hub-v2-step1.
+- [x] Continued into Part 2 after the user's complete-it instruction.
+- [x] Part 2 source and isolated verification: projects/channels, registry/supervisor/tasks, docs, labels, search and portal.
+- [x] Arin approved Part 2 coverage/permissions and requested continuation with usage/final-handoff support.
+- [x] Part 3 rule book and approved usage/handoff extension: 89 Worker + 14 Python tests, typecheck/dry-run.
+- [ ] Arin's Part 3 check (tools/agent-mesh/cloudflare-hub/PART3-REVIEW.md); Parts 4-6 remain gated.
+- [ ] Production resource/configuration changes and merge/deploy remain separately approval-gated.
+
 ## Status
 - [x] **Phase 0** docs (AGENTS.md, docs/aseprite2/*) — fully completed and current
 - [x] **Phase 1** branding — completed and verified
@@ -81,6 +90,32 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-05 — Codex: Arin approved Part 2 policies and added usage-aware final handoffs. Implemented
+  Part 3 owner-only immutable rule-book versions/SHA-256/CAS plus real-or-unknown usage snapshots,
+  <=15% warning, low-usage takeover exclusion, incomplete pushed/not-pushed checkpoint evidence and
+  successor acknowledgement. Worker console and outbound client expose reports; no Git/code execution
+  or private usage inference occurs in the hub. Redacts JSON secret keys as well as values.
+  89 Worker + 14 Python tests passed, typecheck and local dry-run passed. Migration 0005 is empty/additive.
+  Source work branch codex/agent-hub-v2-step1 is an incomplete handoff; see cloudflare-hub/docs/CONTINUATION.md
+  and PART3-REVIEW.md. Production config/secrets/tokens unchanged, no merge/deploy. Stop for Part 3 check;
+  enrollment, enforcement and final onboarding remain pending. No Aseprite C++/submodule changes.
+
+- 2026-11-05 — Codex: Agent Hub Part 2 implemented in the isolated codex/agent-hub-v2-step1
+  branch: private channel fan-out through existing native transport, registry, five-minute supervisor
+  source and task coverage, versioned docs/suggestions/acks, parent sub labels, private activity/search,
+  same-Worker Access portal/SSE, outbound-only sidecar reuse. Additive D1 migrations, no samples.
+  68 Worker/runtime tests + 8 Python client tests passed; typecheck and dry-run passed.
+  Production configuration/secrets/tokens and shared checkout unchanged; no merge/push/deploy.
+  Stop for Part 2 owner check before Part 3. Local prototype not retired; cloud/actual-agent and browser
+  visual/Access validation remain pending. Review tools/agent-mesh/cloudflare-hub/PART2-REVIEW.md.
+
+- 2026-11-05 — Codex: Agent Hub cloud Part 1 implemented only in isolated branch
+  `codex/agent-hub-v2-step1`, preserving the shared checkout. Local source baseline tagged
+  `agent-mesh-hub-v2.1.0-baseline-20261105`. Additive `/api/v2` foundation uses D1/DO, not a PC
+  backend/tunnel. 39 Workers-runtime/policy/schema tests, typecheck and dry-run passed.
+  Production/secrets/tokens unchanged. Stopped for Arin check; Parts 2-6 remain gated.
+  Review: `tools/agent-mesh/cloudflare-hub/PART1-REVIEW.md`. No Aseprite C++ changes/build.
+
 - 2026-11-04 — Codex: Pulled `f4439b4c2` and built it with MSVC x64. Windows
   suites passed: Easymetric 68/68, adversarial 54/54, four requirements 23/23,
   texture/layer/panel 14/14, all exit 0. PR #19 was closed as superseded;

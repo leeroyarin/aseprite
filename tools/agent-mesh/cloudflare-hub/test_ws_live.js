@@ -1,3 +1,4 @@
+if (process.env.ALLOW_LIVE_TOKEN_MUTATIONS !== "explicitly-approved") { console.error("Live mutation tests require Arin approval; use npm test for isolated checks."); process.exit(1); }
 const BASE_URL = "https://agent-mesh-hub.slack-clone-arin.workers.dev";
 const WS_URL = "wss://agent-mesh-hub.slack-clone-arin.workers.dev";
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || process.env.HUB_TOKEN || "";
@@ -26,7 +27,7 @@ async function run() {
     description: "Node WS Test Agent"
   });
   const token = createRes.token.token;
-  console.log("1. Created token:", token);
+  console.log("1. Created test credential (redacted)");
 
   // 2. Connect valid WebSocket listening to aseprite2
   const ws1 = new WebSocket(`${WS_URL}/connect?agent=node-agent&projects=aseprite2&token=${token}`, {
@@ -49,7 +50,7 @@ async function run() {
       if (data.type === "task" && data.body === "Hello from node test") {
         clearTimeout(timer);
         ws1.removeEventListener("message", handler);
-        console.log("3. Received broadcast over WebSocket:", data.body);
+        console.log("3. Received expected broadcast");
         resolve(data);
       }
     };
@@ -99,7 +100,7 @@ async function run() {
       if (data.type === "error" && data.error.includes("Forbidden: Project")) {
         clearTimeout(timer);
         ws1.removeEventListener("message", handler);
-        console.log("5. Received forbidden project error over WS:", data.error);
+        console.log("5. Received forbidden project error");
         resolve(data);
       }
     };
@@ -122,7 +123,7 @@ async function run() {
       if (data.type === "error" && data.error.includes("Forbidden: 'from'")) {
         clearTimeout(timer);
         ws1.removeEventListener("message", handler);
-        console.log("6. Received spoofing rejection over WS:", data.error);
+        console.log("6. Received spoofing rejection");
         resolve(data);
       }
     };
@@ -155,13 +156,13 @@ async function run() {
     const timer = setTimeout(() => reject(new Error("Timeout waiting for close on revocation")), 6000);
     ws1.onclose = (event) => {
       clearTimeout(timer);
-      console.log(`8. WebSocket closed on revocation: code=${event.code}, reason=${event.reason}`);
+      console.log(`8. WebSocket closed on revocation: code=${event.code}`);
       resolve(event);
     };
   });
 
   const revRes = await post("/tokens/revoke", { token });
-  console.log("   Revoke response:", revRes);
+  console.log("   Revocation acknowledged");
   const closeEvent = await closePromise;
   if (closeEvent.code !== 1008) {
     throw new Error("Expected close code 1008, got " + closeEvent.code);
@@ -189,6 +190,6 @@ async function run() {
 }
 
 run().catch((err) => {
-  console.error("Test failed:", err);
+  console.error("Live verification failed");
   process.exit(1);
 });

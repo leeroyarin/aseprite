@@ -1,0 +1,18 @@
+-- Schema port from agent-hub/server/db.py. Empty by default; no local-server dependency.
+CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', agents_json TEXT NOT NULL DEFAULT '[]', roles_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL);
+CREATE TABLE channels (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), type TEXT NOT NULL CHECK(type IN ('announce','group','dm')), name TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '', members_json TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL);
+CREATE TABLE messages (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), channel_id TEXT NOT NULL REFERENCES channels(id), kind TEXT NOT NULL CHECK(kind IN ('message','tool','event')), agent TEXT NOT NULL, name TEXT, recipient TEXT, content TEXT NOT NULL DEFAULT '', tone TEXT, tool_json TEXT, ts INTEGER NOT NULL, timestamp TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'hub', mesh_message_id TEXT REFERENCES mesh_messages(id));
+CREATE INDEX messages_channel_ts ON messages(channel_id,ts);
+CREATE TABLE message_seen (message_id TEXT NOT NULL REFERENCES messages(id), viewer_id TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY(message_id,viewer_id));
+CREATE TABLE docs (project_id TEXT NOT NULL REFERENCES projects(id), doc_id TEXT NOT NULL CHECK(doc_id IN ('plan','onboarding')), title TEXT NOT NULL, purpose TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, body TEXT NOT NULL, updated_by TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(project_id,doc_id));
+CREATE TABLE doc_revisions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), doc_id TEXT NOT NULL, rev INTEGER NOT NULL, ts INTEGER NOT NULL, time TEXT NOT NULL, author TEXT NOT NULL, note TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(project_id,doc_id,rev));
+CREATE TABLE doc_suggestions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), doc_id TEXT NOT NULL, author TEXT NOT NULL, ts INTEGER NOT NULL, time TEXT NOT NULL, note TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')), decided_by TEXT, decided_at INTEGER);
+CREATE TABLE onboarding_acks (project_id TEXT NOT NULL REFERENCES projects(id), version INTEGER NOT NULL, agent_id TEXT NOT NULL, acked_at INTEGER NOT NULL, PRIMARY KEY(project_id,version,agent_id));
+CREATE TABLE activity_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, ts INTEGER NOT NULL, time TEXT NOT NULL, agent TEXT NOT NULL, name TEXT, thread TEXT NOT NULL DEFAULT '', thread_id TEXT, kind TEXT NOT NULL, event_type TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', tone TEXT, metadata_json TEXT NOT NULL DEFAULT '{}');
+CREATE VIRTUAL TABLE search_fts USING fts5(project_id UNINDEXED,entry_id UNINDEXED,kind UNINDEXED,thread_id UNINDEXED,thread UNINDEXED,agent UNINDEXED,ts UNINDEXED,title,body);
+CREATE TRIGGER messages_no_update BEFORE UPDATE ON messages BEGIN SELECT RAISE(ABORT,'Message history is append-only'); END;
+CREATE TRIGGER messages_no_delete BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT,'Message history is append-only'); END;
+CREATE TRIGGER revisions_no_update BEFORE UPDATE ON doc_revisions BEGIN SELECT RAISE(ABORT,'Revision history is append-only'); END;
+CREATE TRIGGER revisions_no_delete BEFORE DELETE ON doc_revisions BEGIN SELECT RAISE(ABORT,'Revision history is append-only'); END;
+CREATE TRIGGER activity_no_update BEFORE UPDATE ON activity_log BEGIN SELECT RAISE(ABORT,'Activity history is append-only'); END;
+CREATE TRIGGER activity_no_delete BEFORE DELETE ON activity_log BEGIN SELECT RAISE(ABORT,'Activity history is append-only'); END;
