@@ -1,10 +1,16 @@
-## 2026-11-05 — Canvas-edge resize cursor in surface panels (PR, draft)
+## 2026-11-05 — Fix crash on state change cursor check + preserve single layer in Easymetric
+- Fix Access Violation crash: in `src/app/ui/editor/moving_pixels_state.cpp:453` `MovingPixelsState::onSetCursor()`, added null check for `m_pixelsMovement` before calling `isDragging()`. When leaving state on frame/layer change or command execution, `removePixelsMovement()` resets `m_pixelsMovement` before `notifyGeneralUpdate()` triggers cursor updates while state is still `MovingPixelsState`. Also added null guard in `getCurrentKeyAction()`.
+- Fix Easymetric single-layer preservation: in `src/app/commands/cmd_easymetric.cpp`, `setupSharedSurfaceLayers` previously required BOTH `existing.baseLayer && existing.textureLayer`. If user deleted extra/depth layers, it re-ran migration, recreating `Surface_Texture` and `Surface_DEPTH` and overwriting cel 0 of `Surface_Base`. Updated to `existing.baseLayer || existing.textureLayer` and added fallback in `findSharedLayers` to support a single base layer (`Surface_Base`, `Base`, or sole image layer) without adding unneeded layers or replacing existing frames/cels.
+- Verified: clean build, all 68 Easymetric E2E tests passing, installed new executable to `%LOCALAPPDATA%\Programs\Aseprite 2.0\aseprite.exe`.
+
+## 2026-11-05 — Canvas-edge resize cursor in surface panels (PR #27)
 
 - William, 2026-11-05, build b9cb6c7c8 (PR #26 merged): the resize cursor STILL appears at the edge of the canvas, e.g. the vertical double-arrow at the bottom edge of the Top face. PR #26 removed the pane splitters, but this cursor was never a splitter — it is the slice-border resize cursor. Every Easymetric face IS a document slice (bounds = face UV rect), and panel editors inherit StandbyState, whose onSetCursor/onMouseDown hit-test slice borders via Editor::calcHit (within 4*guiscale of a border) and show a resize cursor / start MovingSliceState there.
 - Proof in the Linux harness (old code): a drag starting at the Top face bottom edge shrank the Top slice from 117x78 to 117x58 in the saved file, and drew nothing. With this fix the same drag leaves the slice at 117x78 and draws a white pencil stroke instead (30/30 pixels on the stroke line).
 - Fix, one place: Editor::calcHit returns None when clipSpriteBounds is non-empty. clipSpriteBounds is only set by Easymetric panels, so the main editor is unchanged, slice borders are still drawn, only their hit-test is off. Sizing lives in Fields only, never from a canvas edge.
 - Verified on Linux: build exit 0, suites 67/67 + 54/54 + 14/14 + 23/23. Windows test still needed: hover the bottom/top/left/right edge of any face — no resize cursor, and a drag starting there draws instead of resizing the face.
 - NOT in this PR: Depth as a separate tool, depth geometry.
+- Conflict with 54114e3d6 resolved at merge time (both added a top HANDOFF entry; kept both, newest first). No code conflict: 54114e3d6 touched cmd_easymetric.cpp + moving_pixels_state.cpp, PR #27 touched editor.cpp only.
 
 ## 2026-11-04 — Remove surface splitters, keep only Preview/Fields splitter (PR, draft)
 - William, 2026-11-04: resize cursor kept appearing over surface panels (including at canvas edges and slightly left of a bar), a drag could entangle drawing, and the horizontal/vertical splitters never lined up with where the bar looked to be. Sizing already lives in Fields (W/H/D, Size sliders), so surface splitters are removed entirely: no resize cursor, no drag, no painted bars for vertical boundaries 1-3 or horizontal boundaries 0-2. Surface columns are fixed equal widths, surface rows fixed equal heights.
@@ -94,6 +100,9 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-05 — Codex: Built and reinstalled the current Windows app at
+  `b9cb6c7c8`; the installed executable matches the build and remained running
+  during a launch check. No regression suites were run in this install check.
 - 2026-11-04 — Codex: Pulled `f4439b4c2` and built it with MSVC x64. Windows
   suites passed: Easymetric 68/68, adversarial 54/54, four requirements 23/23,
   texture/layer/panel 14/14, all exit 0. PR #19 was closed as superseded;
