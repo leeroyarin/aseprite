@@ -1,6 +1,6 @@
 # Agent Hub unfinished branch handoff
 
-Status: INCOMPLETE. Parts 1-4 are implemented and tested; Parts 5-6 remain required.
+Status: INCOMPLETE. Parts 1-6 are implemented. Production deployment and real-agent/browser verification remain required.
 Source repository: https://github.com/leeroyarin/aseprite
 Work branch: codex/agent-hub-v2-step1
 Baseline tag: agent-mesh-hub-v2.1.0-baseline-20261105 at 70fcbdd51 (source baseline only).
@@ -27,12 +27,14 @@ retirement has occurred. The Worker name/address and existing native endpoints m
   fresh low-usage selection, append-only branch/checkpoint/test evidence and successor receipts.
 - Part 4 exact logger artifact, path evidence/install, immutable enrollment accept/challenge/proof/audit,
   private one-use packet delivery and owner revoke/allow in record-only mode.
+- Parts 5-6 owner policy/grace, periodic proof/recovery, enforced socket guards and current-rule
+  onboarding with connection + acknowledgement + proof criteria. Record-only remains default.
 - Optional outbound report-file uploads; no local server, automatic execution or guessed paths.
 - Permission policies confirmed by Arin: read-all owner, owner-only announcements and doc approval.
 
 ## Tests and evidence
 
-109 Worker tests + 32 Python tests = 141 passed, 0 failed/skipped. Typecheck and local dry-run pass.
+113 Worker tests + 33 Python tests = 146 passed, 0 failed/skipped. Typecheck and local dry-run pass.
 Run from tools/agent-mesh/cloudflare-hub: npm run typecheck; npm test; npm run test:sidecar.
 Dry-run only: npm exec -- wrangler deploy --dry-run --outdir .test-build.
 Fixtures run actual workerd/local D1/DO; external networking in the client tests is mocked.
@@ -40,16 +42,15 @@ No test result proves production or actual agent adoption. Never use live tokens
 
 ## Remaining work and gates
 
-1. Part 4 enrollment/logger/challenges are implemented; review PART4-REVIEW.md and docs/ENROLLMENT.md.
-   Arin approved Part 3 and the 15%/10-minute defaults. Wait for the Part 4 check.
-2. After that check, Part 5 is record_only default, owner settings/grace, append-only enrollment audit,
-   periodic proof and enforce tests only in isolation. Never enable enforce in production.
-3. Stop for check; Part 6 onboarding includes actual rule-book version/hash, connected + acknowledged
-   document + successful challenge criteria, and preserves Connect your agent.
-4. Obtain separate approval for production config/resources/deploy. Verify real Access browser flow,
-   actual Muse/arin-pc traffic, live Cron and parity before retiring the local prototype.
-5. Earlier React design integration is outstanding. The Worker owner console currently provides
-   working API views; no claim of a visual port or browser/Access end-to-end validation is made.
+Parts 5 and 6 were authorized together and are implemented. See PART5-6-REVIEW.md and
+ONBOARDING.md. Record-only remains the source default. No production enforcement was enabled.
+
+1. Obtain separate approval for production resources/configuration/deployment; apply all seven
+   additive migrations, configure owner Access and same-origin portal, preserve native edge access.
+2. Publish the real rule book and per-project onboarding after reviewing existing connection notes.
+3. Verify actual Access/browser flow, Cron, native Muse/arin-pc traffic, enrollment and cloud parity.
+4. Retire the local prototype only after approved real cloud cutover. Earlier React design
+   integration remains separate; this branch serves a functional Worker console.
 
 ## Risks and decisions
 
@@ -57,4 +58,4 @@ Usage is reported, not privately inferred. Unknown remains unknown. Initial warn
 remaining; freshness is 10 minutes. Remote-ref/test/checkout evidence is also agent-reported,
 not independently verified by the hub. Pushing a branch does not prove task completion.
 Do not merge or deploy this incomplete branch. Read docs/USER-REQUIREMENTS.md as task authority,
-API.md for contracts and PART4-REVIEW.md for scope/limitations. Record exact failures and blockers.
+API.md for contracts and PART5-6-REVIEW.md for scope/limitations. Record exact failures and blockers.

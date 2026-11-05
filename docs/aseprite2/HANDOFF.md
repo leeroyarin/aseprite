@@ -39,7 +39,9 @@ powershell -File tools\start-aseprite2.ps1
 - [x] Part 3 rule book and approved usage/handoff extension: 89 Worker + 14 Python tests, typecheck/dry-run.
 - [x] Arin approved Part 3 and the 15% usage warning / 10-minute freshness defaults.
 - [x] Part 4 enrollment/logger/private challenges: 109 Worker + 32 Python tests, typecheck/artifact/dry-run.
-- [ ] Arin's Part 4 check (tools/agent-mesh/cloudflare-hub/PART4-REVIEW.md); Parts 5-6 remain gated.
+- [x] Arin authorized Parts 5 and 6 together; enforcement/recovery and versioned onboarding implemented.
+- [x] 113 Worker + 33 Python tests pass; source remains record_only.
+- [ ] Production approval and actual cloud/agent/browser parity remain pending; see PART5-6-REVIEW.md.
 - [ ] Production resource/configuration changes and merge/deploy remain separately approval-gated.
 
 ## Status
@@ -92,6 +94,14 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-05 — Codex: Implemented Parts 5 and 6 together as Arin requested. Owner-only immutable
+  enrollment settings/grace, enforce gates/socket closure, periodic fresh proofs and private recovery;
+  real-rulebook onboarding revisions preserve custom Connect your agent and require connection +
+  version acknowledgement + active proof. Record-only stays default; no production enforcement,
+  secrets/tokens, deploy or remote migration. 113 Worker + 33 Python tests pass, typecheck/artifact/
+  dry-run pass. See cloudflare-hub/PART5-6-REVIEW.md. Production/browser/actual-agent cutover remains
+  approval-gated; local prototype not retired. No Aseprite C++/submodule changes.
+
 - 2026-11-05 — Codex: Part 4 source implements immutable read/accept/install/prove enrollment, exact
   downloadable logger bytes, metadata-based local path discovery, disjoint folders, append-only
   command receipts/statuses, private five-minute one-use challenges, packet/hash/path/receipt checks,

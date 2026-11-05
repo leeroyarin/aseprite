@@ -64,3 +64,10 @@ Arin approved Part 3 and its warning/freshness defaults. Enrollment and the actu
 logger are implemented with private expiring challenges, packet-bound receipt checks, immutable
 history and record-only owner revocations. See PART4-REVIEW.md and docs/ENROLLMENT.md. Stop for
 Part 4 owner check before enforce/settings/periodic proof work. Production is unchanged.
+
+
+## Combined Parts 5-6 checkpoint
+
+Arin authorized both final parts together. Enforcement settings/grace, periodic proof, recovery
+and versioned onboarding are implemented. Source default is record_only. See PART5-6-REVIEW.md.
+Only approved production release, real agent/browser parity and operational cutover remain gated.

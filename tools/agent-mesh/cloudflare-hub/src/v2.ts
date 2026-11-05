@@ -113,9 +113,11 @@ export class V2Transport {
       await this.db.batch([this.insert(msg,await digest(msg),"v2")]);
       const row=await this.db.prepare("SELECT * FROM mesh_messages WHERE id=?").bind(msg.id).first<Row>();
       if(!row || row.request_hash!==await digest(msg))throw new Failure(409,"Delivery id conflict");
-      this.projectToLegacy(msg,true);
+      await this.projectToLegacy(msg,true);
     });
   }
+  async reconcileEnrollment(){if(this.env.HUB_DB)await this.features.reconcileEnrollment();}
+  async enrollmentAllowed(agent:string){return !this.env.HUB_DB||this.features.enrollmentAllowed(agent);}
   changed(){this.featuresService?.notifyTransport();}
   async touch(agent:string):Promise<void> { if(this.env.HUB_DB) {try{await this.features.touch(agent);}catch{console.warn("[Registry liveness unavailable]");}} }
   constructor(private state: DurableObjectState, private env: V2Env,
@@ -217,6 +219,7 @@ export class V2Transport {
     }
     // Fail before touching the compatibility ledger when D1 has not been provisioned.
     this.db;
+    if(!principal.isAdmin&&!path.startsWith('/api/v2/enrollment/')&&!path.startsWith('/api/v2/rulebook')&&!(await this.enrollmentAllowed(principal.agent!)))throw new Failure(403,"not enrolled");
     this.prepareBookkeeping();
     if(!principal.isAdmin) await this.touch(principal.agent!);
     const transport=["/api/v2/send","/api/v2/inbox","/api/v2/admin/send","/api/v2/admin/inbox"].includes(path);
@@ -283,10 +286,11 @@ export class V2Transport {
       throw new Failure(409,"Message id is already used by a different message");
     const receipt=this.sql.exec<{delivered:number}>("SELECT delivered FROM hub_v2_deliveries WHERE id=?",msg.id).toArray()[0];
     if (receipt?.delivered) return Response.json({ok:true,id:msg.id,duplicate:true});
-    this.projectToLegacy(message(stored));
+    await this.projectToLegacy(message(stored));
     return Response.json({ok:true,id:msg.id,duplicate:!!legacy});
   }
-  private projectToLegacy(msg: AgentMessage, channelDelivery=false): void {
+  private async projectToLegacy(msg: AgentMessage, channelDelivery=false): Promise<void> {
+    await this.reconcileEnrollment();
     const old=this.sql.exec<LegacyRow>("SELECT * FROM messages WHERE id=?",msg.id).toArray()[0];
     if (old && (old.from_agent!==msg.from || old.project!==msg.project || old.to_agent!==msg.to || old.body!==msg.body || (old.sub || null)!==(msg.sub || null)))
       throw new Failure(409,"Message id conflicts with legacy history");
@@ -366,6 +370,6 @@ export async function fetchV2(request: Request, portalOrigin: string,
   if (origin) headers.set("Access-Control-Allow-Origin",portalOrigin);
   headers.set("Vary","Origin");
   headers.set("Cache-Control","no-store");
-  headers.set("X-Hub-API-Version","2-part4");
+  headers.set("X-Hub-API-Version","2-part6");
   return new Response(response.body,{status:response.status,headers});
 }

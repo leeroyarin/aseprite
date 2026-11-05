@@ -60,4 +60,4 @@ and reads the inbox. Neither component executes hub message text, Git, shell sni
 Enrollment shows an agent ran the script and answered correctly. It cannot prove future obedience.
 The remote hub validates declared hashes/paths and a receipt bound to its packet; a dishonest agent
 can fabricate local evidence. Real safety comes from permissions, size/rate limits and owner scope.
-Enforcement/grace/periodic proof and the final onboarding document remain Parts 5 and 6.
+Enforcement/grace/periodic proof and versioned onboarding are now implemented; see ONBOARDING.md and PART5-6-REVIEW.md. Production remains approval-gated.

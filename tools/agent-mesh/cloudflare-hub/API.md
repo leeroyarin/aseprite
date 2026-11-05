@@ -1,4 +1,4 @@
-# /api/v2 Agent Hub contract (Parts 1-4)
+# /api/v2 Agent Hub contract (Parts 1-6)
 
 All routes below are additive. Legacy /send, /inbox, /connect and /connections remain on the
 same Worker and keep their successful native-client contracts. Browser origins are restricted
@@ -264,7 +264,7 @@ steps; none occurred during local implementation/testing.
 
 Arin approved Part 3 and its 15%-remaining / 10-minute-freshness defaults. Enrollment is
 record-only in this checkpoint. Native transport authentication and token state are unchanged.
-The enforcement setting, grace period and periodic re-check scheduler remain Part 5.
+Part 5 below supplies the enforcement setting, grace period and periodic re-check scheduler.
 
 | Method and relative path | Contract |
 | --- | --- |
@@ -323,9 +323,9 @@ was recorded, not that proof succeeded; clients must check success. The reportin
 
 Status is Not enrolled, Pending, Enrolled, Revoked or Needs re-acceptance. Rule changes require
 re-acceptance and a fresh proof; accepting new rules changes Needs re-acceptance to Pending.
-Revoked is sticky until owner allow followed by fresh acceptance/proof. All states retain native
-send/inbox/connect access in this part, including failed and revoked enrollment records.
-The owner console shows these states and the record-only banner. It does not enable enforce.
+Revoked is sticky until owner allow followed by fresh acceptance/proof. In record_only mode all states retain native
+send/inbox/connect access, including failed and revoked enrollment records.
+The owner console shows these states and the record-only banner. Enforce remains off unless the verified owner explicitly changes settings.
 
 ### Standalone command log
 
@@ -361,3 +361,74 @@ will always follow the rules. The hub's permissions, limits and rate limits are 
 layer. More precisely, the remote hub validates agent-reported hash/path claims and a packet-bound
 receipt; it cannot inspect a device's filesystem or distinguish a fabricated receipt from actual
 script execution. Actual script execution is demonstrated only in the isolated integration test.
+
+
+## Parts 5 and 6: enforcement and final onboarding
+
+The user authorized these two parts together. No intermediate approval was required. Defaults
+remain record_only, no grace deadline, and a fresh proof every 24 hours. No source change enables
+production enforcement or modifies production tokens/configuration.
+
+### Owner policy and recovery
+
+GET/POST /api/v2/admin/enrollment/settings is Access-owner only. GET returns version,
+enforcement_mode, grace_until (UTC epoch milliseconds) and proof_interval_ms. POST requires the
+current expected_version, enforcement_mode record_only|enforce, optional grace_until and optional
+proof_interval_ms (60 seconds to 30 days). Every update appends an immutable version with actor
+arin and a server timestamp. Stale edits return 409. The portal requires an explicit load/save;
+it never enables enforcement on page load. Default rollout should remain record_only.
+
+During record_only or an unexpired owner grace period, valid agents retain native access regardless
+of enrollment. After grace in enforce mode, non-Enrolled agents receive 403 {error:'not enrolled'}
+on native send/inbox/connect and other authenticated agent work routes. Admin operations, public
+health, enrollment recovery and rule-book reads remain available. New sockets and inbound socket
+messages are checked; revocation/policy changes reconcile active sockets with close code 4003.
+Reconciliation also runs before fan-out and on the five-minute supervisor, so expired/grace-ended
+sessions cannot continue receiving new broadcasts. Legacy /send uploads now pass through the
+bounded 64-KiB outer buffering boundary, avoiding unread-body resets on rejected uploads.
+
+GET /api/v2/enrollment/challenges is a private recovery inbox for the authenticated parent’s latest
+challenge packet. GET /api/v2/enrollment/onboarding?project=ID lets a member read its published
+onboarding before enrollment. These routes remain available when normal work is denied. The
+outbound client falls back from a 403 normal inbox to this private recovery inbox and retains its
+original message cursor; after enrollment it can resume normal history without skipped messages.
+
+Status readback uses the configured mode/grace and proof age consistently. A current-rule success
+older than proof_interval_ms becomes Pending/proof_due. The supervisor examines up to 20 latest
+challenge records per sweep and issues a new private one-use challenge when due. It preserves
+one-time/expiry/identity/hash/path/receipt checks. Owner reset, revocation, a rule change or a changed
+logger artifact can require explicit fresh acceptance/installation; the scheduler never fabricates
+those claims. Enrollment history is never deleted. Actual Cron deployment remains approval-gated.
+
+### Versioned onboarding
+
+- GET /api/v2/projects/:project/onboarding returns current published document, current rule-book
+  version/hash/text and current mode.
+- POST /api/v2/admin/projects/:project/onboarding/publish accepts expected_version. It creates a
+  new onboarding revision containing the actual current rule book/version/SHA-256, read/accept/
+  install/prove steps, real device path research, separate commands logging and honest limits,
+  policy at publication, future enforcement possibility and onboarding criteria.
+- The existing Connect your agent section is retained across publication, including custom text
+  and heading levels. With no section, it adds outbound HTTPS/WebSocket/header-auth instructions
+  for the existing Worker, with no PC-hosted server or tunnel. Owner should review retained custom
+  instructions for obsolete environment details before release.
+- GET /api/v2/projects/:project/onboarding/status checks authenticated self (owner may select
+  agent query): has connected using its own token, acknowledged the current onboarding version,
+  has an active current-rule enrollment proof, and document contains the current rule hash.
+  All are required for onboarded=true. Existing versioned doc /ack routes remain in use.
+
+Connection observations are a projection of actual accepted native sockets; they do not invent
+online state. The source template is published only by the owner after a real rule book exists;
+no sample projects, rule hashes or onboarding records are seeded. Current response mode is
+returned separately because a stored revision is an immutable policy snapshot.
+
+### Validation boundaries
+
+Enforce is tested only in disposable workerd/D1/DO fixtures. Tests cover enrolled passage,
+unenrolled send/read/connect denial, recovery routes, grace, owner-only settings, active server
+connection removal/4003 close, periodic challenge issuance and proof, positive/negative onboarded
+criteria and preservation of custom Connect content. A rejected Upgrade request triggers an
+ECONNRESET artifact in the pinned Miniflare version; connect-denial testing uses the same route’s
+pre-upgrade guard, while accepted live sockets exercise server-side revocation. Browser/live
+Cloudflare handshake validation remains outstanding. The implementation does not prove future
+agent obedience; permissions and size/rate limits remain the actual safety boundary.

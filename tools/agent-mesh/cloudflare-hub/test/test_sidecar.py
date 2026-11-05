@@ -89,6 +89,16 @@ class OutboundClientTests(unittest.TestCase):
             path=Path(folder)/"proof.json";path.write_text('{}')
             with self.assertRaises(ValueError):client.post_enrollment('fixture',path,'proofs',opener=FakeClient({'success':False,'reason':'expired'}))
             with self.assertRaises(ValueError):client.post_enrollment('fixture',path,'../tokens',opener=FakeClient({}))
+    def test_enforced_inbox_uses_private_recovery_without_advancing_normal_cursor(self):
+        from urllib.error import HTTPError
+        class RecoveryClient:
+            def __init__(self):self.requests=[]
+            def open(self,request,timeout):
+                self.requests.append(request)
+                if len(self.requests)==1:raise HTTPError(request.full_url,403,'not enrolled',{},io.BytesIO())
+                return io.BytesIO(json.dumps({'messages':[{'id':'challenge'}]}).encode())
+        fake=RecoveryClient();page=client.fetch_page('fixture','alpha','old-message',fake)
+        self.assertEqual(page['latest_id'],'old-message');self.assertTrue(page['enrollment_only']);self.assertTrue(fake.requests[1].full_url.endswith('/api/v2/enrollment/challenges'))
     def test_reused_backoff_is_bounded(self):
         self.assertEqual(compute_backoff_delay(0,jitter_ratio=0),1)
         self.assertLessEqual(compute_backoff_delay(8,rng=random.Random(1)),60)

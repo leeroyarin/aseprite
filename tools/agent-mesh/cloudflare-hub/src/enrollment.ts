@@ -33,38 +33,58 @@ export class Enrollment {
   private async head(){return this.stmt("SELECT version,sha256 FROM rulebook_revisions ORDER BY version DESC LIMIT 1").first<Rule>();}
   private audit(id:string,agent:string,actor:string,kind:string,rule:Rule|null,payload:Data){return this.stmt("INSERT INTO enrollment_audit(id,agent,actor,kind,at,rulebook_version,rulebook_sha256,payload_json) VALUES(?,?,?,?,?,?,?,?)",id,agent,actor,kind,Date.now(),rule?.version??null,rule?.sha256??null,JSON.stringify(payload));}
   private ownerEvent(agent:string){return this.stmt("SELECT * FROM enrollment_audit WHERE agent=? AND kind IN ('revoke','allow') ORDER BY seq DESC LIMIT 1",agent).first<Audit>();}
+  async settings(){return await this.stmt("SELECT * FROM enrollment_settings ORDER BY version DESC LIMIT 1").first<{version:number;enforcement_mode:string;grace_until:number;proof_interval_ms:number}>()||{version:0,enforcement_mode:"record_only",grace_until:0,proof_interval_ms:86400000};}
+  async permitted(agent:string){const policy=await this.settings();if(policy.enforcement_mode!=="enforce"||Date.now()<policy.grace_until)return true;const status=await this.status(agent);return status.status==="Enrolled";}
   private statusSQL(from:string){return `SELECT n.agent,
     (SELECT json_object('version',version,'sha256',sha256) FROM rulebook_revisions ORDER BY version DESC LIMIT 1) AS rule_json,
     (SELECT json_object('seq',seq,'kind',kind,'at',at) FROM enrollment_audit WHERE agent=n.agent AND kind IN ('revoke','allow') ORDER BY seq DESC LIMIT 1) AS owner_json,
     (SELECT json_object('seq',e.seq,'rulebook_version',a.rulebook_version,'rulebook_sha256',a.rulebook_sha256,'accepted_at',a.accepted_at) FROM enrollment_audit e JOIN enrollment_acceptances a ON a.event_id=e.id WHERE e.agent=n.agent AND e.kind='accept' ORDER BY e.seq DESC LIMIT 1) AS acceptance_json,
     (SELECT json_object('id',p.id,'success',p.success,'reason',p.reason,'at',e.at) FROM enrollment_audit e JOIN enrollment_proofs p ON p.event_id=e.id WHERE e.agent=n.agent AND e.kind='proof' ORDER BY e.seq DESC LIMIT 1) AS proof_json,
-    (SELECT json_object('seq',e.seq,'script_sha256',c.script_sha256,'rulebook_version',a.rulebook_version,'rulebook_sha256',a.rulebook_sha256) FROM enrollment_audit e JOIN enrollment_proofs p ON p.event_id=e.id JOIN enrollment_challenges c ON c.id=p.challenge_id JOIN enrollment_acceptances a ON a.id=c.acceptance_id WHERE e.agent=n.agent AND e.kind='proof' AND p.success=1 ORDER BY e.seq DESC LIMIT 1) AS success_json
+    (SELECT json_object('seq',e.seq,'at',e.at,'script_sha256',c.script_sha256,'rulebook_version',a.rulebook_version,'rulebook_sha256',a.rulebook_sha256) FROM enrollment_audit e JOIN enrollment_proofs p ON p.event_id=e.id JOIN enrollment_challenges c ON c.id=p.challenge_id JOIN enrollment_acceptances a ON a.id=c.acceptance_id WHERE e.agent=n.agent AND e.kind='proof' AND p.success=1 ORDER BY e.seq DESC LIMIT 1) AS success_json
     FROM (${from}) n`;}
-  private renderStatus(row:{agent:string;rule_json:string|null;owner_json:string|null;acceptance_json:string|null;proof_json:string|null;success_json:string|null}){
+  private renderStatus(row:{agent:string;rule_json:string|null;owner_json:string|null;acceptance_json:string|null;proof_json:string|null;success_json:string|null},policy={enforcement_mode:"record_only",grace_until:0,proof_interval_ms:86400000}){
     const rule:Rule|null=JSON.parse(row.rule_json||"null"),owner:Audit|null=JSON.parse(row.owner_json||"null");
     const acceptance:(Acceptance&{seq:number})|null=JSON.parse(row.acceptance_json||"null");
     const proof:(Proof&{at:number})|null=JSON.parse(row.proof_json||"null");
-    const success:{seq:number;script_sha256:string;rulebook_version:number;rulebook_sha256:string}|null=JSON.parse(row.success_json||"null");
+    const success:{seq:number;at:number;script_sha256:string;rulebook_version:number;rulebook_sha256:string}|null=JSON.parse(row.success_json||"null");
     let state="Not enrolled";
     if(owner?.kind==="revoke")state="Revoked";
     else if(success&&success.seq>(owner?.seq||0)&&success.rulebook_version===rule?.version&&success.rulebook_sha256===rule?.sha256)state="Enrolled";
     else if(acceptance&&acceptance.seq>(owner?.seq||0))state=acceptance.rulebook_version===rule?.version&&acceptance.rulebook_sha256===rule?.sha256?"Pending":"Needs re-acceptance";
     else if(success&&success.seq>(owner?.seq||0))state="Needs re-acceptance";
-    return {agent:row.agent,status:state,mode:"record_only",access_restricted:false,current_rulebook:rule,accepted_version:acceptance?.rulebook_version??null,accepted_hash:acceptance?.rulebook_sha256??null,accepted_at:acceptance?.accepted_at??null,last_proof:proof?{id:proof.id,success:!!proof.success,reason:proof.reason,at:proof.at}:null,script_sha256:success?.script_sha256??null,owner_action:owner?{kind:owner.kind,at:owner.at}:null};
+    const due=!!success&&Date.now()-success.at>policy.proof_interval_ms;if(state==="Enrolled"&&due)state="Pending";
+    return {agent:row.agent,status:state,mode:policy.enforcement_mode,proof_due:due,access_restricted:policy.enforcement_mode==="enforce"&&Date.now()>=policy.grace_until&&state!=="Enrolled",current_rulebook:rule,accepted_version:acceptance?.rulebook_version??null,accepted_hash:acceptance?.rulebook_sha256??null,accepted_at:acceptance?.accepted_at??null,last_proof:proof?{id:proof.id,success:!!proof.success,reason:proof.reason,at:proof.at}:null,script_sha256:success?.script_sha256??null,owner_action:owner?{kind:owner.kind,at:owner.at}:null};
   }
   async status(agent:string){
     const row=await this.stmt(this.statusSQL("SELECT ? AS agent"),agent).first<Parameters<Enrollment["renderStatus"]>[0]>();
-    return this.renderStatus(row!);
+    return this.renderStatus(row!,await this.settings());
   }
   async route(request:Request,p:V2Principal,b:Data,path:string[]):Promise<Response|null>{
     if(path[0]!=="enrollment")return null;
     const get=request.method==="GET",agent=p.agent!,actor=p.isAdmin?"arin":agent,url=new URL(request.url);
+    if(path.length===2&&path[1]==="settings"){
+      if(!p.isAdmin)fail(403,"Owner settings required");const current=await this.settings();if(get)return Response.json(current);
+      allowed(b,["expected_version","enforcement_mode","grace_until","proof_interval_ms"]);
+      const grace=b.grace_until??0,interval=b.proof_interval_ms??current.proof_interval_ms;
+      if(b.expected_version!==current.version)fail(409,"Settings changed; reload");
+      if(typeof b.enforcement_mode!=="string"||!["record_only","enforce"].includes(b.enforcement_mode)||typeof grace!=="number"||!Number.isSafeInteger(grace)||grace<0||typeof interval!=="number"||!Number.isSafeInteger(interval)||interval<60000||interval>2592000000)fail(400,"Invalid enrollment settings");
+      await this.write([this.stmt("INSERT INTO enrollment_settings(version,enforcement_mode,grace_until,proof_interval_ms,actor,at) VALUES(?,?,?,?,?,?)",current.version+1,String(b.enforcement_mode),grace as number,interval as number,"arin",Date.now()),...this.activity("hub","enrollment.settings","Enrollment policy updated","arin")]);return Response.json(await this.settings());
+    }
     if(path.length===2&&path[1]==="logger.py"&&get)return new Response(LOGGER_SOURCE,{headers:{"Content-Type":"text/x-python; charset=utf-8","Content-Disposition":"attachment; filename=hub_command_log.py","X-Script-SHA256":await digest(LOGGER_SOURCE)}});
     if(path.length===2&&path[1]==="logger"&&get)return Response.json({filename:"hub_command_log.py",sha256:await digest(LOGGER_SOURCE),download:p.isAdmin?"/api/v2/admin/enrollment/logger.py":"/api/v2/enrollment/logger.py",bytes:new TextEncoder().encode(LOGGER_SOURCE).byteLength,network_calls:false,executes_commands:false});
+    if(path.length===2&&path[1]==="onboarding"&&get){
+      const project=url.searchParams.get('project')||'';await this.project(project,p);
+      const document=await this.stmt("SELECT * FROM docs WHERE project_id=? AND doc_id='onboarding'",project).first();if(!document)fail(404,"Onboarding not published");return Response.json({document,mode:(await this.settings()).enforcement_mode});
+    }
+    if(path.length===2&&path[1]==="challenges"&&get){
+      if(p.isAdmin)fail(403,"Agent recovery inbox required");
+      const rows=await this.rows<{envelope:string}>("SELECT o.envelope FROM enrollment_challenges c JOIN feature_outbox o ON o.id=c.message_id JOIN enrollment_audit e ON e.id=c.event_id WHERE c.agent=? ORDER BY e.seq DESC LIMIT 1",agent);
+      return Response.json({messages:rows.map(x=>JSON.parse(x.envelope))});
+    }
     if(path.length===2&&path[1]==="status"&&get){if(p.isAdmin)fail(400,"Use the owner agent-status route");return Response.json(await this.status(agent));}
     if(path[1]==="agents"&&p.isAdmin){
       if(path.length===2&&get){const rawLimit=url.searchParams.get("limit")??"50",cursor=url.searchParams.get("cursor")??"";if(!/^\d+$/.test(rawLimit)||Number(rawLimit)<1||Number(rawLimit)>200)fail(400,"Invalid page");const limit=Number(rawLimit);
-        const agents=await this.rows<Parameters<Enrollment["renderStatus"]>[0]>(this.statusSQL("SELECT id AS agent FROM (SELECT id FROM agent_registry UNION SELECT agent AS id FROM enrollment_audit) WHERE id>? ORDER BY id LIMIT ?"),cursor,limit+1);return Response.json({items:agents.slice(0,limit).map(x=>this.renderStatus(x)),has_more:agents.length>limit,next_cursor:agents.length>limit?agents[limit-1].agent:null,mode:"record_only"});}
+        const policy=await this.settings();const agents=await this.rows<Parameters<Enrollment["renderStatus"]>[0]>(this.statusSQL("SELECT id AS agent FROM (SELECT id FROM agent_registry UNION SELECT agent AS id FROM enrollment_audit) WHERE id>? ORDER BY id LIMIT ?"),cursor,limit+1);return Response.json({items:agents.slice(0,limit).map(x=>this.renderStatus(x,policy)),has_more:agents.length>limit,next_cursor:agents.length>limit?agents[limit-1].agent:null,mode:policy.enforcement_mode});}
       if(path.length===3&&get)return Response.json(await this.status(path[2]));
       if(path.length===4&&["revoke","allow"].includes(path[3])&&!get){allowed(b,["id","reason"]);const id=text(b,"id"),reason=text(b,"reason",2000),who=path[2];if(!who||who.length>200||/[\s\x00-\x1f]/.test(who)||redact(who)!==who)fail(400,"Invalid agent");const kind=path[3];const old=await this.stmt("SELECT * FROM enrollment_audit WHERE id=?",id).first<Audit>();
         if(old){if(old.agent!==who||old.kind!==kind||JSON.parse(old.payload_json).reason!==reason)fail(409,"Owner event id conflict");return Response.json({duplicate:true,...await this.status(who)});}

@@ -14,6 +14,7 @@ from pathlib import Path
 import sys
 import time
 import urllib.request
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit, quote
 from helpers import check_no_cli_token, get_env_token, compute_backoff_delay, redact_payload
 
@@ -36,7 +37,16 @@ def fetch_page(token, project, cursor, opener=None):
     req = urllib.request.Request(HUB_URL + "/api/v2/inbox?" + query,
                                  headers={"Authorization": "Bearer " + token})
     client = opener or urllib.request.build_opener(NoRedirect())
-    with client.open(req, timeout=30) as response:
+    recovery = False
+    try:
+        response = client.open(req, timeout=30)
+    except HTTPError as error:
+        if error.code != 403:
+            raise
+        error.close()
+        recovery = True
+        response = client.open(urllib.request.Request(HUB_URL + "/api/v2/enrollment/challenges", headers={"Authorization": "Bearer " + token}), timeout=30)
+    with response:
         raw = response.read(MAX_RESPONSE + 1)
     if len(raw) > MAX_RESPONSE:
         raise ValueError("Hub response too large")
@@ -45,6 +55,8 @@ def fetch_page(token, project, cursor, opener=None):
         raise ValueError("Invalid inbox response")
     if any(not isinstance(m, dict) or not isinstance(m.get("id"), str) for m in page["messages"]):
         raise ValueError("Invalid message")
+    if recovery:
+        page.update(latest_id=cursor if cursor != "0" else None, has_more=False, enrollment_only=True)
     return page
 
 def post_report(token, project, report_path, kind, task=None, opener=None):

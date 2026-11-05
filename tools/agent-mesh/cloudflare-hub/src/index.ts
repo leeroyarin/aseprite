@@ -574,6 +574,10 @@ export class AgentMeshHub {
       return this.v2Transport.fetch(request);
     }
 
+    if(path!=="/"&&path!==""){
+      const auth=await this.authenticate(request);
+      if(auth.isValid&&!auth.isAdmin&&auth.agent&&this.env.HUB_DB){this.v2Transport ||= new V2Transport(this.state,this.env,req=>this.authenticate(req));if(!(await this.v2Transport.enrollmentAllowed(auth.agent)))return Response.json({error:"not enrolled"},{status:403});}
+    }
     // Route: Root Healthcheck
     if (path === "/" || path === "") {
       return Response.json({
@@ -878,6 +882,7 @@ export class AgentMeshHub {
         connectedAt: new Date().toISOString(),
       };
       server.serializeAttachment(sessionData);
+      if(this.env.HUB_DB&&!auth.isAdmin)await this.env.HUB_DB.prepare("INSERT INTO agent_connections(agent,connected_at) VALUES(?,?) ON CONFLICT(agent) DO UPDATE SET connected_at=excluded.connected_at").bind(agent,Date.now()).run();
       if(!auth.isAdmin&&auth.agent){this.v2Transport ||= new V2Transport(this.state,this.env,req=>this.authenticate(req));await this.v2Transport.touch(auth.agent);}
 
       await this.ensureAlarmScheduled();
@@ -1127,7 +1132,7 @@ export class AgentMeshHub {
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const session = ws.deserializeAttachment() as AgentSessionData | null;
     if (!session) return;
-
+    if(!session.isAdmin&&this.env.HUB_DB){this.v2Transport ||= new V2Transport(this.state,this.env,req=>this.authenticate(req));if(!(await this.v2Transport.enrollmentAllowed(session.agent))){ws.close(4003,"not enrolled");return;}}
     try {
       const raw =
         typeof message === "string"
@@ -1321,6 +1326,7 @@ export class AgentMeshHub {
     }
     await this.state.storage.put(listKey, recent);
 
+    if(this.env.HUB_DB){this.v2Transport ||= new V2Transport(this.state,this.env,req=>this.authenticate(req));await this.v2Transport.reconcileEnrollment();}
     this.v2Transport?.changed();
     // 3. Broadcast to all active WebSocket connections
     const serialized = JSON.stringify(msg);
@@ -1548,7 +1554,7 @@ export default {
     if (origin && origin !== portalOrigin) return Response.json({error:"Origin is not allowed"},{status:403});
     const url = new URL(request.url);
     if(url.pathname.startsWith("/api/v2/internal"))return new Response(null,{status:404});
-    if (url.pathname === "/api/v2" || url.pathname.startsWith("/api/v2/")) {
+    if (url.pathname === "/api/v2" || url.pathname.startsWith("/api/v2/") || (url.pathname==="/send"&&request.method==="POST")) {
       return fetchV2(request, portalOrigin, async (req) => {
         const id = env.HUB_DO.idFromName("global-agent-mesh-hub");
         return env.HUB_DO.get(id).fetch(req);

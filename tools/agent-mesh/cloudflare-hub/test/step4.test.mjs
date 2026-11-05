@@ -12,7 +12,7 @@ const portal='https://agent-hub.slack-clone-arin.workers.dev';
 // Disposable local fixtures only. Do not load .dev.vars, shell credentials, or live tokens.
 const admin='local-fixture-admin-only';
 let mf, db, workerScript, tokens={};
-async function migrate(database, names=['0001_v2_transport.sql','0002_foundation.sql','0003_project_features.sql','0004_search_backfill.sql','0005_governance.sql','0006_enrollment.sql']) {
+async function migrate(database, names=['0001_v2_transport.sql','0002_foundation.sql','0003_project_features.sql','0004_search_backfill.sql','0005_governance.sql','0006_enrollment.sql','0007_enforcement.sql']) {
   for(const name of names) {
     const migration=await readFile('migrations/'+name,'utf8');
     for(const statement of migration.replace(/^--.*$/gm,'').split(name.startsWith('0004') ? /;\s*(?=INSERT)/i : /;\s*(?=CREATE)/i).filter(s=>s.trim())) await database.prepare(statement).run();
@@ -202,6 +202,60 @@ describe('Part 4 record-only enrollment in real workerd',()=>{
     assert.equal((await owner('agents/'+encodeURIComponent('amt_'+'x'.repeat(32))+'/revoke',{id:'invalid-agent-revoke',reason:'Fixture rejection'})).status,400);
     const invalid={...challengePayload('invalid-discovery'),discovery:{...installed.discovery,normal_chats:['must not be stored']}};
     assert.equal((await post('challenges',invalid)).status,400);
+  });
+  it('publishes onboarding with current rules and preserves Connect your agent history',async()=>{
+    const path='/api/v2/admin/projects/alpha/onboarding';
+    let r=await adminApi(path+'/publish',{method:'POST',body:{expected_version:0}});assert.equal(r.status,200);
+    const doc=await (await api('/api/v2/projects/alpha/docs/onboarding')).json();assert.ok(doc.body.includes(rule.sha256));assert.ok(doc.body.includes('Connect your agent'));assert.ok(doc.body.includes('Record-only mode'));
+    assert.equal((await adminApi('/api/v2/admin/projects/alpha/docs/onboarding',{method:'POST',body:{expected_version:1,body:'# Existing onboarding\n## Connect your agent\nRetain this exact connection note.\n'}})).status,200);
+    r=await adminApi(path+'/publish',{method:'POST',body:{expected_version:2}});assert.equal(r.status,200);
+    const history=await (await api('/api/v2/projects/alpha/docs/onboarding/revisions')).json();assert.equal(history.items.length,3);assert.ok(history.items[2].body.includes('Retain this exact connection note.'));
+    const status=await (await api('/api/v2/projects/alpha/onboarding/status')).json();assert.equal(status.onboarded,false);
+    assert.equal((await api('/api/v2/projects/alpha/docs/onboarding/ack',{method:'POST',body:{version:3}})).status,200);
+    assert.equal((await (await api('/api/v2/projects/alpha/onboarding/status')).json()).onboarded,true);
+  });
+  it('tests owner-only enforce, enrolled passage, blocked unenrolled access and revoke-close locally',async()=>{
+    const policy='/api/v2/admin/enrollment/settings';
+    assert.equal((await post('settings',{expected_version:0,enforcement_mode:'enforce'})).status,403);
+    const ws=await connect('alice');
+    assert.equal((await adminApi(policy,{method:'POST',body:{expected_version:0,enforcement_mode:'enforce'}})).status,200);
+    assert.equal((await send({id:'enrolled-enforce'})).status,200);
+    assert.equal((await api('/inbox?agent=bob&projects=alpha',{token:tokens.bob})).status,403);
+    assert.equal((await api('/connect?agent=bob&projects=alpha',{token:tokens.bob})).status,403);
+    assert.equal((await send({id:'blocked',from:'bob'},{token:tokens.bob})).status,403);
+    assert.equal((await api('/api/v2/enrollment/status',{token:tokens.bob})).status,200);
+    assert.equal((await api('/api/v2/enrollment/challenges',{token:tokens.bob})).status,200);
+    assert.equal((await api('/api/v2/enrollment/onboarding?project=alpha',{token:tokens.bob})).status,200);
+    await owner('agents/alice/revoke',{id:'enforce-revoke',reason:'Isolated enforcement test'});const connections=await (await api('/connections',{token:admin})).json();assert.ok(!connections.by_agent.alice);ws.close();
+    assert.equal((await adminApi(policy,{method:'POST',body:{expected_version:1,enforcement_mode:'record_only'}})).status,200);
+    assert.equal((await send({id:'record-only-restored'})).status,200);
+  });
+  it('honors owner grace periods and keeps settings history immutable',async()=>{
+    const path='/api/v2/admin/enrollment/settings';const current=await (await adminApi(path)).json();
+    assert.equal((await adminApi(path,{method:'POST',body:{expected_version:current.version,enforcement_mode:['enforce']}})).status,400);
+    assert.equal((await adminApi(path,{method:'POST',body:{expected_version:current.version,enforcement_mode:'enforce',grace_until:Date.now()+60000}})).status,200);
+    assert.equal((await send({id:'grace-access',from:'bob'},{token:tokens.bob})).status,200);
+    assert.equal((await adminApi(path,{method:'POST',body:{expected_version:current.version+1,enforcement_mode:'record_only'}})).status,200);
+    await assert.rejects(db.prepare('DELETE FROM enrollment_settings').run());
+  });
+  it('periodically issues a fresh private proof challenge when the previous proof becomes due',async()=>{
+    const path='/api/v2/admin/enrollment/settings';const policy=await (await adminApi(path)).json();
+    await adminApi(path,{method:'POST',body:{expected_version:policy.version,enforcement_mode:'record_only',proof_interval_ms:60000}});
+    const old=await db.prepare("SELECT * FROM enrollment_challenges WHERE agent='alice' ORDER BY created_at DESC LIMIT 1").first();
+    // Append historical evidence in this disposable database; never modify immutable records.
+    await owner('agents/alice/allow',{id:'periodic-allow',reason:'Isolated renewal fixture'});await accept('alice');
+    const now=Date.now(),id='periodic-fixture';
+    await db.prepare("INSERT INTO enrollment_audit(id,agent,actor,kind,at,rulebook_version,rulebook_sha256,payload_json) VALUES(?,'alice','alice','challenge',?,?,?,'{}')").bind('challenge:'+id,now-120000,rule.version,rule.sha256).run();
+    await db.prepare('INSERT INTO enrollment_challenges(id,agent,acceptance_id,project_id,code_hash,script_sha256,chat_path,commands_path,discovery_json,created_at,expires_at,message_id,event_id,request_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(id,'alice',accepted.alice,'alpha',old.code_hash,scriptHash,installed.chat_path,installed.commands_path,JSON.stringify(installed.discovery),now-120000,now-1,'periodic-old','challenge:'+id,'fixture').run();
+    await db.prepare("INSERT INTO enrollment_audit(id,agent,actor,kind,at,rulebook_version,rulebook_sha256,payload_json) VALUES('periodic-proof-event','alice','alice','proof',?,?,?,'{}')").bind(now-120000,rule.version,rule.sha256).run();
+    await db.prepare("INSERT INTO enrollment_proofs(id,challenge_id,agent,success,reason,evidence_json,event_id,request_hash) VALUES('periodic-proof',?,'alice',1,'ok','{}','periodic-proof-event','fixture')").bind(id).run();
+    const before=(await db.prepare("SELECT count(*) n FROM enrollment_challenges WHERE agent='alice'").first()).n;
+    const ns=await mf.getDurableObjectNamespace('HUB_DO');await (await ns.get(ns.idFromName('global-agent-mesh-hub')).fetch('https://supervisor.internal/api/v2/internal/sweep',{headers:{'X-Hub-Scheduled-Time':String(now)}})).text();
+    const after=(await db.prepare("SELECT count(*) n FROM enrollment_challenges WHERE agent='alice'").first()).n;
+    assert.equal(after,before+1);
+    const pending=(await (await api('/api/v2/enrollment/challenges')).json()).messages[0];
+    await post('proofs',proof(pending));
+    assert.equal((await (await api('/api/v2/enrollment/status')).json()).status,'Enrolled');
   });
   it('protects all enrollment records and challenge-consumption receipts against mutation',async()=>{
     for(const table of ['enrollment_audit','enrollment_acceptances','enrollment_challenges','enrollment_proofs','enrollment_consumed']){await assert.rejects(db.prepare('DELETE FROM '+table).run());const key=table==='enrollment_consumed'?'challenge_id':'id';await assert.rejects(db.prepare('UPDATE '+table+" SET "+key+"='changed'").run());}
