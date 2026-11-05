@@ -78,6 +78,42 @@ namespace app {
 
 using namespace ui;
 
+// Easymetric panel-editor rule (2026-11-05, William: "fix that
+// panel sizing issue and canvas issue" in common, not one symptom
+// at a time): a surface panel is DRAW-ONLY. Sizing lives in
+// Fields (W/H/D, Size sliders) and the one Preview/Fields
+// splitter; nothing the mouse does inside a panel may resize or
+// move anything. The panel editors are ordinary Editors, so
+// upstream StandbyState still offers every resize/move path:
+// slice borders (already killed in Editor::calcHit, PR #28),
+// selection transform handles, symmetry handles, and the Move
+// tool moving the whole shared UV sheet. Each of those surfaces
+// as a resize/move icon at a canvas edge, so they are all
+// switched off here, in this one file, for panel editors only.
+// clipSpriteBounds is only set by Easymetric panels, so the
+// main editor is untouched. Drawing, depth sculpting (its own
+// state), wheel zoom, selection making and moving selected
+// pixels inside a face all still work.
+static bool isEasymetricPanelEditor(Editor* editor)
+{
+  return editor && !editor->clipSpriteBounds().isEmpty();
+}
+
+// True when the document selection is the studio's per-face mask: the
+// studio sets the mask to the active face's UV rect (== this panel's
+// clip bounds) so painting stays inside the face. That mask is NOT a
+// user selection. A user sub-selection is strictly inside the face
+// rect, so it never equals the clip bounds.
+static bool isStudioFaceMask(Editor* editor)
+{
+  if (!editor)
+    return false;
+  Doc* doc = editor->document();
+  if (!doc || !doc->mask() || doc->mask()->isEmpty())
+    return false;
+  return doc->mask()->bounds() == editor->clipSpriteBounds();
+}
+
 StandbyState::StandbyState()
   : m_decorator(new Decorator(this))
   , m_transformSelectionHandlesAreVisible(false)
@@ -130,9 +166,13 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
     dv->setActivePaneEditor(editor);
   context->setActiveView(editor->getDocView());
 
-  // Move symmetry
+  // Move symmetry. Skipped in Easymetric panels (draw-only
+  // rule above): a symmetry handle sits at the face edge, so
+  // dragging it would move the document symmetry axis from a
+  // canvas edge. The panel code auto-aligns the axes to the
+  // face centre on click instead, so the axes stay put.
   Decorator::Handles handles;
-  if (m_decorator->getSymmetryHandles(editor, handles)) {
+  if (!isEasymetricPanelEditor(editor) && m_decorator->getSymmetryHandles(editor, handles)) {
     for (const auto& handle : handles) {
       if (handle.bounds.contains(msg->position())) {
         auto mode = (handle.align & (TOP | BOTTOM) ? app::gen::SymmetryMode::HORIZONTAL :
@@ -167,12 +207,27 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
     // Move-cel behaviour.
     if (DocView* paneView = editor->getDocView()) {
       const auto& panes = paneView->paneEditors();
+      // Only with a real, visible user sub-selection. The studio
+      // sets the document mask to the whole face rect (see
+      // isStudioFaceMask), and with no mask isInsideSelection()
+      // is true for the whole cel, so canStartMovingSelectionPixels()
+      // alone would fire on every Move drag and move the face's
+      // pixels (spilling into the neighbour face) instead of
+      // doing nothing.
       if (std::find(panes.begin(), panes.end(), editor) != panes.end() &&
+          document && document->isMaskVisible() && !isStudioFaceMask(editor) &&
           editor->canStartMovingSelectionPixels()) {
         transformSelection(editor, msg, MovePixelsHandle);
         return true;
       }
     }
+
+    // Easymetric panels are draw-only: without a movable
+    // selection there is nothing the Move tool may move in a
+    // panel. The old path started MovingCelState, which moves
+    // the whole shared UV sheet (every face) from one panel.
+    if (isEasymetricPanelEditor(editor))
+      return true;
 
     // Handle "Auto Select Layer"
     if (editor->isAutoSelectLayer()) {
@@ -322,8 +377,12 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
                                      activeToolManager->selectedTool()->getInk(0)->isSelection()) ||
                                     (activeToolManager->quickTool() &&
                                      activeToolManager->quickTool()->getInk(0)->isSelection()))) {
-    // Transform selected pixels
-    if (editor->isActive() && document->isMaskVisible() &&
+    // Transform selected pixels. Skipped in Easymetric panels
+    // (draw-only rule above): a transform handle sits on the
+    // selection corners/edges, so grabbing one would scale,
+    // rotate or skew the selection from a canvas edge. Moving
+    // the selection edges/pixels (below) still works.
+    if (!isEasymetricPanelEditor(editor) && editor->isActive() && document->isMaskVisible() &&
         m_decorator->getTransformHandles(editor) &&
         (!Preferences::instance().selection.modifiersDisableHandles() ||
          msg->modifiers() == kKeyNoneModifier)) {
@@ -495,7 +554,23 @@ bool StandbyState::onSetCursor(Editor* editor, const gfx::Point& mouseScreenPos)
       return true;
     }
     else if (ink->isCelMovement()) {
-      if (resizeCelBounds(editor).contains(mouseScreenPos))
+      // Easymetric panels are draw-only: the Move tool only
+      // ever moves selected pixels (see onMouseDown), never the
+      // whole sheet, so without a movable selection the cursor
+      // must not promise a move.
+      if (isEasymetricPanelEditor(editor)) {
+        // Same real-sub-selection rule as onMouseDown: the
+        // studio face mask is not a user selection, and without
+        // one the Move tool moves nothing in a panel, so the
+        // cursor must not promise a move.
+        Doc* doc = editor->document();
+        if (doc && doc->isMaskVisible() && !isStudioFaceMask(editor) &&
+            editor->canStartMovingSelectionPixels())
+          editor->showMouseCursor(kMoveCursor);
+        else
+          editor->showMouseCursor(kArrowCursor);
+      }
+      else if (resizeCelBounds(editor).contains(mouseScreenPos))
         editor->showMouseCursor(kSizeSECursor);
       else
         editor->showMouseCursor(kMoveCursor);
@@ -949,6 +1024,13 @@ bool StandbyState::Decorator::onSetCursor(tools::Ink* ink,
   if (!editor->isActive())
     return false;
 
+  // Easymetric panels are draw-only: no transform-handle or
+  // symmetry-handle cursor may ever appear in a panel. The
+  // caller (StandbyState::onSetCursor) then shows the brush
+  // preview / selection / move cursor for the active tool.
+  if (isEasymetricPanelEditor(editor))
+    return false;
+
   if (ink && ink->isSelection() && editor->document()->isMaskVisible() &&
       (!Preferences::instance().selection.modifiersDisableHandles() ||
        os::System::instance()->keyModifiers() == kKeyNoneModifier)) {
@@ -1061,6 +1143,13 @@ void StandbyState::Decorator::postRenderDecorator(EditorPostRender* render)
 {
   Editor* editor = render->getEditor();
 
+  // Easymetric panels are draw-only: a handle that is drawn
+  // but cannot be grabbed is a lie, so neither transform
+  // handles nor symmetry handles are drawn in a panel. The
+  // symmetry axis line itself is drawn elsewhere and stays.
+  if (isEasymetricPanelEditor(editor))
+    return;
+
   // Draw transformation handles (if the mask is visible and isn't frozen).
   if (editor->isActive() && editor->editorFlags() & Editor::kShowMask &&
       editor->document()->isMaskVisible() && !editor->document()->mask()->isFrozen()) {
@@ -1089,6 +1178,12 @@ void StandbyState::Decorator::postRenderDecorator(EditorPostRender* render)
 
 void StandbyState::Decorator::getInvalidDecoratoredRegion(Editor* editor, gfx::Region& region)
 {
+  // Easymetric panels are draw-only: no symmetry handles are
+  // drawn there (see postRenderDecorator), so there is no
+  // handle region to invalidate.
+  if (isEasymetricPanelEditor(editor))
+    return;
+
   Handles handles;
   if (getSymmetryHandles(editor, handles)) {
     for (const auto& handle : handles)
