@@ -2,6 +2,12 @@
 -- Easymetric 6-Surface Live Studio - 4 Requirements Comprehensive Verification
 -- Aseprite 2.0 Adversarial Test Suite
 -- ==============================================================================
+-- NOTE (2026-11-06): updated for the single-layer model (54114e3d6):
+-- setupSurfaces divides the given sprite into 3x2 faces and creates
+-- only Surface_Base; it no longer expands the canvas, pre-fills a
+-- full box, or creates a Texture sheet from a blank sprite. TC 1.2,
+-- 2.3-2.8, 4.2, 4.3 were updated to that contract; TC 4.6 is covered
+-- by the rebuildSharedSheets fix (missing face slices are created).
 
 local kFaceTop = 0
 local kFaceDown = 1
@@ -161,10 +167,25 @@ describe("Requirement 1: 3D Preview Geometry Clipping Bug Fix", function()
   end)
 
   it("TC 1.2: Voxel volume raymarching correctly samples full geometry across Diffuse, Normal, Depth channels", function()
-    local spr = Sprite(24, 24)
+    -- Updated 2026-11-06 (single-layer model): setupSurfaces no longer
+    -- pre-fills a full opaque box, so a fresh undrawn sprite bakes
+    -- 0 lit pixels. Fill the Base sheet first, then bake: the test
+    -- still proves the raymarcher generates solid geometry, from
+    -- real drawn content instead of the removed starter fill.
+    -- A 72x48 sprite divides into 24x24 faces, the same volume
+    -- the old starter-filled 24x24 sprite produced.
+    local spr = Sprite(72, 48)
     app.activeSprite = spr
 
     app.command.EasymetricStudio{ action = "setupSurfaces" }
+
+    local baseLyr = nil
+    for _, l in ipairs(spr.layers) do
+      if l.name == "Surface_Base" then baseLyr = l break end
+    end
+    assert_not_nil(baseLyr, "Surface_Base layer exists")
+    baseLyr:cel(1).image:clear(Color{ r = 255, g = 255, b = 255, a = 255 })
+
     app.command.EasymetricStudio{ action = "bake3D", yaw = 45, pitch = 30 }
 
     local diffLyr, normLyr, deptLyr = nil, nil, nil
@@ -278,6 +299,21 @@ end)
 -- REQUIREMENT 2: Two-Layer Smart Object & Clipping Structure
 -- ==============================================================================
 describe("Requirement 2: Two-Layer Smart Object & Clipping Structure", function()
+  -- Updated 2026-11-06 (single-layer model): setup no longer creates
+  -- a Texture sheet from a blank sprite, so tests that need the
+  -- shared 2-layer sheets build them explicitly first, then run
+  -- the action under test on that real 2-layer state.
+  local function makeTwoLayerSheets(spr)
+    local baseLyr = spr.layers[1]
+    baseLyr.name = "Surface_Base"
+    local texLyr = spr:newLayer()
+    texLyr.name = "Surface_Texture"
+    local sheetImg = Image(spr.width, spr.height)
+    sheetImg:clear(Color{ r = 255, g = 255, b = 255, a = 255 })
+    spr:newCel(texLyr, 1, sheetImg, Point(0, 0))
+    return baseLyr, texLyr
+  end
+
   it("TC 2.1: Base layer acts as alpha clipping mask for overlaying texture layer", function()
     local spr = Sprite(16, 16)
     local baseLayer = spr.layers[1]
@@ -359,6 +395,8 @@ describe("Requirement 2: Two-Layer Smart Object & Clipping Structure", function(
     local spr = Sprite(24, 24)
     app.activeSprite = spr
 
+    makeTwoLayerSheets(spr)
+
     app.command.EasymetricStudio{ action = "setupSmartObjects" }
 
     local baseLyr, texLyr = nil, nil
@@ -376,6 +414,8 @@ describe("Requirement 2: Two-Layer Smart Object & Clipping Structure", function(
   it("TC 2.4: EasymetricStudio convertToGroups unpacks smart object texture into layer group", function()
     local spr = Sprite(24, 24)
     app.activeSprite = spr
+
+    makeTwoLayerSheets(spr)
 
     app.command.EasymetricStudio{ action = "setupSmartObjects" }
     app.command.EasymetricStudio{ action = "convertToGroups" }
@@ -396,6 +436,8 @@ describe("Requirement 2: Two-Layer Smart Object & Clipping Structure", function(
     local spr = Sprite(24, 24)
     app.activeSprite = spr
 
+    makeTwoLayerSheets(spr)
+
     app.command.EasymetricStudio{ action = "setupGroups" }
 
     local baseLyr, texLyr = nil, nil
@@ -406,12 +448,15 @@ describe("Requirement 2: Two-Layer Smart Object & Clipping Structure", function(
 
     assert_not_nil(baseLyr, "Surface_Base layer exists")
     assert_not_nil(texLyr, "Surface_Texture layer exists")
+    assert_eq(#spr.slices, 6, "Six face slices exist for the shared sheets")
     spr:close()
   end)
 
   it("TC 2.6: Semi-transparent texture layer alpha-blends over base layer without discarding base", function()
     local spr = Sprite(24, 24)
     app.activeSprite = spr
+
+    makeTwoLayerSheets(spr)
 
     app.command.EasymetricStudio{ action = "setupGroups" }
 
@@ -463,6 +508,9 @@ describe("Requirement 2: Two-Layer Smart Object & Clipping Structure", function(
   it("TC 2.7: Converting smart objects to groups preserves base layer fallback in 3D raymarching", function()
     local spr = Sprite(24, 24)
     app.activeSprite = spr
+
+    makeTwoLayerSheets(spr)
+
     app.command.EasymetricStudio{ action = "setupSmartObjects" }
 
     local baseLyr = nil
@@ -521,6 +569,8 @@ describe("Requirement 2: Two-Layer Smart Object & Clipping Structure", function(
     local spr = Sprite(24, 24)
     app.activeSprite = spr
 
+    makeTwoLayerSheets(spr)
+
     app.command.EasymetricStudio{ action = "setupGroups" }
 
     local baseLyr, texLyr = nil, nil
@@ -536,8 +586,20 @@ describe("Requirement 2: Two-Layer Smart Object & Clipping Structure", function(
     assert_not_nil(bCel, "Base cel exists")
     assert_not_nil(tCel, "Texture cel exists")
 
-    assert_true(spr.width >= 3 * 24, "Sprite width accommodates 3 columns")
-    assert_true(spr.height >= 2 * 24, "Sprite height accommodates 2 rows")
+    -- Updated 2026-11-06: the canvas is no longer expanded to 3x2
+    -- of the face size; setup divides the given sprite into 3x2
+    -- faces (24x24 -> 8x12 faces) and the canvas stays 24x24.
+    assert_eq(spr.width, 24, "Sprite canvas width stays 24 (divided, not expanded)")
+    assert_eq(spr.height, 24, "Sprite canvas height stays 24 (divided, not expanded)")
+
+    local slices = {}
+    for _, sl in ipairs(spr.slices) do
+      slices[sl.name] = sl.bounds
+    end
+    assert_eq(slices["TOP"].width, 8, "Top slice width = 8")
+    assert_eq(slices["TOP"].height, 12, "Top slice height = 12")
+    assert_eq(slices["FRONT"].width, 8, "Front slice width = 8")
+    assert_eq(slices["FRONT"].height, 12, "Front slice height = 12")
 
     spr:close()
   end)
@@ -802,9 +864,10 @@ describe("Requirement 4: Linked Surface Dimension Dependencies", function()
     app.command.EasymetricStudio{ action = "setupSurfaces" }
 
     -- Resize Top to (32, 48). PR #5 decoupled sizing: only the resized
-    -- face changes size. Other faces keep their initial 24x24 size, and
-    -- the canvas becomes exactly the sum of column widths / row heights:
-    -- width = max(32,24) + 24 + 24 = 80, height = max(48,24,24) + 24 = 72.
+    -- face changes size. Other faces keep their initial 8x12 size
+    -- (a 24x24 sprite divides into 3x2 faces of 8x12), and the
+    -- canvas becomes exactly the sum of column widths / row heights:
+    -- width = max(32,8) + 8 + 8 = 48, height = max(48,12,12) + 12 = 60.
     app.command.EasymetricStudio{ action = "linkDims", face = "top", width = 32, height = 48 }
 
     -- Verify slice bounds
@@ -815,21 +878,21 @@ describe("Requirement 4: Linked Surface Dimension Dependencies", function()
 
     assert_eq(slices["TOP"].width, 32, "Top slice width = 32")
     assert_eq(slices["TOP"].height, 48, "Top slice height = 48")
-    assert_eq(slices["DOWN"].width, 24, "Bottom slice width unchanged = 24")
-    assert_eq(slices["DOWN"].height, 24, "Bottom slice height unchanged = 24")
+    assert_eq(slices["DOWN"].width, 8, "Bottom slice width unchanged = 8")
+    assert_eq(slices["DOWN"].height, 12, "Bottom slice height unchanged = 12")
 
-    assert_eq(slices["FRONT"].width, 24, "Front slice width unchanged = 24")
-    assert_eq(slices["FRONT"].height, 24, "Front slice height unchanged = 24")
-    assert_eq(slices["BACK"].width, 24, "Back slice width unchanged = 24")
-    assert_eq(slices["BACK"].height, 24, "Back slice height unchanged = 24")
+    assert_eq(slices["FRONT"].width, 8, "Front slice width unchanged = 8")
+    assert_eq(slices["FRONT"].height, 12, "Front slice height unchanged = 12")
+    assert_eq(slices["BACK"].width, 8, "Back slice width unchanged = 8")
+    assert_eq(slices["BACK"].height, 12, "Back slice height unchanged = 12")
 
-    assert_eq(slices["RIGHT"].width, 24, "Right slice width unchanged = 24")
-    assert_eq(slices["RIGHT"].height, 24, "Right slice height unchanged = 24")
-    assert_eq(slices["LEFT"].width, 24, "Left slice width unchanged = 24")
-    assert_eq(slices["LEFT"].height, 24, "Left slice height unchanged = 24")
+    assert_eq(slices["RIGHT"].width, 8, "Right slice width unchanged = 8")
+    assert_eq(slices["RIGHT"].height, 12, "Right slice height unchanged = 12")
+    assert_eq(slices["LEFT"].width, 8, "Left slice width unchanged = 8")
+    assert_eq(slices["LEFT"].height, 12, "Left slice height unchanged = 12")
 
-    assert_eq(spr.width, 80, "Sprite canvas width = 32+24+24 (exact UV layout)")
-    assert_eq(spr.height, 72, "Sprite canvas height = 48+24 (exact UV layout)")
+    assert_eq(spr.width, 48, "Sprite canvas width = 32+8+8 (exact UV layout)")
+    assert_eq(spr.height, 60, "Sprite canvas height = 48+12 (exact UV layout)")
 
     spr:close()
   end)
@@ -841,8 +904,9 @@ describe("Requirement 4: Linked Surface Dimension Dependencies", function()
     app.command.EasymetricStudio{ action = "setupSurfaces" }
 
     -- Resize Front to (64, 40). PR #5 decoupled sizing: only Front
-    -- changes. Other faces keep 24x24, canvas = exact UV layout:
-    -- width = 24 + max(64,24) + 24 = 112, height = max(24,40,24) + 24 = 64.
+    -- changes. Other faces keep 8x12 (a 24x24 sprite divides into
+    -- 3x2 faces of 8x12), canvas = exact UV layout:
+    -- width = 8 + max(64,8) + 8 = 80, height = max(12,40,12) + 12 = 52.
     app.command.EasymetricStudio{ action = "linkDims", face = "front", width = 64, height = 40 }
 
     local slices = {}
@@ -852,17 +916,17 @@ describe("Requirement 4: Linked Surface Dimension Dependencies", function()
 
     assert_eq(slices["FRONT"].width, 64, "Front width = 64")
     assert_eq(slices["FRONT"].height, 40, "Front height = 40")
-    assert_eq(slices["BACK"].width, 24, "Back width unchanged = 24")
-    assert_eq(slices["BACK"].height, 24, "Back height unchanged = 24")
+    assert_eq(slices["BACK"].width, 8, "Back width unchanged = 8")
+    assert_eq(slices["BACK"].height, 12, "Back height unchanged = 12")
 
-    assert_eq(slices["TOP"].width, 24, "Top width unchanged = 24")
-    assert_eq(slices["TOP"].height, 24, "Top height unchanged = 24")
+    assert_eq(slices["TOP"].width, 8, "Top width unchanged = 8")
+    assert_eq(slices["TOP"].height, 12, "Top height unchanged = 12")
 
-    assert_eq(slices["RIGHT"].width, 24, "Right width unchanged = 24")
-    assert_eq(slices["RIGHT"].height, 24, "Right height unchanged = 24")
+    assert_eq(slices["RIGHT"].width, 8, "Right width unchanged = 8")
+    assert_eq(slices["RIGHT"].height, 12, "Right height unchanged = 12")
 
-    assert_eq(spr.width, 112, "Sprite canvas width = 24+64+24 (exact UV layout)")
-    assert_eq(spr.height, 64, "Sprite canvas height = 40+24 (exact UV layout)")
+    assert_eq(spr.width, 80, "Sprite canvas width = 8+64+8 (exact UV layout)")
+    assert_eq(spr.height, 52, "Sprite canvas height = 40+12 (exact UV layout)")
 
     spr:close()
   end)

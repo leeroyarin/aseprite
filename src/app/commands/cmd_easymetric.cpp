@@ -1128,8 +1128,24 @@ static void rebuildSharedSheets(Doc* doc, const int newW[kFaceCount],
     api.setSpriteSize(spr, newSheetW, newSheetH);
     for (int f = 0; f < kFaceCount; ++f) {
       const gfx::Rect uv = sharedUVRectExact(f, newColW, newRowH, newW[f], newH[f]);
-      if (doc::Slice* sl = findSliceForFace(spr, f))
+      doc::Slice* sl = findSliceForFace(spr, f);
+      if (!sl) {
+        // A face with no slice yet (e.g. only "surface_front"
+        // existed when linkDims ran) must get one: the studio
+        // and sharedFaceSizes need all six face slices to exist.
+        // Previously this loop only updated slices that already
+        // existed, so a linkDims on such a document left the
+        // other five faces sliceless (four-requirements TC 4.6).
+        sl = new doc::Slice;
+        sl->setName(kFaceSpecs[f].sliceName);
+        sl->userData().setColor(
+          doc::rgba(kFaceSpecs[f].r, kFaceSpecs[f].g, kFaceSpecs[f].b, 255));
+        sl->insert(0, doc::SliceKey(uv));
+        tx(new cmd::AddSlice(spr, sl));
+      }
+      else {
         tx(new cmd::SetSliceKey(sl, 0, doc::SliceKey(uv)));
+      }
     }
     tx.commit();
     doc->notifyGeneralUpdate();
