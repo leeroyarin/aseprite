@@ -5503,6 +5503,26 @@ private:
     if (doc && doc->sprite()) {
       doc::Sprite* spr = doc->sprite();
       SharedSurfaceLayers shared = findSharedLayers(spr);
+      // Hidden-Base tip (2026-11-07, William's grey-panels report):
+      // when Surface_Base is hidden the panels show the document
+      // composite, i.e. the depth map only (flat grey 128 with the
+      // depth dabs), while the Preview stays coloured because it
+      // samples the Base/Depth images directly. That looks like a
+      // rendering bug, so say so once per hide in the status bar.
+      // Edge-triggered: re-arms when Base becomes visible again.
+      // Never auto-shows Base: viewing the depth map alone is a
+      // legitimate workflow.
+      if (shared.baseLayer && !shared.baseLayer->isVisible()) {
+        if (!m_baseHiddenTipShown) {
+          if (auto* sb = StatusBar::instance())
+            sb->showTip(4000, "Surface_Base is hidden - panels show the depth map only. "
+                               "Click its eye in the timeline to show it again.");
+          m_baseHiddenTipShown = true;
+        }
+      }
+      else {
+        m_baseHiddenTipShown = false;
+      }
       if (shared.baseLayer || shared.textureLayer) {
         // Canvas resize -> UV mapping: if the canvas was
         // resized by hand (sprite size no longer equals the
@@ -6309,6 +6329,10 @@ private:
   PaneActionButton* m_drawToolBtn = nullptr;
   PaneActionButton* m_depthToolBtn = nullptr;
   bool m_depthToolOn = false;
+  // Hidden-Base status tip (2026-11-07): set while Surface_Base is
+  // hidden and the tip has already been shown once for that hide,
+  // so pollAndRender warns once per hide instead of every 33 ms.
+  bool m_baseHiddenTipShown = false;
   ui::ComboBox* m_depthModeCombo = nullptr;
   ui::Slider* m_depthBrushSlider = nullptr;
   // Depth-sculpt stroke state: one Tx for the whole drag, so a
