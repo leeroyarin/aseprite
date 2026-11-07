@@ -36,7 +36,7 @@
     - A hovered header button shows the hover colour (14,165,233), not the on colour — the harness moves the cursor away before reading button states.
   - Post-build sim: panel_goals_sim.py re-run, **54/54 PASS** (36 G1/G2 + 18 G3b). Harness measurements agree with the sim except the 1px mirror-position note above (sim naive y=16, measured y=15 — same face-centre axis, Aseprite's −1 brush term).
   - Prompt-check (PUSH_FLOW): G3 per-panel symmetry — YES, implemented + simulated before and after + built + suites 163/163 + GUI harness 15/15 + both-on probe. G1/G2 are NOT in this PR. The PR #29 Move gap is NOT bundled (out of scope). William merges; Windows test still needed (panel SX/SY toggles, switching panels, face-centre mirror positions, close/reopen).
-  - PR: (link + head SHA added below once created).
+  - PR: **Draft PR #37** — https://github.com/leeroyarin/aseprite/pull/37, branch `fix/easymetric-per-panel-symmetry`, base `Aseprite-2.0`, head **1177a0b5** (cmd + HANDOFF, remote blobs verified byte-identical to local). Do NOT undraft, do NOT merge — William merges.
 
 ## 2026-11-07 — Next build: depth sculpts real mesh, Depth tool in a tool strip, whole-column pop-out, Fields wheel scroll (IN PROGRESS — build running, NO PR yet)
 
