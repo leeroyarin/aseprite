@@ -3546,11 +3546,11 @@ public:
       m_headers[f]->addActionButton(m_animLinkButtons[f]);
 
       m_symXButtons[f] = new PaneActionButton("SX", true);
-      m_symXButtons[f]->Click.connect([this] { toggleSymmetryAxis(true); });
+      m_symXButtons[f]->Click.connect([this, f] { toggleSymmetryAxis(f, true); });
       m_headers[f]->addActionButton(m_symXButtons[f]);
 
       m_symYButtons[f] = new PaneActionButton("SY", true);
-      m_symYButtons[f]->Click.connect([this] { toggleSymmetryAxis(false); });
+      m_symYButtons[f]->Click.connect([this, f] { toggleSymmetryAxis(f, false); });
       m_headers[f]->addActionButton(m_symYButtons[f]);
 
       m_flipHButtons[f] = new PaneActionButton("FH", false);
@@ -3752,6 +3752,11 @@ public:
     std::remove(easymetricHubMarkerPath().c_str());
     restoreWheelZoomPref();
     if (Doc* doc = m_docView->document()) {
+      // G3: give the document back its entry symmetry (the
+      // per-panel face-centre axis must not leak into the main
+      // editor). Runs before the mask restore; both are undone
+      // on exit the same way they were saved on entry.
+      restoreDocSymmetry();
       if (m_savedMask) {
         doc->setMask(m_savedMask.get());
         doc->setMaskVisible(true);
@@ -4012,32 +4017,76 @@ public:
     }
   }
 
-  // Symmetry is document-wide, so a Sym X/Y header button toggles
-  // the same document bit as the Fields checkbox, and every header
-  // button plus both Fields checkboxes show the new state.
-  void toggleSymmetryAxis(bool isX)
+  // G3 per-panel symmetry (2026-11-07, William): each face keeps
+  // its own SX/SY, and the studio follows the active panel. A
+  // header button toggles ONLY its own panel's stored state (its
+  // button shows the new state); the document only changes when
+  // that panel is the active one — the active panel is what the
+  // document follows. A toggle on a non-active panel is stored
+  // and applied when that panel activates (at most one poll later
+  // if the click lands before the poll notices the switch).
+  void toggleSymmetryAxis(int face, bool isX)
   {
+    if (face < 0 || face >= kFaceCount)
+      return;
+    initPanelSymmetry();
+    if (isX)
+      m_symXFace[face] = !m_symXFace[face];
+    else
+      m_symYFace[face] = !m_symYFace[face];
+    if (m_symXButtons[face])
+      m_symXButtons[face]->setOn(m_symXFace[face]);
+    if (m_symYButtons[face])
+      m_symYButtons[face]->setOn(m_symYFace[face]);
+    if (face == m_lastActiveFace)
+      applyPanelSymmetry(face);
+  }
+
+  // G3: first use per studio session — remember the document
+  // symmetry to restore on exit, and seed every panel's stored
+  // state from it, so the studio opens consistent with the
+  // document instead of always showing symmetry off.
+  void initPanelSymmetry()
+  {
+    if (m_symFacesInit)
+      return;
+    m_symFacesInit = true;
     Doc* doc = m_docView ? m_docView->document() : nullptr;
     if (!doc || !doc->sprite())
       return;
     auto& docPref = Preferences::instance().document(doc);
-    int mode = int(docPref.symmetry.mode());
-    const int bit = isX ? int(app::gen::SymmetryMode::HORIZONTAL)
-                        : int(app::gen::SymmetryMode::VERTICAL);
-    mode ^= bit;
-    applySymmetryState(
-      (mode & int(app::gen::SymmetryMode::HORIZONTAL)) != 0,
-      (mode & int(app::gen::SymmetryMode::VERTICAL)) != 0,
-      false);
+    const int mode = int(docPref.symmetry.mode());
+    const bool symX = (mode & int(app::gen::SymmetryMode::HORIZONTAL)) != 0;
+    const bool symY = (mode & int(app::gen::SymmetryMode::VERTICAL)) != 0;
+    for (int f = 0; f < kFaceCount; ++f) {
+      m_symXFace[f] = symX;
+      m_symYFace[f] = symY;
+    }
+    m_savedSymMode = mode;
+    m_savedSymXAxis = docPref.symmetry.xAxis();
+    m_savedSymYAxis = docPref.symmetry.yAxis();
+    m_symDocSaved = true;
   }
 
-  void applySymmetryState(bool symX, bool symY, bool recenter)
+  // G3: apply one panel's stored SX/SY + its face-centre axis to
+  // the document symmetry. The tool loop snapshots doc prefs at
+  // stroke start (tool_loop_impl.cpp), so this is all a stroke
+  // needs to mirror around this face's centre. The axis is
+  // always set (even with mode NONE) so it is correct the moment
+  // an axis is turned on. Fields checkboxes show this panel's
+  // state; header buttons already show their own face's state.
+  // Also records the face rect, so pollAndRender can re-apply
+  // when a Fields edit moves the face centre.
+  void applyPanelSymmetry(int face)
   {
     Doc* doc = m_docView ? m_docView->document() : nullptr;
-    if (!doc || !doc->sprite())
+    if (!doc || !doc->sprite() || face < 0 || face >= kFaceCount)
       return;
+    initPanelSymmetry();
     auto& pref = Preferences::instance();
     auto& docPref = pref.document(doc);
+    const bool symX = m_symXFace[face];
+    const bool symY = m_symYFace[face];
     int mode = int(app::gen::SymmetryMode::NONE);
     if (symX)
       mode |= int(app::gen::SymmetryMode::HORIZONTAL);
@@ -4046,54 +4095,65 @@ public:
     if (mode != int(app::gen::SymmetryMode::NONE))
       pref.symmetryMode.enabled(true);
     docPref.symmetry.mode(static_cast<app::gen::SymmetryMode>(mode));
-
-    const int sprW = doc->sprite()->width();
-    const int sprH = doc->sprite()->height();
-    if (recenter ||
-        docPref.symmetry.xAxis() < 0 || docPref.symmetry.xAxis() > sprW ||
-        docPref.symmetry.yAxis() < 0 || docPref.symmetry.yAxis() > sprH) {
-      docPref.symmetry.xAxis(sprW * 0.5);
-      docPref.symmetry.yAxis(sprH * 0.5);
-    }
-
+    const gfx::Rect faceRect = sharedFaceRect(doc->sprite(), face);
+    docPref.symmetry.xAxis(faceRect.x + faceRect.w * 0.5);
+    docPref.symmetry.yAxis(faceRect.y + faceRect.h * 0.5);
+    m_lastSymFaceRect = faceRect;
     if (m_symXCheck)
       m_symXCheck->setSelected(symX);
     if (m_symYCheck)
       m_symYCheck->setSelected(symY);
-    for (int f = 0; f < kFaceCount; ++f) {
-      if (m_symXButtons[f])
-        m_symXButtons[f]->setOn(symX);
-      if (m_symYButtons[f])
-        m_symYButtons[f]->setOn(symY);
-    }
     for (Editor* ed : m_editors) {
       if (ed)
         ed->invalidate();
     }
   }
 
-  // Read the document's symmetry mode and show it in the Fields
-  // checkboxes and every header Sym button. Called once after the
-  // Fields controls are built, so the studio opens consistent with
-  // the document instead of always showing symmetry off.
-  void syncSymmetryButtons()
+  // G3: restore the document symmetry saved on entry (mode +
+  // axes). Called when focus leaves all panels and in the
+  // destructor, so the studio never leaks a face-centre axis into
+  // the main editor. It does NOT invalidate the panel editors:
+  // no panel is active when this runs, and the main editor
+  // repaints on its own — which also keeps the destructor path
+  // free of editor calls. Fields checkboxes show the restored
+  // document state.
+  void restoreDocSymmetry()
   {
+    if (!m_symDocSaved)
+      return;
     Doc* doc = m_docView ? m_docView->document() : nullptr;
     if (!doc || !doc->sprite())
       return;
     auto& docPref = Preferences::instance().document(doc);
-    const int mode = int(docPref.symmetry.mode());
-    const bool symX = (mode & int(app::gen::SymmetryMode::HORIZONTAL)) != 0;
-    const bool symY = (mode & int(app::gen::SymmetryMode::VERTICAL)) != 0;
+    docPref.symmetry.mode(static_cast<app::gen::SymmetryMode>(m_savedSymMode));
+    docPref.symmetry.xAxis(m_savedSymXAxis);
+    docPref.symmetry.yAxis(m_savedSymYAxis);
     if (m_symXCheck)
-      m_symXCheck->setSelected(symX);
+      m_symXCheck->setSelected(
+        (m_savedSymMode & int(app::gen::SymmetryMode::HORIZONTAL)) != 0);
     if (m_symYCheck)
-      m_symYCheck->setSelected(symY);
+      m_symYCheck->setSelected(
+        (m_savedSymMode & int(app::gen::SymmetryMode::VERTICAL)) != 0);
+  }
+
+  // G3: seed every panel's stored state from the document, show
+  // each header button its own panel's state, and show the Fields
+  // checkboxes the active panel's state. Called once after the
+  // Fields controls are built, so the studio opens consistent
+  // with the document instead of always showing symmetry off.
+  void syncSymmetryButtons()
+  {
+    initPanelSymmetry();
+    const int face = (m_lastActiveFace >= 0) ? m_lastActiveFace : 0;
+    if (m_symXCheck)
+      m_symXCheck->setSelected(m_symXFace[face]);
+    if (m_symYCheck)
+      m_symYCheck->setSelected(m_symYFace[face]);
     for (int f = 0; f < kFaceCount; ++f) {
       if (m_symXButtons[f])
-        m_symXButtons[f]->setOn(symX);
+        m_symXButtons[f]->setOn(m_symXFace[f]);
       if (m_symYButtons[f])
-        m_symYButtons[f]->setOn(symY);
+        m_symYButtons[f]->setOn(m_symYFace[f]);
     }
   }
 
@@ -5315,20 +5375,31 @@ private:
       }
     });
 
-    // Fields checkboxes and header Sym buttons share one state (see
-    // applySymmetryState): the checkbox Click reads its own new
-    // state and applies it everywhere.
-    auto applySymmetry = [this](bool recenter) {
+    // Fields checkboxes act on the ACTIVE panel (see
+    // applyPanelSymmetry): the checkbox Click reads its own new
+    // state and stores it as that panel's state. With no panel
+    // active yet, they act on Top (face 0). The checkboxes always
+    // show the active panel's state.
+    auto applySymmetry = [this] {
       if (!m_symXCheck || !m_symYCheck)
         return;
-      applySymmetryState(m_symXCheck->isSelected(),
-                         m_symYCheck->isSelected(),
-                         recenter);
+      initPanelSymmetry();
+      const int face = (m_lastActiveFace >= 0) ? m_lastActiveFace : 0;
+      m_symXFace[face] = m_symXCheck->isSelected();
+      m_symYFace[face] = m_symYCheck->isSelected();
+      if (m_symXButtons[face])
+        m_symXButtons[face]->setOn(m_symXFace[face]);
+      if (m_symYButtons[face])
+        m_symYButtons[face]->setOn(m_symYFace[face]);
+      applyPanelSymmetry(face);
     };
 
-    m_symXCheck->Click.connect([applySymmetry] { applySymmetry(false); });
-    m_symYCheck->Click.connect([applySymmetry] { applySymmetry(false); });
-    centerSymBtn->Click.connect([applySymmetry] { applySymmetry(true); });
+    m_symXCheck->Click.connect([applySymmetry] { applySymmetry(); });
+    m_symYCheck->Click.connect([applySymmetry] { applySymmetry(); });
+    // "Centre" re-applies the active panel's face-centre axis.
+    centerSymBtn->Click.connect([this] {
+      applyPanelSymmetry((m_lastActiveFace >= 0) ? m_lastActiveFace : 0);
+    });
 
     // Show the document's actual symmetry mode in the Fields
     // checkboxes and the header Sym buttons on open.
@@ -5596,10 +5667,28 @@ private:
               doc->notifySelectionChanged();
             }
             m_lastActiveFace = activeFace;
+            // G3: follow the active panel — its stored SX/SY and
+            // its face-centre axis become the document symmetry,
+            // so the next stroke in this panel mirrors around
+            // this face's centre.
+            applyPanelSymmetry(activeFace);
           }
           else if (activeFace < 0) {
             m_lastActiveFace = -1;
+            // G3: no panel is active — give the document back its
+            // entry symmetry until a panel is active again.
+            restoreDocSymmetry();
           }
+        }
+        // G3: if the active face's rect changed (a Fields W/H/D
+        // edit, a sprite resize), re-apply its symmetry so the
+        // axis tracks the face centre. The cache is updated by
+        // applyPanelSymmetry; only the active face is checked,
+        // and only while its editor is idle.
+        if (m_lastActiveFace >= 0 && curEd && isPanelEditorIdle(curEd)) {
+          const gfx::Rect symRect = sharedFaceRect(spr, m_lastActiveFace);
+          if (symRect != m_lastSymFaceRect)
+            applyPanelSymmetry(m_lastActiveFace);
         }
       }
     }
@@ -6346,6 +6435,22 @@ private:
   int m_dragRowCol = 0;
   int m_lastActiveFace = -1;
   doc::MaskRef m_savedMask;
+  // G3 per-panel symmetry (2026-11-07, William): each face keeps
+  // its own SX/SY. The studio follows the active panel: when a
+  // panel activates, its stored state + its face-centre axis are
+  // applied to the document symmetry (the tool loop reads doc
+  // prefs, so strokes mirror around that axis). Leaving all
+  // panels, or closing the studio, restores the document symmetry
+  // saved on entry, so the studio never leaks a face-centre axis
+  // into the main editor.
+  bool m_symXFace[kFaceCount] = { false, false, false, false, false, false };
+  bool m_symYFace[kFaceCount] = { false, false, false, false, false, false };
+  bool m_symFacesInit = false;
+  int m_savedSymMode = int(app::gen::SymmetryMode::NONE);
+  double m_savedSymXAxis = 0.0;
+  double m_savedSymYAxis = 0.0;
+  bool m_symDocSaved = false;
+  gfx::Rect m_lastSymFaceRect;
 
   ui::Timer m_timer;
   uint64_t m_lastHash = 0;
