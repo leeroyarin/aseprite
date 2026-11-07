@@ -479,6 +479,11 @@ struct SixSurfaceData {
   std::array<int, kFaceCount> h = { 24, 24, 24, 24, 24, 24 };
   std::array<std::vector<uint32_t>, kFaceCount> pixels;
   std::array<std::vector<uint8_t>, kFaceCount> depthPixels;
+  // Depth alpha: 255 = opaque depth value, <= 16 = transparent =
+  // through-hole (William's spec: transparent cuts past the centre).
+  // Kept separate from depthPixels because the gray of a transparent
+  // pixel reads as 0 (black = deepest), which is a different thing.
+  std::array<std::vector<uint8_t>, kFaceCount> depthAlpha;
   std::array<std::vector<uint8_t>, kFaceCount> baseAlpha;
   std::array<bool, kFaceCount> hasBaseLayer = { false, false, false, false, false, false };
   std::array<gfx::Rect, kFaceCount> bounds;
@@ -494,6 +499,7 @@ struct SixSurfaceData {
       h[f] = S;
       pixels[f].assign(S * S, 0);
       depthPixels[f].assign(S * S, 128);
+      depthAlpha[f].assign(S * S, 255);
       baseAlpha[f].assign(S * S, 0);
     }
     hasBaseLayer.fill(false);
@@ -508,6 +514,7 @@ struct SixSurfaceData {
     h[face] = fh;
     pixels[face].assign(fw * fh, 0);
     depthPixels[face].assign(fw * fh, 128);
+    depthAlpha[face].assign(fw * fh, 255);
     baseAlpha[face].assign(fw * fh, 0);
     S = std::max(S, std::max(fw, fh));
   }
@@ -566,6 +573,23 @@ struct SixSurfaceData {
       return float(depthPixels[face][v * fw + u]) * (1.0f / 255.0f);
     }
     return pixelLuma(pixels[face][v * fw + u]);
+  }
+
+  // Depth gray at a face pixel. Returns false when the depth pixel is
+  // transparent (alpha <= 16): a through-hole, not a gray value.
+  // Used by the voxel sculptor; the normal/brightness path above
+  // deliberately keeps reading transparent as black (deepest).
+  bool depthGray(int face, int u, int v, uint8_t& gray) const
+  {
+    if (face < 0 || face >= kFaceCount) return false;
+    const int fw = w[face];
+    const int fh = h[face];
+    if (fw <= 0 || fh <= 0 || depthAlpha[face].empty()) return false;
+    u = std::clamp(u, 0, fw - 1);
+    v = std::clamp(v, 0, fh - 1);
+    if (depthAlpha[face][v * fw + u] <= 16) return false;
+    gray = depthPixels[face][v * fw + u];
+    return true;
   }
 
   bool hasPixels(int face) const
@@ -639,6 +663,31 @@ struct SculptedVoxelVolume {
   }
 };
 
+// Depth interval along one axis from the two opposing faces' depth
+// grays. gLo = depth on the lo-side face, gHi = depth on the hi-side
+// face. Returns false for a through-hole (either depth pixel
+// transparent). Gray 128 = surface stays on the box face; whiter
+// extends outward, darker carves inward, black 0 = box centre.
+// D = dim/2 per axis. Mirrors the sim1-validated model
+// (simulations-2026-11-06/sim1-depth): c_round is std::lround.
+static bool depthSurfaceInterval(const SixSurfaceData& data,
+                                 int faceLo, int uLo, int vLo,
+                                 int faceHi, int uHi, int vHi,
+                                 int loBase, int hiBase, int D,
+                                 int& lo, int& hi)
+{
+  uint8_t gLo = 128, gHi = 128;
+  if (!data.depthGray(faceLo, uLo, vLo, gLo)) return false;
+  if (!data.depthGray(faceHi, uHi, vHi, gHi)) return false;
+  if (gLo > 128)      lo = loBase - int(std::lround((float(gLo) - 128.0f) / 128.0f * float(D)));
+  else if (gLo < 128) lo = loBase + int(std::lround((128.0f - float(gLo)) / 128.0f * float(D)));
+  else                lo = loBase;
+  if (gHi > 128)      hi = hiBase + int(std::lround((float(gHi) - 128.0f) / 128.0f * float(D)));
+  else if (gHi < 128) hi = hiBase - int(std::lround((128.0f - float(gHi)) / 128.0f * float(D)));
+  else                hi = hiBase;
+  return true;
+}
+
 static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
                                               int pivX, int pivY, int pivZ)
 {
@@ -647,9 +696,39 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
   const int dimY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight], 8 });
   const int dimZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown], 8 });
 
-  vol.vx = std::clamp(dimX, 8, 64);
-  vol.vy = std::clamp(dimY, 8, 64);
-  vol.vz = std::clamp(dimZ, 8, 64);
+  // Depth sculpting (2026-11-07, William: the depth map must carve real
+  // mesh, not just bend normals). When a Surface_DEPTH layer exists, the
+  // depth gray moves the actual voxel surfaces: 128 = surface stays on
+  // the box face, whiter (Plus) extends outward, darker (Minus) carves
+  // inward, black 0 = box centre, transparent = through-hole. D = dim/2
+  // per axis. Outward extension grows the grid (padded per axis, still
+  // capped at 64). Flat 128 changes nothing. The Base silhouette logic
+  // below is untouched — Base still always wins.
+  const bool sculptDepth = data.hasCustomDepthLayer;
+  int extX = 0, extY = 0, extZ = 0;
+  if (sculptDepth) {
+    auto maxExt = [&data](int face, int D) {
+      int m = 0;
+      for (int v = 0; v < data.h[face]; ++v) {
+        for (int u = 0; u < data.w[face]; ++u) {
+          uint8_t g = 0;
+          if (data.depthGray(face, u, v, g) && g > 128)
+            m = std::max(m, int(std::lround((float(g) - 128.0f) / 128.0f * float(D))));
+        }
+      }
+      return m;
+    };
+    extX = std::max(maxExt(kFaceRight, dimX / 2), maxExt(kFaceLeft, dimX / 2));
+    extY = std::max(maxExt(kFaceTop, dimY / 2), maxExt(kFaceDown, dimY / 2));
+    extZ = std::max(maxExt(kFaceFront, dimZ / 2), maxExt(kFaceBack, dimZ / 2));
+  }
+
+  vol.vx = std::clamp(dimX + 2 * extX, 8, 64);
+  vol.vy = std::clamp(dimY + 2 * extY, 8, 64);
+  vol.vz = std::clamp(dimZ + 2 * extZ, 8, 64);
+  const int padX = (vol.vx - dimX) / 2;
+  const int padY = (vol.vy - dimY) / 2;
+  const int padZ = (vol.vz - dimZ) / 2;
   vol.solid.assign(vol.vx * vol.vy * vol.vz, 0);
 
   const bool hasTop   = data.hasPixels(kFaceTop);
@@ -668,9 +747,9 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
     return vol;
   }
 
-  const int pivIndexX = std::clamp(int(pivX * 0.01f * (vol.vx - 1)), 0, vol.vx - 1);
-  const int pivIndexY = std::clamp(int(pivY * 0.01f * (vol.vy - 1)), 0, vol.vy - 1);
-  const int pivIndexZ = std::clamp(int(pivZ * 0.01f * (vol.vz - 1)), 0, vol.vz - 1);
+  const int pivIndexX = padX + std::clamp(int(pivX * 0.01f * (dimX - 1)), 0, dimX - 1);
+  const int pivIndexY = padY + std::clamp(int(pivY * 0.01f * (dimY - 1)), 0, dimY - 1);
+  const int pivIndexZ = padZ + std::clamp(int(pivZ * 0.01f * (dimZ - 1)), 0, dimZ - 1);
 
   const bool onlyTopDown = activeTopDown && !activeFrontBack && !activeRightLeft;
   const bool onlyFrontBack = activeFrontBack && !activeTopDown && !activeRightLeft;
@@ -697,21 +776,32 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
         if (onlyRightLeft && (x < slabXMin || x > slabXMax))
           continue;
 
+        // Box coords: the Base box sits centred in the (possibly
+        // depth-padded) volume. When nothing is sculpted the pads are
+        // 0 and bx/by/bz are just x/y/z, so this changes nothing.
+        const int bx = x - padX;
+        const int by = y - padY;
+        const int bz = z - padZ;
+
         bool solid = true;
 
         if (activeTopDown) {
           const int uTop = std::clamp(
-            int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceTop]), 0, data.w[kFaceTop] - 1);
+            int((float(bx) + 0.5f) / float(dimX) * data.w[kFaceTop]), 0, data.w[kFaceTop] - 1);
           const int vTop = std::clamp(
-            int((float(z) + 0.5f) / float(vol.vz) * data.h[kFaceTop]), 0, data.h[kFaceTop] - 1);
+            int((float(bz) + 0.5f) / float(dimZ) * data.h[kFaceTop]), 0, data.h[kFaceTop] - 1);
           bool topSolid = data.isFaceSolid(kFaceTop, uTop, vTop);
 
+          // Down uv: needed for the Base OR below, and for the depth
+          // interval when sculpting (even when Down has no pixels —
+          // its depth then reads flat 128 = no displacement).
+          const int uDown = std::clamp(
+            int((float(bx) + 0.5f) / float(dimX) * data.w[kFaceDown]), 0, data.w[kFaceDown] - 1);
+          const int vDown = std::clamp(
+            int((float(dimZ - 1 - bz) + 0.5f) / float(dimZ) * data.h[kFaceDown]),
+            0, data.h[kFaceDown] - 1);
+
           if (!data.colLinked[0] && hasDown) {
-            const int uDown = std::clamp(
-              int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceDown]), 0, data.w[kFaceDown] - 1);
-            const int vDown = std::clamp(
-              int((float(vol.vz - 1 - z) + 0.5f) / float(vol.vz) * data.h[kFaceDown]),
-              0, data.h[kFaceDown] - 1);
             const bool downSolid = data.isFaceSolid(kFaceDown, uDown, vDown);
             if (data.hasBaseLayer[kFaceTop] && hasTop) {
               // Base silhouette forms outer bounding hull: unlinked Down cannot expand voxels
@@ -723,21 +813,32 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
           if (!topSolid) {
             solid = false;
           }
+          else if (sculptDepth) {
+            // Top is the lo (y=0) side, Down the hi side.
+            int loY = 0, hiY = 0;
+            if (!depthSurfaceInterval(data, kFaceTop, uTop, vTop,
+                                      kFaceDown, uDown, vDown,
+                                      padY, padY + dimY - 1, dimY / 2, loY, hiY) ||
+                y < loY || y > hiY) {
+              solid = false;
+            }
+          }
         }
 
         if (solid && activeFrontBack) {
           const int uFront = std::clamp(
-            int((float(x) + 0.5f) / float(vol.vx) * data.w[kFaceFront]), 0, data.w[kFaceFront] - 1);
+            int((float(bx) + 0.5f) / float(dimX) * data.w[kFaceFront]), 0, data.w[kFaceFront] - 1);
           const int vFront = std::clamp(
-            int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceFront]), 0, data.h[kFaceFront] - 1);
+            int((float(by) + 0.5f) / float(dimY) * data.h[kFaceFront]), 0, data.h[kFaceFront] - 1);
           bool frontSolid = data.isFaceSolid(kFaceFront, uFront, vFront);
 
+          const int uBack = std::clamp(
+            int((float(dimX - 1 - bx) + 0.5f) / float(dimX) * data.w[kFaceBack]),
+            0, data.w[kFaceBack] - 1);
+          const int vBack = std::clamp(
+            int((float(by) + 0.5f) / float(dimY) * data.h[kFaceBack]), 0, data.h[kFaceBack] - 1);
+
           if (!data.colLinked[1] && hasBack) {
-            const int uBack = std::clamp(
-              int((float(vol.vx - 1 - x) + 0.5f) / float(vol.vx) * data.w[kFaceBack]),
-              0, data.w[kFaceBack] - 1);
-            const int vBack = std::clamp(
-              int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceBack]), 0, data.h[kFaceBack] - 1);
             const bool backSolid = data.isFaceSolid(kFaceBack, uBack, vBack);
             if (data.hasBaseLayer[kFaceFront] && hasFront) {
               // Base silhouette forms outer bounding hull: unlinked Back cannot expand voxels
@@ -749,21 +850,32 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
           if (!frontSolid) {
             solid = false;
           }
+          else if (sculptDepth) {
+            // Back is the lo (z=0) side, Front the hi side.
+            int loZ = 0, hiZ = 0;
+            if (!depthSurfaceInterval(data, kFaceBack, uBack, vBack,
+                                      kFaceFront, uFront, vFront,
+                                      padZ, padZ + dimZ - 1, dimZ / 2, loZ, hiZ) ||
+                z < loZ || z > hiZ) {
+              solid = false;
+            }
+          }
         }
 
         if (solid && activeRightLeft) {
           const int uRight = std::clamp(
-            int((float(vol.vz - 1 - z) + 0.5f) / float(vol.vz) * data.w[kFaceRight]),
+            int((float(dimZ - 1 - bz) + 0.5f) / float(dimZ) * data.w[kFaceRight]),
             0, data.w[kFaceRight] - 1);
           const int vRight = std::clamp(
-            int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceRight]), 0, data.h[kFaceRight] - 1);
+            int((float(by) + 0.5f) / float(dimY) * data.h[kFaceRight]), 0, data.h[kFaceRight] - 1);
           bool sideSolid = data.isFaceSolid(kFaceRight, uRight, vRight);
 
+          const int uLeft = std::clamp(
+            int((float(bz) + 0.5f) / float(dimZ) * data.w[kFaceLeft]), 0, data.w[kFaceLeft] - 1);
+          const int vLeft = std::clamp(
+            int((float(by) + 0.5f) / float(dimY) * data.h[kFaceLeft]), 0, data.h[kFaceLeft] - 1);
+
           if (!data.colLinked[2] && hasLeft) {
-            const int uLeft = std::clamp(
-              int((float(z) + 0.5f) / float(vol.vz) * data.w[kFaceLeft]), 0, data.w[kFaceLeft] - 1);
-            const int vLeft = std::clamp(
-              int((float(y) + 0.5f) / float(vol.vy) * data.h[kFaceLeft]), 0, data.h[kFaceLeft] - 1);
             const bool leftSolid = data.isFaceSolid(kFaceLeft, uLeft, vLeft);
             if (data.hasBaseLayer[kFaceRight] && hasRight) {
               // Base silhouette forms outer bounding hull: unlinked Left cannot expand voxels
@@ -774,6 +886,16 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
           }
           if (!sideSolid) {
             solid = false;
+          }
+          else if (sculptDepth) {
+            // Left is the lo (x=0) side, Right the hi side.
+            int loX = 0, hiX = 0;
+            if (!depthSurfaceInterval(data, kFaceLeft, uLeft, vLeft,
+                                      kFaceRight, uRight, vRight,
+                                      padX, padX + dimX - 1, dimX / 2, loX, hiX) ||
+                x < loX || x > hiX) {
+              solid = false;
+            }
           }
         }
 
@@ -2568,6 +2690,7 @@ static bool extractSixSurfaces(
           const uint32_t dc = doc::get_pixel_fast<doc::RgbTraits>(depthSrcImg.get(), canvasX, canvasY);
           out.depthPixels[f][v * fw + u] = clampByte(
             doc::rgba_getr(dc) * 0.299f + doc::rgba_getg(dc) * 0.587f + doc::rgba_getb(dc) * 0.114f);
+          out.depthAlpha[f][v * fw + u] = doc::rgba_geta(dc);
         }
       }
     }
@@ -2592,6 +2715,7 @@ static bool extractSixSurfaces(
         const int btmFace = c * 2 + 1;
         out.pixels[btmFace] = out.pixels[topFace];
         out.depthPixels[btmFace] = out.depthPixels[topFace];
+        out.depthAlpha[btmFace] = out.depthAlpha[topFace];
         out.baseAlpha[btmFace] = out.baseAlpha[topFace];
         out.hasBaseLayer[btmFace] = out.hasBaseLayer[topFace];
         out.w[btmFace] = out.w[topFace];
@@ -2629,7 +2753,23 @@ static Render3DResult compute3DPreviewImages(
   const float halfX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown] }) * 0.5f;
   const float halfY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight] }) * 0.5f;
   const float halfZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown] }) * 0.5f;
-  const int maxDim = std::max({ int(halfX * 2.0f), int(halfY * 2.0f), int(halfZ * 2.0f), 24 });
+
+  SculptedVoxelVolume vol = buildSculptedVolume(data, pivX, pivY, pivZ);
+
+  // Render half-extents (2026-11-07, depth sculpting): when depth
+  // sculpting grew the volume, the ray clip box grows with it so the
+  // Base box keeps its world size and Plus bumps stick out beyond it
+  // instead of squeezing the whole model. The voxel mapping below
+  // uses these; the face-UV mapping keeps halfX/halfY/halfZ because
+  // a face's lateral extent never changes. When nothing is sculpted
+  // vol dims equal the base dims and these are exactly halfX/Y/Z.
+  const int dimX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown], 8 });
+  const int dimY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight], 8 });
+  const int dimZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown], 8 });
+  const float halfXr = (vol.vx > dimX) ? halfX * float(vol.vx) / float(dimX) : halfX;
+  const float halfYr = (vol.vy > dimY) ? halfY * float(vol.vy) / float(dimY) : halfY;
+  const float halfZr = (vol.vz > dimZ) ? halfZ * float(vol.vz) / float(dimZ) : halfZ;
+  const int maxDim = std::max({ int(halfXr * 2.0f), int(halfYr * 2.0f), int(halfZr * 2.0f), 24 });
   const int outW = maxDim * 2 + 16;
   const int outH = maxDim * 2 + 16;
 
@@ -2673,8 +2813,6 @@ static Render3DResult compute3DPreviewImages(
   res.normImg->clear(0);
   res.deptImg->clear(0);
 
-  SculptedVoxelVolume vol = buildSculptedVolume(data, pivX, pivY, pivZ);
-
   std::vector<int> faceMap(outW * outH, -1);
   const float maxDepthRange = float(maxDim) * 1.732f;
   const float Lx = -0.45f, Ly = -0.60f, Lz = 0.66f;
@@ -2712,16 +2850,16 @@ static Render3DResult compute3DPreviewImages(
         return (orig >= bMin && orig <= bMax);
       };
 
-      if (!clipAxis(ox, vdX, -halfX, halfX) ||
-          !clipAxis(oy, vdY, -halfY, halfY) ||
-          !clipAxis(oz, vdZ, -halfZ, halfZ) ||
+      if (!clipAxis(ox, vdX, -halfXr, halfXr) ||
+          !clipAxis(oy, vdY, -halfYr, halfYr) ||
+          !clipAxis(oz, vdZ, -halfZr, halfZr) ||
           t1 < nearPlane || t0 > farPlane || t0 > t1) {
         continue;
       }
 
-      const float stepSize = std::min({ (2.0f * halfX) / float(vol.vx),
-                                        (2.0f * halfY) / float(vol.vy),
-                                        (2.0f * halfZ) / float(vol.vz) }) * 0.45f;
+      const float stepSize = std::min({ (2.0f * halfXr) / float(vol.vx),
+                                        (2.0f * halfYr) / float(vol.vy),
+                                        (2.0f * halfZr) / float(vol.vz) }) * 0.45f;
       float tStart = std::max(nearPlane, t0);
       float tEnd = std::min(farPlane, t1);
       float tHit = -1.0f;
@@ -2732,18 +2870,18 @@ static Render3DResult compute3DPreviewImages(
         const float pyW = oy + t * vdY;
         const float pzW = oz + t * vdZ;
 
-        int vx = int((pxW + halfX) / (2.0f * halfX) * float(vol.vx));
-        int vy = int((pyW + halfY) / (2.0f * halfY) * float(vol.vy));
-        int vz = int((pzW + halfZ) / (2.0f * halfZ) * float(vol.vz));
+        int vx = int((pxW + halfXr) / (2.0f * halfXr) * float(vol.vx));
+        int vy = int((pyW + halfYr) / (2.0f * halfYr) * float(vol.vy));
+        int vz = int((pzW + halfZr) / (2.0f * halfZr) * float(vol.vz));
 
         if (vol.isSolid(vx, vy, vz)) {
           float ta = t - stepSize;
           float tb = t;
           for (int b = 0; b < 3; ++b) {
             float tm = (ta + tb) * 0.5f;
-            int mx = int((ox + tm * vdX + halfX) / (2.0f * halfX) * float(vol.vx));
-            int my = int((oy + tm * vdY + halfY) / (2.0f * halfY) * float(vol.vy));
-            int mz = int((oz + tm * vdZ + halfZ) / (2.0f * halfZ) * float(vol.vz));
+            int mx = int((ox + tm * vdX + halfXr) / (2.0f * halfXr) * float(vol.vx));
+            int my = int((oy + tm * vdY + halfYr) / (2.0f * halfYr) * float(vol.vy));
+            int mz = int((oz + tm * vdZ + halfZr) / (2.0f * halfZr) * float(vol.vz));
             if (vol.isSolid(mx, my, mz)) {
               tb = tm;
               vx = mx; vy = my; vz = mz;
@@ -3075,7 +3213,7 @@ private:
 // tool. The actual sculpting lives in EasymetricMultiPaneView
 // (paintDepthDab / endDepthStroke, via the callbacks below),
 // because only the view knows which panel editor is which face
-// and holds the Fields Depth Brush settings.
+// and holds the tool-strip Depth Sculpt settings.
 class EasymetricDepthState : public EasymetricWheelZoomState {
 public:
   using PaintFn = std::function<void(Editor*, const gfx::Point&, bool)>;
@@ -3127,6 +3265,17 @@ static bool generateDepthFromBaseOnDoc(app::Doc* doc, doc::frame_t fr)
   if (!shared.baseLayer || !shared.baseLayer->cel(fr)) return false;
   doc::ImageRef baseImg = shared.baseLayer->cel(fr)->imageRef();
 
+  // Creating the depth layer makes it the active layer
+  // (api.newLayer selects it), and the panel editors follow the
+  // active sheet — so after the first depth dab every panel showed
+  // the flat-grey depth map instead of the Base colours (GUI
+  // harness run 3, 2026-11-07). Save the user's active layer and
+  // restore it below: generating a depth map must not hijack the
+  // sheet the panels show.
+  Context* ctx = UIContext::instance() ? static_cast<Context*>(UIContext::instance()) :
+                                         App::instance()->context();
+  doc::Layer* prevActive = ctx ? ctx->activeSite().layer() : nullptr;
+
   try {
     Tx tx(doc, "Generate Depth from Base", ModifyDocument);
     DocApi api = doc->getApi(tx);
@@ -3134,6 +3283,21 @@ static bool generateDepthFromBaseOnDoc(app::Doc* doc, doc::frame_t fr)
     doc::LayerImage* depthLayer = findOrCreateLayer(doc, api, spr, "Surface_DEPTH");
     depthLayer->setVisible(true);
     depthLayer->userData().setColor(doc::rgba(148, 163, 184, 255));
+    // The depth sheet is DATA, not paint: it must sit BELOW the
+    // Base sheet in the stack. A depth layer on top paints its flat
+    // 128 grey over the Base colours in every panel editor (the
+    // editors show the document composite, not just their own layer),
+    // so after the first depth dab all six faces went flat grey (GUI
+    // harness runs 3-4, 2026-11-07). Below Base it shows only where
+    // Base is transparent — and the depth map is clipped by Base, so
+    // it never covers a face colour. (Hiding the layer instead is
+    // NOT an option: a hidden layer's pixels cannot be edited at
+    // all — Lua clear() fails with the misleading "cannot modify
+    // pixels on a smart object layer" — proven by probe 9, and it
+    // broke sculpt test DS1 on build5. The layer stays visible and
+    // editable; only its stack position changes.)
+    if (shared.baseLayer)
+      api.restackLayerBefore(depthLayer, spr->root(), shared.baseLayer);
 
     doc::ImageRef depthImg(doc::Image::create(doc::IMAGE_RGB, spr->width(), spr->height()));
     depthImg->clear(0);
@@ -3218,6 +3382,10 @@ static bool generateDepthFromBaseOnDoc(app::Doc* doc, doc::frame_t fr)
 
     tx.commit();
     doc->notifyGeneralUpdate();
+    // Restore the layer the user had active (see above): the new
+    // depth layer must not stay selected.
+    if (ctx && prevActive && prevActive != depthLayer)
+      ctx->setActiveLayer(prevActive);
     return true;
   }
   catch (const std::exception& e) {
@@ -3491,10 +3659,22 @@ public:
     m_previewWidget = new EasymetricPreviewWidget;
     m_previewWidget->setExpansive(true);
 
+    // Pop-out button on the Preview header, opposite the label
+    // (2026-11-07, William): pops out the WHOLE studio column —
+    // Preview and Fields together — into a floating window, and
+    // docks it back. The Fields "Pop out Column" button below
+    // does the same thing.
+    m_previewPopoutHeaderBtn = new PaneActionButton("Pop out", false);
+    m_previewPopoutHeaderBtn->Click.connect([this] {
+      if (m_previewFloating) dockPreview();
+      else popOutPreview();
+    });
+    m_headers[kFaceCount]->addActionButton(m_previewPopoutHeaderBtn);
+
     m_panes[kFaceCount] = new ui::VBox;
     m_panes[kFaceCount]->addChild(m_headers[kFaceCount]);
     m_panes[kFaceCount]->addChild(m_previewWidget);
-    m_previewPlaceholder = new ui::Label("Preview is in the floating window. Click Dock Preview in Fields to bring it back, or close the floating window.");
+    m_previewPlaceholder = new ui::Label("Preview is in the floating window. Click Pop out in the Preview header to bring it back, or close the floating window.");
     m_previewPlaceholder->setVisible(false);
     m_panes[kFaceCount]->addChild(m_previewPlaceholder);
     addChild(m_panes[kFaceCount]);
@@ -3503,8 +3683,10 @@ public:
     // Fields box was added directly to the pane, so when its
     // controls grew taller than the pane the bottom ones were
     // simply hidden with no way to reach them. Wrapping it in a
-    // View with scrollbars (and wheel scrolling, since this is a
-    // control panel, not a canvas) makes every field reachable.
+    // View with scrollbars makes every field reachable; the
+    // mouse wheel scrolls it via the kMouseWheelMessage branch
+    // in onProcessMessage (ui::View does not scroll on wheel
+    // by itself — it needs an explicit scrollByMessage call).
     m_headers[kFaceCount + 1] = new PaneHeader("Fields");
     m_fieldsBox = new FieldsPanelBox;
     m_fieldsView = new ui::View;
@@ -3517,7 +3699,15 @@ public:
     m_panes[kFaceCount + 1] = new ui::VBox;
     m_panes[kFaceCount + 1]->addChild(m_headers[kFaceCount + 1]);
     m_panes[kFaceCount + 1]->addChild(m_fieldsView);
+    m_fieldsPlaceholder = new ui::Label("Fields are in the floating window. Click Pop out in the Preview header to bring them back, or close the floating window.");
+    m_fieldsPlaceholder->setVisible(false);
+    m_panes[kFaceCount + 1]->addChild(m_fieldsPlaceholder);
     addChild(m_panes[kFaceCount + 1]);
+
+    // Studio tool strip across the top (Draw / Depth Sculpt).
+    // Built after the panes so it can be laid out above them
+    // in onResize; the pane layout lives below it.
+    buildToolStrip();
 
     // Timer for real-time 3D model update
     m_timer.Tick.connect([this] { pollAndRender(false); });
@@ -4000,7 +4190,7 @@ public:
 
   EditorStatePtr newPanelState()
   {
-    if (m_depthBrushCheck && m_depthBrushCheck->isSelected()) {
+    if (depthBrushOn()) {
       return EditorStatePtr(new EasymetricDepthState(
         [this](Editor* ed, const gfx::Point& pt, bool down) { paintDepthDab(ed, pt, down); },
         [this] { endDepthStroke(); }));
@@ -4010,11 +4200,67 @@ public:
 
   bool depthBrushOn() const
   {
-    return m_depthBrushCheck && m_depthBrushCheck->isSelected();
+    return m_depthToolOn;
   }
 
-  // Depth-sculpt tool (William's spec, 2026-11-04, UI placement
-  // chosen by Muse: Fields Depth Brush, not a new toolbar tool).
+  // Switch the studio tool between Draw and Depth Sculpt, from the
+  // tool strip. Ends any depth stroke in progress and re-states
+  // every surface panel editor, exactly as the old Fields Depth
+  // Brush checkbox handler did.
+  void setToolMode(bool depth)
+  {
+    if (m_depthToolOn == depth) {
+      if (m_drawToolBtn) m_drawToolBtn->setOn(!depth);
+      if (m_depthToolBtn) m_depthToolBtn->setOn(depth);
+      return;
+    }
+    endDepthStroke();
+    m_depthToolOn = depth;
+    if (m_drawToolBtn) m_drawToolBtn->setOn(!depth);
+    if (m_depthToolBtn) m_depthToolBtn->setOn(depth);
+    if (m_depthModeCombo) m_depthModeCombo->setEnabled(depth);
+    if (m_depthBrushSlider) m_depthBrushSlider->setEnabled(depth);
+    for (int f = 0; f < kFaceCount; ++f) {
+      Editor* ed = m_editors[f];
+      if (ed && !ed->hasCapture())
+        ed->setState(newPanelState());
+    }
+  }
+
+  // Build the studio tool strip: Draw / Depth Sculpt tools plus the
+  // depth Plus/Minus mode and brush size. The strip sits across the
+  // top of the studio (see onResize); nothing depth-tool related
+  // remains in Fields.
+  void buildToolStrip()
+  {
+    const int s = ui::guiscale();
+    m_toolStrip = new ui::HBox;
+    m_toolStrip->setChildSpacing(4 * s);
+    m_drawToolBtn = new PaneActionButton("Draw", true);
+    m_drawToolBtn->setOn(true);
+    m_drawToolBtn->Click.connect([this] { setToolMode(false); });
+    m_depthToolBtn = new PaneActionButton("Depth Sculpt", true);
+    m_depthToolBtn->setOn(false);
+    m_depthToolBtn->Click.connect([this] { setToolMode(true); });
+    m_depthModeCombo = new ui::ComboBox();
+    m_depthModeCombo->addItem("Plus (bump)");
+    m_depthModeCombo->addItem("Minus (carve)");
+    m_depthModeCombo->setEnabled(false);
+    m_depthBrushSlider = new ui::Slider(1, 16, 3);
+    m_depthBrushSlider->setExpansive(true);
+    m_depthBrushSlider->setEnabled(false);
+    m_toolStrip->addChild(new ui::Label("Tool:"));
+    m_toolStrip->addChild(m_drawToolBtn);
+    m_toolStrip->addChild(m_depthToolBtn);
+    m_toolStrip->addChild(m_depthModeCombo);
+    m_toolStrip->addChild(new ui::Label("Brush:"));
+    m_toolStrip->addChild(m_depthBrushSlider);
+    addChild(m_toolStrip);
+  }
+
+  // Depth-sculpt tool (William's spec, 2026-11-04; tool-strip
+  // placement 2026-11-07: the tool lives in the studio toolbar,
+  // not in Fields).
   // PLUS = bump, whiter towards the user; MINUS = carve, darker
   // into the plane. 128 = the main surface. 1 step = 1 pixel of
   // depth, so the gray step is 128 / D, D = pixels from surface
@@ -4062,25 +4308,34 @@ public:
     try {
       if (isDown || !m_depthStrokeActive) {
         endDepthStroke();
+        // The depth map must exist BEFORE the stroke Tx opens:
+        // generateDepthFromBaseOnDoc runs its own Tx, so it cannot
+        // be called once the stroke Tx is open. A blank transparent
+        // depth image is NOT a substitute — transparent depth reads
+        // as a through-hole everywhere, which empties the preview
+        // volume the moment the first dab lands (the cube vanished
+        // after the first GUI depth drag; the headless depthDab
+        // never had this bug because it generates first).
+        if (!shared.depthLayer || !shared.depthLayer->cel(fr)) {
+          if (!generateDepthFromBaseOnDoc(doc, fr)) return;
+          shared = findSharedLayers(spr);
+          if (!shared.depthLayer || !shared.depthLayer->cel(fr)) return;
+        }
+        // A depth layer created by an older build sits ON TOP of
+        // Base and paints its flat grey over the panels (see
+        // generateDepthFromBaseOnDoc). Restack it below Base now,
+        // inside the stroke Tx. Do NOT hide it instead: a hidden
+        // layer's pixels cannot be edited (probe 9, build5).
         m_depthTx.reset(new Tx(doc, "Depth Sculpt", ModifyDocument));
         DocApi api = doc->getApi(*m_depthTx);
+        if (shared.depthLayer && shared.baseLayer)
+          api.restackLayerBefore(shared.depthLayer, spr->root(), shared.baseLayer);
         doc::LayerImage* depthLayer = shared.depthLayer;
-        if (!depthLayer)
-          depthLayer = findOrCreateLayer(doc, api, spr, "Surface_DEPTH");
         doc::Cel* depthCel = depthLayer ? depthLayer->cel(fr) : nullptr;
         doc::Cel* baseCel = shared.baseLayer->cel(fr);
         if (!depthCel || !baseCel) {
-          // No cel to sculpt yet: create a depth cel from the
-          // generated depth map, then sculpt on top of it.
-          if (!depthCel && depthLayer) {
-            doc::ImageRef blank(doc::Image::create(doc::IMAGE_RGB, spr->width(), spr->height()));
-            blank->clear(0);
-            depthCel = api.addCel(depthLayer, fr, blank);
-          }
-          if (!depthCel || !baseCel) {
-            endDepthStroke();
-            return;
-          }
+          endDepthStroke();
+          return;
         }
         m_depthLive = depthCel->imageRef();
         m_depthWork.reset(doc::Image::createCopy(m_depthLive.get()));
@@ -4289,7 +4544,7 @@ protected:
   // into either neighbouring pane.
   int splitterGapAt(const gfx::Point& pos) const
   {
-    const gfx::Rect rc = clientBounds();
+    const gfx::Rect rc = contentBounds();
     const int s = std::max(1, ui::guiscale());
     const int bh = 6 * s;
     int colX[4], colW[4], colTopH[4], colBotY[4], colBotH[4];
@@ -4363,6 +4618,18 @@ protected:
         auto* mouseMsg = static_cast<ui::MouseMessage*>(msg);
         if (handlePanelWheel(mouseMsg))
           return true;
+        // Fields wheel (2026-11-07, William: the wheel did nothing
+        // in Fields and he had to drag the scrollbar): nothing in
+        // the chain ever scrolled the Fields View. ui::View does
+        // not handle kMouseWheelMessage itself; widgets that want
+        // wheel scrolling must call View::scrollByMessage
+        // explicitly (ui::ListBox, menus, etc. do). Surface-panel
+        // wheels are already handled above; Preview has its own
+        // wheel zoom. A wheel over the Fields pane scrolls it.
+        if (m_fieldsView && m_fieldsBox && m_fieldsView->viewportBounds().contains(mouseMsg->position())) {
+          ui::View::scrollByMessage(m_fieldsBox, mouseMsg);
+          return true;
+        }
         break;
       }
       case ui::kSetCursorMessage: {
@@ -4391,7 +4658,7 @@ protected:
           m_dragStart = mouseMsg->position();
           {
             int cx[4], cw[4], topH[4], botY[4], botH[4];
-            computePaneLayout(clientBounds(), cx, cw, topH, botY, botH);
+            computePaneLayout(contentBounds(), cx, cw, topH, botY, botH);
             for (int i = 0; i < 3; ++i)
               m_dragColWpx[i] = cw[i];
             m_dragPreviewW = cw[3];
@@ -4418,7 +4685,7 @@ protected:
             invalidate();
             return true;
           }
-          const gfx::Rect rc = clientBounds();
+          const gfx::Rect rc = contentBounds();
           const int s = std::max(1, ui::guiscale());
           const int bw = 6 * s;
           const int bh = 6 * s;
@@ -4503,15 +4770,38 @@ protected:
     return ui::Widget::onProcessMessage(msg);
   }
 
+  // Studio tool strip height (0 until the strip is built). The strip
+  // sits across the top of the studio; the four pane columns live
+  // in the rect below it.
+  int toolStripHeight() const
+  {
+    return m_toolStrip ? 24 * ui::guiscale() : 0;
+  }
+
+  gfx::Rect contentBounds() const
+  {
+    gfx::Rect rc = clientBounds();
+    const int sh = toolStripHeight();
+    rc.y += sh;
+    rc.h -= sh;
+    return rc;
+  }
+
   void onResize(ui::ResizeEvent& ev) override
   {
     setBoundsQuietly(ev.bounds());
     const gfx::Rect rc = childrenBounds();
     const int s = ui::guiscale();
     const int bh = 6 * s;
+    const int stripH = toolStripHeight();
+    if (m_toolStrip)
+      m_toolStrip->setBounds(gfx::Rect(rc.x, rc.y, rc.w, stripH));
+    gfx::Rect contentRc = rc;
+    contentRc.y += stripH;
+    contentRc.h -= stripH;
     int colX[4], colW[4], colTopH[4], colBotY[4], colBotH[4];
-    computePaneLayout(rc, colX, colW, colTopH, colBotY, colBotH);
-    const int totalH = std::max(16, rc.h - bh);
+    computePaneLayout(contentRc, colX, colW, colTopH, colBotY, colBotH);
+    const int totalH = std::max(16, contentRc.h - bh);
 
     // Cols 0..2: Opposing face pairs
     for (int c = 0; c < 3; ++c) {
@@ -4520,12 +4810,12 @@ protected:
       if (m_colLinked[c]) {
         m_panes[btmFace]->setVisible(false);
         m_panes[topFace]->setVisible(true);
-        m_panes[topFace]->setBounds(gfx::Rect(colX[c], rc.y, colW[c], totalH + bh));
+        m_panes[topFace]->setBounds(gfx::Rect(colX[c], contentRc.y, colW[c], totalH + bh));
       }
       else {
         m_panes[topFace]->setVisible(true);
         m_panes[btmFace]->setVisible(true);
-        m_panes[topFace]->setBounds(gfx::Rect(colX[c], rc.y, colW[c], colTopH[c]));
+        m_panes[topFace]->setBounds(gfx::Rect(colX[c], contentRc.y, colW[c], colTopH[c]));
         m_panes[btmFace]->setBounds(gfx::Rect(colX[c], colBotY[c], colW[c], colBotH[c]));
       }
     }
@@ -4533,7 +4823,7 @@ protected:
     // Col 3: Preview (6), Fields (7)
     m_panes[6]->setVisible(true);
     m_panes[7]->setVisible(true);
-    m_panes[6]->setBounds(gfx::Rect(colX[3], rc.y, colW[3], colTopH[3]));
+    m_panes[6]->setBounds(gfx::Rect(colX[3], contentRc.y, colW[3], colTopH[3]));
     m_panes[7]->setBounds(gfx::Rect(colX[3], colBotY[3], colW[3], colBotH[3]));
 
     // NOTE: deliberately no fitClipSpriteBounds() here. Fitting on
@@ -4557,7 +4847,7 @@ protected:
     const int bw = 6 * s;
     const int bh = 6 * s;
     int colX[4], colW[4], colTopH[4], colBotY[4], colBotH[4];
-    computePaneLayout(rc, colX, colW, colTopH, colBotY, colBotH);
+    computePaneLayout(contentBounds(), colX, colW, colTopH, colBotY, colBotH);
 
     // Dark charcoal surround & separator lines
     g->fillRect(gfx::rgba(28, 35, 43), rc);
@@ -4827,25 +5117,10 @@ private:
     depthRow->addChild(m_liveBakeCheck);
     m_fieldsBox->addChild(depthRow);
 
-    // Row 6a: Depth Sculpt tool (dedicated depth-only tool).
-    // Fields placement, chosen by Muse: the studio has no
-    // toolbar of its own, and Fields already owns the depth
-    // controls. Tick Depth Brush, pick Plus (bump, whiter)
-    // or Minus (carve, darker), then drag in any surface
-    // panel. Wheel still zooms while the brush is on.
-    auto* sculptRow = new ui::HBox;
-    sculptRow->setChildSpacing(4 * s);
-    m_depthBrushCheck = new ui::CheckBox("Depth Brush");
-    m_depthModeCombo = new ui::ComboBox();
-    m_depthModeCombo->addItem("Plus (bump)");
-    m_depthModeCombo->addItem("Minus (carve)");
-    m_depthBrushSlider = new ui::Slider(1, 16, 3);
-    m_depthBrushSlider->setExpansive(true);
-    sculptRow->addChild(m_depthBrushCheck);
-    sculptRow->addChild(m_depthModeCombo);
-    sculptRow->addChild(new ui::Label("Brush:"));
-    sculptRow->addChild(m_depthBrushSlider);
-    m_fieldsBox->addChild(sculptRow);
+    // NOTE (2026-11-07): the Depth Sculpt tool moved to the studio
+    // tool strip (buildToolStrip / setToolMode); there is no Fields
+    // Depth Brush row any more. The depth *map* controls (Generate
+    // Depth from Base, Use Face Depth Layer, Live Sync) stay here.
 
     // Row 6b: 2-Layer Smart Object & Clipping Structure
     auto* smartRow = new ui::HBox;
@@ -4891,14 +5166,15 @@ private:
     bgRow->addChild(m_bgAlphaSlider);
     m_fieldsBox->addChild(bgRow);
 
-    // Floating preview row: the Preview pane in the studio
-    // column is small, so the same preview widget can be
-    // popped out into a moveable, sizeable floating window
-    // instead, and docked back at any time. Closing the
-    // floating window docks it back automatically.
+    // Floating column row: the Preview+Fields column in the
+    // studio is small, so the whole column can be popped out
+    // into a moveable, sizeable floating window instead, and
+    // docked back at any time. Closing the floating window
+    // docks it back automatically. The same pop-out is also on
+    // the Preview header (opposite the label).
     auto* floatRow = new ui::HBox;
     floatRow->setChildSpacing(4 * s);
-    m_previewPopoutBtn = new ui::Button("Pop out Preview");
+    m_previewPopoutBtn = new ui::Button("Pop out Column");
     m_previewPopoutBtn->Click.connect([this] {
       if (m_previewFloating) dockPreview();
       else popOutPreview();
@@ -4953,14 +5229,9 @@ private:
     };
     m_bgColorButton->Change.connect([applyBg](const app::Color&) { applyBg(); });
     m_bgAlphaSlider->Change.connect(applyBg);
-    m_depthBrushCheck->Click.connect([this] {
-      endDepthStroke();
-      for (int f = 0; f < kFaceCount; ++f) {
-        Editor* ed = m_editors[f];
-        if (ed && !ed->hasCapture())
-          ed->setState(newPanelState());
-      }
-    });
+    // NOTE (2026-11-07): the Depth Sculpt tool moved to the studio
+    // tool strip (buildToolStrip / setToolMode); there is no Fields
+    // Depth Brush checkbox any more.
 
     m_previewWidget->OrbitDrag.connect([this](int newYaw, int newPitch) {
       m_yawSlider->setValue(newYaw);
@@ -5461,19 +5732,54 @@ public:
 
   void popOutPreview()
   {
-    if (m_previewFloating || !m_previewWidget) return;
+    // Whole-column pop-out (2026-11-07, William): Preview AND
+    // Fields move into the floating window together, so the
+    // column can be read and used at full size. The old
+    // preview-only pop-out is superseded; the script action
+    // previewFloat and the Fields button call this same function.
+    if (m_previewFloating || !m_previewWidget || !m_fieldsView) return;
     if (!m_previewWindow) {
-      m_previewWindow = new ui::Window(ui::Window::WithTitleBar, "Easymetric Preview");
+      m_previewWindow = new ui::Window(ui::Window::WithTitleBar, "Easymetric Preview & Fields");
       m_previewWindow->setMoveable(true);
       m_previewWindow->setSizeable(true);
       m_previewWindow->Close.connect([this](ui::CloseEvent&) { dockPreview(); });
+      m_columnBox = new ui::VBox;
+      m_columnBox->setChildSpacing(4 * ui::guiscale());
+      m_previewWindow->addChild(m_columnBox);
+      // NOTE: ui::Window has no setSize(); remapWindow() below sizes the
+      // window to fit the column box, same as the old preview-only pop-out.
     }
+    // Neither child reports a useful preferred size (the preview is a
+    // custom widget with no onSizeHint, the fields View reports only
+    // its viewport), so without explicit hints remapWindow() shrinks
+    // the window to just its title bar — the first GUI run opened a
+    // 260x70 strip with the column squeezed inside it. Hint both
+    // children from their docked sizes; dockPreview() resets them so
+    // the docked layout keeps its dynamic sizing.
+    const gfx::Rect prevBounds = m_previewWidget->bounds();
+    const gfx::Rect fieldsBounds = m_fieldsView->bounds();
+    m_previewWidget->setSizeHint(
+        gfx::Size(std::max(200, prevBounds.w), std::max(160, prevBounds.h)));
+    m_fieldsView->setSizeHint(
+        gfx::Size(std::max(200, fieldsBounds.w), std::max(160, fieldsBounds.h)));
     m_panes[kFaceCount]->removeChild(m_previewWidget);
-    m_previewWindow->addChild(m_previewWidget);
+    m_panes[kFaceCount + 1]->removeChild(m_fieldsView);
+    m_columnBox->addChild(m_previewWidget);
+    m_columnBox->addChild(m_fieldsView);
     m_previewWidget->setExpansive(true);
+    m_fieldsView->setExpansive(true);
     m_previewFloating = true;
     if (m_previewPlaceholder) m_previewPlaceholder->setVisible(true);
-    if (m_previewPopoutBtn) m_previewPopoutBtn->setText("Dock Preview");
+    if (m_fieldsPlaceholder) m_fieldsPlaceholder->setVisible(true);
+    if (m_previewPopoutBtn) m_previewPopoutBtn->setText("Dock Column");
+    if (m_previewPopoutHeaderBtn) m_previewPopoutHeaderBtn->setText("Dock");
+    // addChild/removeChild neither re-layout nor repaint the panes
+    // (see ui::Widget), so without this the panes keep showing the
+    // last painted frame — the cube and the fields — and the
+    // placeholder text that explains how to dock never appears.
+    m_panes[kFaceCount]->layout();
+    m_panes[kFaceCount + 1]->layout();
+    invalidate();
     m_previewWindow->remapWindow();
     m_previewWindow->centerWindow();
     m_previewWindow->openWindow();
@@ -5482,17 +5788,32 @@ public:
 
   void dockPreview()
   {
-    if (!m_previewFloating || !m_previewWidget) return;
+    if (!m_previewFloating || !m_previewWidget || !m_fieldsView) return;
     // Called from the floating window's Close signal too: by
     // then the window is already closed by the manager, so
-    // moving the widget back here is safe, and the window
+    // moving the widgets back here is safe, and the window
     // object itself is kept (closed) for the next pop-out.
-    if (m_previewWindow) m_previewWindow->removeChild(m_previewWidget);
+    if (m_columnBox) {
+      m_columnBox->removeChild(m_previewWidget);
+      m_columnBox->removeChild(m_fieldsView);
+    }
     m_panes[kFaceCount]->addChild(m_previewWidget);
+    m_panes[kFaceCount + 1]->addChild(m_fieldsView);
     m_previewWidget->setExpansive(true);
+    m_fieldsView->setExpansive(true);
     m_previewFloating = false;
     if (m_previewPlaceholder) m_previewPlaceholder->setVisible(false);
-    if (m_previewPopoutBtn) m_previewPopoutBtn->setText("Pop out Preview");
+    if (m_fieldsPlaceholder) m_fieldsPlaceholder->setVisible(false);
+    if (m_previewPopoutBtn) m_previewPopoutBtn->setText("Pop out Column");
+    if (m_previewPopoutHeaderBtn) m_previewPopoutHeaderBtn->setText("Pop out");
+    // Undo the floating size hints (see popOutPreview) and re-layout
+    // the panes, or the docked column keeps the floating sizes and
+    // the widgets paint in their old spots.
+    m_previewWidget->resetSizeHint();
+    m_fieldsView->resetSizeHint();
+    m_panes[kFaceCount]->layout();
+    m_panes[kFaceCount + 1]->layout();
+    invalidate();
     m_previewWidget->invalidate();
   }
 
@@ -5748,9 +6069,23 @@ private:
       const float halfY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight] }) * 0.5f;
       const float halfZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown] }) * 0.5f;
 
-      const float cellSizeX = (2.0f * halfX) / float(vol.vx);
-      const float cellSizeY = (2.0f * halfY) / float(vol.vy);
-      const float cellSizeZ = (2.0f * halfZ) / float(vol.vz);
+      // Depth sculpting (2026-11-07): when the volume grew past the Base
+      // box, the Base box sits centred in it (pad voxels per side).
+      // World and UV coords are measured from the Base box so it keeps
+      // its size and Plus bumps stick out beyond it in the exported
+      // mesh. Otherwise (pad 0) these are exactly the old formulas.
+      const int dimX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown], 8 });
+      const int dimY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight], 8 });
+      const int dimZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown], 8 });
+      const int padX = std::max(0, (vol.vx - dimX) / 2);
+      const int padY = std::max(0, (vol.vy - dimY) / 2);
+      const int padZ = std::max(0, (vol.vz - dimZ) / 2);
+      const int spanX = (padX > 0 ? dimX : vol.vx);
+      const int spanY = (padY > 0 ? dimY : vol.vy);
+      const int spanZ = (padZ > 0 ? dimZ : vol.vz);
+      const float cellSizeX = (2.0f * halfX) / float(spanX);
+      const float cellSizeY = (2.0f * halfY) / float(spanY);
+      const float cellSizeZ = (2.0f * halfZ) / float(spanZ);
 
       obj << "# Aseprite 2.0 Easymetric Sculpted 3D Model\n"
           << "mtllib " << mtlFileName << "\n"
@@ -5795,25 +6130,30 @@ private:
       };
 
       for (int vy = 0; vy < vol.vy; ++vy) {
-        const float yMax = halfY - float(vy) * cellSizeY;
-        const float yMin = halfY - float(vy + 1) * cellSizeY;
+        const float yMax = halfY - float(vy - padY) * cellSizeY;
+        const float yMin = halfY - float(vy + 1 - padY) * cellSizeY;
 
         for (int vz = 0; vz < vol.vz; ++vz) {
-          const float zMin = -halfZ + float(vz) * cellSizeZ;
-          const float zMax = -halfZ + float(vz + 1) * cellSizeZ;
+          const float zMin = -halfZ + float(vz - padZ) * cellSizeZ;
+          const float zMax = -halfZ + float(vz + 1 - padZ) * cellSizeZ;
 
           for (int vx = 0; vx < vol.vx; ++vx) {
             if (!vol.isSolid(vx, vy, vz)) continue;
 
-            const float xMin = -halfX + float(vx) * cellSizeX;
-            const float xMax = -halfX + float(vx + 1) * cellSizeX;
+            const float xMin = -halfX + float(vx - padX) * cellSizeX;
+            const float xMax = -halfX + float(vx + 1 - padX) * cellSizeX;
 
             // 1. Front face (+Z)
             if (vz + 1 >= vol.vz || !vol.isSolid(vx, vy, vz + 1)) {
-              const float u0 = float(vx) / float(vol.vx);
-              const float u1 = float(vx + 1) / float(vol.vx);
-              const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
-              const float v1 = 1.0f - float(vy) / float(vol.vy);
+              // UVs are clamped to [0,1]: a Plus bump sticks out past
+              // the Base box, and its side faces would otherwise get
+              // out-of-range UVs (texture repeat instead of the face
+              // edge). Un-sculpted values are already in range, so
+              // this is a no-op for them.
+              const float u0 = std::clamp(float(vx - padX) / float(spanX), 0.0f, 1.0f);
+              const float u1 = std::clamp(float(vx + 1 - padX) / float(spanX), 0.0f, 1.0f);
+              const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
+              const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
               emitQuad(kFaceFront, xMin, yMin, zMax,
                        xMax, yMin, zMax,
                        xMax, yMax, zMax,
@@ -5824,10 +6164,10 @@ private:
 
             // 2. Back face (-Z)
             if (vz - 1 < 0 || !vol.isSolid(vx, vy, vz - 1)) {
-              const float u0 = float(vol.vx - 1 - vx) / float(vol.vx);
-              const float u1 = float(vol.vx - vx) / float(vol.vx);
-              const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
-              const float v1 = 1.0f - float(vy) / float(vol.vy);
+              const float u0 = std::clamp(float(spanX - 1 - (vx - padX)) / float(spanX), 0.0f, 1.0f);
+              const float u1 = std::clamp(float(spanX - (vx - padX)) / float(spanX), 0.0f, 1.0f);
+              const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
+              const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
               emitQuad(kFaceBack, xMax, yMin, zMin,
                        xMin, yMin, zMin,
                        xMin, yMax, zMin,
@@ -5838,10 +6178,10 @@ private:
 
             // 3. Top face (+Y)
             if (vy - 1 < 0 || !vol.isSolid(vx, vy - 1, vz)) {
-              const float u0 = float(vx) / float(vol.vx);
-              const float u1 = float(vx + 1) / float(vol.vx);
-              const float v0 = 1.0f - float(vz + 1) / float(vol.vz);
-              const float v1 = 1.0f - float(vz) / float(vol.vz);
+              const float u0 = std::clamp(float(vx - padX) / float(spanX), 0.0f, 1.0f);
+              const float u1 = std::clamp(float(vx + 1 - padX) / float(spanX), 0.0f, 1.0f);
+              const float v0 = std::clamp(1.0f - float(vz + 1 - padZ) / float(spanZ), 0.0f, 1.0f);
+              const float v1 = std::clamp(1.0f - float(vz - padZ) / float(spanZ), 0.0f, 1.0f);
               emitQuad(kFaceTop, xMin, yMax, zMax,
                        xMax, yMax, zMax,
                        xMax, yMax, zMin,
@@ -5852,10 +6192,10 @@ private:
 
             // 4. Bottom face (-Y)
             if (vy + 1 >= vol.vy || !vol.isSolid(vx, vy + 1, vz)) {
-              const float u0 = float(vx) / float(vol.vx);
-              const float u1 = float(vx + 1) / float(vol.vx);
-              const float v0 = 1.0f - float(vol.vz - vz) / float(vol.vz);
-              const float v1 = 1.0f - float(vol.vz - 1 - vz) / float(vol.vz);
+              const float u0 = std::clamp(float(vx - padX) / float(spanX), 0.0f, 1.0f);
+              const float u1 = std::clamp(float(vx + 1 - padX) / float(spanX), 0.0f, 1.0f);
+              const float v0 = std::clamp(1.0f - float(spanZ - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
+              const float v1 = std::clamp(1.0f - float(spanZ - 1 - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
               emitQuad(kFaceDown, xMin, yMin, zMin,
                        xMax, yMin, zMin,
                        xMax, yMin, zMax,
@@ -5866,10 +6206,10 @@ private:
 
             // 5. Right face (+X)
             if (vx + 1 >= vol.vx || !vol.isSolid(vx + 1, vy, vz)) {
-              const float u0 = float(vol.vz - 1 - vz) / float(vol.vz);
-              const float u1 = float(vol.vz - vz) / float(vol.vz);
-              const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
-              const float v1 = 1.0f - float(vy) / float(vol.vy);
+              const float u0 = std::clamp(float(spanZ - 1 - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
+              const float u1 = std::clamp(float(spanZ - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
+              const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
+              const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
               emitQuad(kFaceRight, xMax, yMin, zMax,
                        xMax, yMin, zMin,
                        xMax, yMax, zMin,
@@ -5880,10 +6220,10 @@ private:
 
             // 6. Left face (-X)
             if (vx - 1 < 0 || !vol.isSolid(vx - 1, vy, vz)) {
-              const float u0 = float(vz) / float(vol.vz);
-              const float u1 = float(vz + 1) / float(vol.vz);
-              const float v0 = 1.0f - float(vy + 1) / float(vol.vy);
-              const float v1 = 1.0f - float(vy) / float(vol.vy);
+              const float u0 = std::clamp(float(vz - padZ) / float(spanZ), 0.0f, 1.0f);
+              const float u1 = std::clamp(float(vz + 1 - padZ) / float(spanZ), 0.0f, 1.0f);
+              const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
+              const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
               emitQuad(kFaceLeft, xMin, yMin, zMin,
                        xMin, yMin, zMax,
                        xMin, yMax, zMax,
@@ -5952,12 +6292,23 @@ private:
   ui::CheckBox* m_symYCheck = nullptr;
   ui::CheckBox* m_useFaceDepthCheck = nullptr;
   ui::Window* m_previewWindow = nullptr;
+  ui::VBox* m_columnBox = nullptr;
   ui::Label* m_previewPlaceholder = nullptr;
+  ui::Label* m_fieldsPlaceholder = nullptr;
   ui::Button* m_previewPopoutBtn = nullptr;
+  PaneActionButton* m_previewPopoutHeaderBtn = nullptr;
   bool m_previewFloating = false;
   app::ColorButton* m_bgColorButton = nullptr;
   ui::Slider* m_bgAlphaSlider = nullptr;
-  ui::CheckBox* m_depthBrushCheck = nullptr;
+  // Studio tool strip (2026-11-07, William: the Depth tool must live
+  // in a toolbar, not in Fields): Draw / Depth Sculpt toggle buttons
+  // plus the Plus/Minus mode and brush size, in a strip across the
+  // top of the studio. m_depthToolOn is the tool mode; the Fields
+  // Depth Brush checkbox is gone.
+  ui::HBox* m_toolStrip = nullptr;
+  PaneActionButton* m_drawToolBtn = nullptr;
+  PaneActionButton* m_depthToolBtn = nullptr;
+  bool m_depthToolOn = false;
   ui::ComboBox* m_depthModeCombo = nullptr;
   ui::Slider* m_depthBrushSlider = nullptr;
   // Depth-sculpt stroke state: one Tx for the whole drag, so a
