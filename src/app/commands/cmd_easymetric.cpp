@@ -4480,8 +4480,22 @@ protected:
     const int bh = 6 * s;
     const int totalW = std::max(16, rc.w - 3 * bw);
     const int totalH = std::max(16, rc.h - bh);
-    const int minCol = std::min(64 * s, totalW / 4);
-    const int minRow = std::min(64 * s, totalH / 2);
+    // G1 (2026-11-07, William): panel borders are draggable again.
+    // The 2026-11-04 removal made surface columns fixed equal
+    // widths and surface rows fixed equal heights, which left
+    // William with no way to resize a panel at all. Now the
+    // stored splits drive the layout: m_colWpx[0..2] for the
+    // surface columns (Preview, col 3, stays the remainder, so
+    // a window resize still changes only Preview), and
+    // m_rowHpx[c] for every column's row split. A drag may only
+    // start in a real gap (splitterGapAt) and never while a
+    // panel editor is busy, so it still cannot entangle a
+    // drawing stroke. Minimum panel size is 80*guiscale px
+    // (PANEL_GOALS.md G1); minCol <= totalW/4 and
+    // minRow <= totalH/2 by construction, so every clamp
+    // below has a valid range.
+    const int minCol = std::min(80 * s, totalW / 4);
+    const int minRow = std::min(80 * s, totalH / 2);
 
     if (!m_colInit) {
       m_colWpx[0] = totalW / 4;
@@ -4492,20 +4506,14 @@ protected:
       m_colInit = true;
     }
 
-    // 2026-11-04, William: surface splitters are REMOVED.
-    // Sizing now lives in Fields (W/H/D, Size sliders), so
-    // dragging a pane boundary only entangled drawing: the
-    // resize cursor appeared over surface panels, a drag
-    // started from a gap could resize a panel mid-stroke,
-    // and the hit area was never where the bar looked to be.
-    // Surface columns are now fixed equal widths and surface
-    // rows fixed equal heights. The ONLY remaining splitter
-    // is Preview/Fields (column 3, horizontal), which is not
-    // a surface panel, so it can never entangle a drawing
-    // stroke. Its stored split is rowHpx[3] only.
-    colW[0] = totalW / 4;
-    colW[1] = totalW / 4;
-    colW[2] = totalW / 4;
+    // Surface columns use their stored widths. If the window
+    // shrank below the stored sum, the later columns clamp
+    // down first; the clamps are ordered so each upper bound
+    // stays >= its lower bound (see the minCol note above).
+    const int avail = totalW - minCol;
+    colW[0] = std::clamp(m_colWpx[0], minCol, avail - 2 * minCol);
+    colW[1] = std::clamp(m_colWpx[1], minCol, avail - colW[0] - minCol);
+    colW[2] = std::clamp(m_colWpx[2], minCol, avail - colW[0] - colW[1]);
     colW[3] = std::max(minCol, totalW - colW[0] - colW[1] - colW[2]);
 
     colX[0] = rc.x;
@@ -4514,12 +4522,7 @@ protected:
     colX[3] = rc.x + colW[0] + bw + colW[1] + bw + colW[2] + bw;
 
     for (int c = 0; c < 4; ++c) {
-      if (c == 3) {
-        colRowTopH[c] = std::clamp(m_rowHpx[c], minRow, std::max(minRow, totalH - minRow));
-      }
-      else {
-        colRowTopH[c] = totalH / 2;
-      }
+      colRowTopH[c] = std::clamp(m_rowHpx[c], minRow, std::max(minRow, totalH - minRow));
       colRowBotH[c] = std::max(minRow, totalH - colRowTopH[c]);
       colRowBotY[c] = rc.y + colRowTopH[c] + bh;
     }
@@ -4536,24 +4539,46 @@ protected:
   // splitter drag and resized a panel while drawing. A drag
   // may only start in [colX[c]-bw, colX[c]) vertically, or
   // [botY[c]-bh, botY[c]) horizontally within that column.
-  // Only remaining splitter: 13 = horizontal boundary
-  // between Preview and Fields in column 3. Everything
-  // else returns 0, so no resize cursor ever appears over
-  // a surface panel, and no surface-panel drag can start.
-  // The hit area is exactly the painted bar, no extension
-  // into either neighbouring pane.
-  int splitterGapAt(const gfx::Point& pos) const
+  // G1 (2026-11-07): every panel border is a splitter again —
+  // vertical 1..3 between the columns (full content height)
+  // and horizontal 10..13 between the two rows of each
+  // column (13 = Preview/Fields, as before). A linked column
+  // has no horizontal gap: its top pane spans the full
+  // height, so there is no bottom pane to split. The hit area
+  // is exactly the painted bar, no extension into either
+  // neighbouring pane.
+  // pos is in DISPLAY coordinates (MouseMessage::position() is
+  // the top-level window's space, not this widget's). Convert to
+  // local coordinates first: contentBounds(), colX/colW and the
+  // painted bars are all local. Without the conversion the hit
+  // area is shifted by the widget's origin in the window
+  // (bounds().origin(), here (80,46)), so a press on the visible
+  // bar misses the gap entirely — which is why no splitter drag
+  // (gap 13 included) ever started. Proven 2026-11-07: a press
+  // on the visible Preview/Fields bar arrived as (768,262) with
+  // hit 0; toClient gives (688,216), inside the bar [216,222).
+  int splitterGapAt(const gfx::Point& displayPos) const
   {
+    const gfx::Point pos = toClient(displayPos);
     const gfx::Rect rc = contentBounds();
     const int s = std::max(1, ui::guiscale());
+    const int bw = 6 * s;
     const int bh = 6 * s;
     int colX[4], colW[4], colTopH[4], colBotY[4], colBotH[4];
     computePaneLayout(rc, colX, colW, colTopH, colBotY, colBotH);
     if (!rc.contains(pos))
       return 0;
-    if (pos.x >= colX[3] && pos.x < colX[3] + colW[3] && pos.y >= colBotY[3] - bh &&
-        pos.y < colBotY[3])
-      return 13;
+    for (int c = 1; c < 4; ++c) {
+      if (pos.x >= colX[c] - bw && pos.x < colX[c])
+        return c;
+    }
+    for (int c = 0; c < 4; ++c) {
+      if (c < 3 && m_colLinked[c])
+        continue;
+      if (pos.x >= colX[c] && pos.x < colX[c] + colW[c] && pos.y >= colBotY[c] - bh &&
+          pos.y < colBotY[c])
+        return 10 + c;
+    }
     return 0;
   }
 
@@ -4655,7 +4680,7 @@ protected:
         // in a panel and propagated here could start resizing.
         if (hit != 0 && mouseMsg->left() && !anyPanelEditorBusy()) {
           m_dragSplitter = hit;
-          m_dragStart = mouseMsg->position();
+          m_dragStart = toClient(mouseMsg->position());
           {
             int cx[4], cw[4], topH[4], botY[4], botH[4];
             computePaneLayout(contentBounds(), cx, cw, topH, botY, botH);
@@ -4697,10 +4722,15 @@ protected:
           // never the other two surface columns, and a window
           // resize (which only changes totalW) changes only
           // Preview via computePaneLayout.
-          const int minColPx = std::min(64 * s, totalW / 4);
-          const int minRowPx = std::min(64 * s, totalH / 2);
+          const int minColPx = std::min(80 * s, totalW / 4);
+          const int minRowPx = std::min(80 * s, totalH / 2);
           if (m_dragSplitter < 10 && m_dragSplitter < 4) {
-            const int deltaPx = mouseMsg->position().x - m_dragStart.x;
+            // m_dragStart is local (toClient at MouseDown), so the
+            // move position must be local too; the offset cancels
+            // in the delta either way, but mixing spaces is how
+            // the hit test broke, so keep one space here.
+            const gfx::Point dragPos = toClient(mouseMsg->position());
+            const int deltaPx = dragPos.x - m_dragStart.x;
             const int left = m_dragSplitter - 1;
             int pair = 0;
             if (m_dragSplitter < 3)
@@ -4728,7 +4758,8 @@ protected:
             // automatically from the new left width.
           }
           else {
-            const int deltaPx = mouseMsg->position().y - m_dragStart.y;
+            const gfx::Point dragPos = toClient(mouseMsg->position());
+            const int deltaPx = dragPos.y - m_dragStart.y;
             const int hiRow = std::max(minRowPx, totalH - minRowPx);
             m_rowHpx[m_dragRowCol] = std::clamp(m_dragRowHpx + deltaPx,
                                                 minRowPx, hiRow);
@@ -4856,27 +4887,35 @@ protected:
     const gfx::Color gripCol = gfx::rgba(80, 95, 110);
     const gfx::Color activeCol = gfx::rgba(120, 170, 220);
 
-    // Horizontal separators, one per column (its own row split),
-    // only for columns that are NOT linked (and Col 3).
-    // The bar must sit exactly in the gap between the panes:
-    // [colBotY-bh, colBotY), which is also what splitterGapAt()
-    // hit-tests. It used to be painted centred on colBotY,
-    // [colBotY-bh/2, colBotY+bh/2), so the resize cursor
-    // appeared half a gap above the bar you see, and the
-    // lower half of the visible bar did not resize at all —
-    // the "cursor changes at a different place" report
-    // (2026-11-04, William's screenshots). Vertical bars
-    // already matched their gap, so they are unchanged.
-    // Only remaining splitter bar: Preview/Fields, column 3.
-    // Surface columns have no bars and no hit area any more,
-    // so their boundaries are just the dark surround.
-    {
-      const bool active = (m_hoverSplitter == 13 || m_dragSplitter == 13);
+    // G1: separator bars on every draggable gap, so the user
+    // can see where to grab. Vertical bars between the columns
+    // (full content height) and horizontal bars between the
+    // two rows of each unlinked column (plus Preview/Fields).
+    // Each bar sits exactly in its gap, which is also what
+    // splitterGapAt() hit-tests, so the resize cursor appears
+    // where the bar is drawn. A linked column has no
+    // horizontal bar: its top pane spans the full height.
+    const gfx::Rect contentRc = contentBounds();
+    for (int c = 1; c < 4; ++c) {
+      const bool active = (m_hoverSplitter == c || m_dragSplitter == c);
       g->fillRect(active ? activeCol : sepCol,
-                  gfx::Rect(colX[3], colBotY[3] - bh, colW[3], bh));
-      const int midX = colX[3] + colW[3] / 2;
-      const int midY = colBotY[3] - bh / 2;
-      g->fillRect(active ? activeCol : gripCol, gfx::Rect(midX - 12 * s, midY - 1 * s, 24 * s, 2 * s));
+                  gfx::Rect(colX[c] - bw, contentRc.y, bw, contentRc.h));
+      const int midX = colX[c] - bw / 2;
+      const int midY = contentRc.y + contentRc.h / 2;
+      g->fillRect(active ? activeCol : gripCol,
+                  gfx::Rect(midX - 1 * s, midY - 12 * s, 2 * s, 24 * s));
+    }
+    for (int c = 0; c < 4; ++c) {
+      if (c < 3 && m_colLinked[c])
+        continue;
+      const int gap = 10 + c;
+      const bool active = (m_hoverSplitter == gap || m_dragSplitter == gap);
+      g->fillRect(active ? activeCol : sepCol,
+                  gfx::Rect(colX[c], colBotY[c] - bh, colW[c], bh));
+      const int midX = colX[c] + colW[c] / 2;
+      const int midY = colBotY[c] - bh / 2;
+      g->fillRect(active ? activeCol : gripCol,
+                  gfx::Rect(midX - 12 * s, midY - 1 * s, 24 * s, 2 * s));
     }
   }
 
