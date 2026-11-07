@@ -59,6 +59,7 @@
 #include "ui/box.h"
 #include "ui/button.h"
 #include "ui/combobox.h"
+#include "ui/entry.h"
 #include "ui/graphics.h"
 #include "ui/label.h"
 #include "ui/manager.h"
@@ -2728,6 +2729,51 @@ static bool extractSixSurfaces(
   return true;
 }
 
+// Per-panel grid (G2, 2026-11-07, William): a grid overlay per
+// face, stored per panel, never document pixels. Both axes are
+// stored (H = horizontal lines, spaced down the face height;
+// V = vertical lines, spaced across the face width); the pop-up's
+// H/V toggle picks which axis
+// the entries edit. Cell = (faceSize - (n-1)*s) / n; lines sit at
+// cell boundaries; if the cell comes out <= 0 the numbers do not
+// fit that face and that axis draws no lines. The grid is an
+// overlay only: it never writes a cel image and never appears in
+// undo history. In-memory only, like the G1 panel splits —
+// closing the studio forgets the grids.
+struct PanelGridSettings {
+  bool on = false;
+  int countH = 4;
+  int spacingH = 2;
+  int countV = 4;
+  int spacingV = 2;
+};
+
+// Grid line positions (float face-pixel coords) for one axis, or
+// false when the numbers do not fit the face (cell <= 0).
+// Mirrors panel_goals_sim.py grid_lines().
+static bool gridLinePositions(int faceSize, int count, int spacing,
+                              std::vector<float>& outLines)
+{
+  outLines.clear();
+  if (count < 1 || spacing < 0)
+    return false;
+  const float cell = (float(faceSize) - float(count - 1) * float(spacing)) / float(count);
+  if (cell <= 0.0f)
+    return false;
+  for (int i = 0; i < count - 1; ++i)
+    outLines.push_back(float(i + 1) * cell + float(i) * float(spacing));
+  return true;
+}
+
+// Is rendered face pixel u on grid line `line`? A pixel is on
+// the line when its centre is within half a pixel of it, so a
+// half-integer line lights exactly one pixel and an integer line
+// straddles two. Mirrors panel_goals_sim.py on_line().
+static bool gridPixelOnLine(int u, float line)
+{
+  return std::fabs((float(u) + 0.5f) - line) <= 0.5f;
+}
+
 struct Render3DResult {
   doc::ImageRef diffImg;
   doc::ImageRef normImg;
@@ -2747,7 +2793,11 @@ static Render3DResult compute3DPreviewImages(
   int pivZ,
   int renderStyle = 0,
   bool addOutline = true,
-  bool allowCutouts = true)
+  bool allowCutouts = true,
+  // Per-panel grids (G2): null means no grids (baked Iso layers
+  // and every pre-G2 caller). Non-null overlays the grid of the
+  // hit face on the Diffuse map only.
+  const std::array<PanelGridSettings, kFaceCount>* grids = nullptr)
 {
   Render3DResult res;
   const float halfX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown] }) * 0.5f;
@@ -2816,6 +2866,25 @@ static Render3DResult compute3DPreviewImages(
   std::vector<int> faceMap(outW * outH, -1);
   const float maxDepthRange = float(maxDim) * 1.732f;
   const float Lx = -0.45f, Ly = -0.60f, Lz = 0.66f;
+
+  // Per-panel grid line positions (G2), computed once per render
+  // — never per pixel. A face whose grid is off, or whose numbers
+  // do not fit it, keeps empty line lists and draws no lines.
+  std::vector<float> gridXLines[kFaceCount];
+  std::vector<float> gridYLines[kFaceCount];
+  bool gridOnFace[kFaceCount] = {};
+  if (grids) {
+    for (int f = 0; f < kFaceCount; ++f) {
+      gridOnFace[f] = (*grids)[f].on;
+      if (!gridOnFace[f])
+        continue;
+      // X lines are vertical (Vertical settings); Y lines are
+      // horizontal (Horizontal settings). William, 2026-11-07:
+      // Horizontal gives horizontal lines.
+      gridLinePositions(data.w[f], (*grids)[f].countV, (*grids)[f].spacingV, gridXLines[f]);
+      gridLinePositions(data.h[f], (*grids)[f].countH, (*grids)[f].spacingH, gridYLines[f]);
+    }
+  }
 
   const float camDist = maxDepthRange * 2.5f;
   const float nearPlane = 1.0f;
@@ -3041,6 +3110,34 @@ static Render3DResult compute3DPreviewImages(
                                   clampByte(doc::rgba_getb(texCol) * shade), 255);
           break;
       }
+      // Per-panel grid (G2): overlay on the Diffuse map only.
+      // The ray already computed the hit face and its (u, v), so
+      // a grid line is a face-pixel test, not a screen-space
+      // projection — a face that is not visible from this angle
+      // simply has no hit pixels and shows no grid. Normal and
+      // Depth maps are ungridded data views. The flat light-grey
+      // override is not shaded, so the line stays visible on any
+      // face colour. The later addOutline pass may tint a grid
+      // pixel where two faces meet on screen; rare, harmless.
+      if (gridOnFace[face]) {
+        bool onGrid = false;
+        for (float line : gridXLines[face]) {
+          if (gridPixelOnLine(u, line)) {
+            onGrid = true;
+            break;
+          }
+        }
+        if (!onGrid) {
+          for (float line : gridYLines[face]) {
+            if (gridPixelOnLine(v, line)) {
+              onGrid = true;
+              break;
+            }
+          }
+        }
+        if (onGrid)
+          diffRow[px] = doc::rgba(240, 240, 240, 255);
+      }
       faceMap[py * outW + px] = face;
     }
   }
@@ -3136,6 +3233,10 @@ static void bake3DToDoc(Doc* doc, int yawDeg = 45, int pitchDeg = 30)
 // horizontal wheel) is still horizontal scroll, so scrolling
 // is still possible on purpose. Alt+wheel keeps the base
 // colour-change behaviour.
+// Forward declaration: the grid decorator (nested in
+// EasymetricWheelZoomState below) holds a pointer to the view.
+class EasymetricMultiPaneView;
+
 class EasymetricWheelZoomState : public StandbyState {
 public:
   bool onMouseWheel(Editor* editor, ui::MouseMessage* msg) override
@@ -3202,6 +3303,40 @@ public:
     editor->setClipSpriteBounds(savedClip);
     return true;
   }
+
+  // Grid overlay decorator (G2): draws a face's grid lines over
+  // its panel editor. It subclasses StandbyState::Decorator —
+  // NOT a bare EditorDecorator — because MovingPixelsState
+  // static_casts editor->decorator() to StandbyState::Decorator,
+  // so any other base would be an invalid cast the first time a
+  // Move runs in a panel. It is nested in this StandbyState
+  // subclass because StandbyState::Decorator is protected: only
+  // StandbyState and its subclasses may name it. (A free class
+  // cannot derive from it — the phase-1 draft tried that and
+  // did not compile.) The base Decorator draws nothing in
+  // panels (PR #29: it early-returns for Easymetric panel
+  // editors), so replacing it loses no handles; the grid is the
+  // only thing this decorator draws. The editor's state
+  // re-installs its own decorator on every state entry, so
+  // pollAndRender re-installs this one whenever it is missing
+  // (only while the editor is idle — never under a selection-box
+  // or other temporary state).
+  class EasymetricGridDecorator : public StandbyState::Decorator {
+  public:
+    EasymetricGridDecorator(StandbyState* state, EasymetricMultiPaneView* view, int face)
+      : StandbyState::Decorator(state)
+      , m_view(view)
+      , m_face(face)
+    {
+    }
+
+    void postRenderDecorator(EditorPostRender* render) override;
+    void getInvalidDecoratoredRegion(Editor* editor, gfx::Region& region) override;
+
+  private:
+    EasymetricMultiPaneView* m_view;
+    int m_face;
+  };
 
 private:
   double m_wheelAccum = 0.0;
@@ -3531,13 +3666,24 @@ public:
                                     gfx::rgba(kFaceSpecs[f].r, kFaceSpecs[f].g, kFaceSpecs[f].b));
 
       // Panel action buttons, replacing the dead six-dot gripper.
-      // Added in priority order (rightmost first): Link, Sym X,
-      // Sym Y, Flip H, Flip V. The header hides lower-priority
-      // ones when it is too narrow. Labels are abbreviated (SX =
-      // Symmetry X, SY = Symmetry Y, FH = Flip Horizontal, FV =
-      // Flip Vertical) so all five fit in a face header alongside
-      // the title tab and, on top faces, the dimension-link button;
-      // the Fields panel still shows the full "Sym X"/"Sym Y" names.
+      // Added in priority order (rightmost first): Grid, Link,
+      // Sym X, Sym Y, Flip H, Flip V. The header hides
+      // lower-priority ones when it is too narrow. Labels are
+      // abbreviated (SX = Symmetry X, SY = Symmetry Y, FH = Flip
+      // Horizontal, FV = Flip Vertical) so all five fit in a face
+      // header alongside the title tab and, on top faces, the
+      // dimension-link button; the Fields panel still shows the
+      // full "Sym X"/"Sym Y" names. "Grid" is not abbreviated:
+      // it is the panel's own feature button (per-panel grid, G2)
+      // and it sits rightmost so it survives narrowing longest.
+      // It is a toggle-style button — blue while this panel has
+      // a grid — whose click opens the grid settings pop-up for
+      // this panel only. It does not toggle the grid itself; the
+      // pop-up's on/off checkbox does.
+      m_gridButtons[f] = new PaneActionButton("Grid", true);
+      m_gridButtons[f]->Click.connect([this, f] { openGridPopup(f); });
+      m_headers[f]->addActionButton(m_gridButtons[f]);
+
       m_animLinkButtons[f] = new PaneActionButton("Link", true);
       m_animLinkButtons[f]->setOn(true);
       m_animLinkButtons[f]->Click.connect([this, f] {
@@ -3580,8 +3726,16 @@ public:
       // Wheel = zoom in this panel, never View scroll (see
       // EasymetricWheelZoomState). Set after createPaneEditorView
       // so the custom state is the base state the temporary
-      // drawing/moving states return to.
-      ed->setState(EditorStatePtr(new EasymetricWheelZoomState));
+      // drawing/moving states return to. The state is also kept
+      // alive here as the StandbyState* the grid decorator's
+      // base class needs (G2).
+      m_panelBaseStates[f] = EditorStatePtr(new EasymetricWheelZoomState);
+      ed->setState(m_panelBaseStates[f]);
+      // Grid overlay decorator (G2): installed on the panel
+      // editor; pollAndRender re-installs it whenever the
+      // editor's state re-installs its own decorator.
+      m_gridDecorators[f] = new EasymetricWheelZoomState::EasymetricGridDecorator(
+        static_cast<StandbyState*>(m_panelBaseStates[f].get()), this, f);
 
       if (spr) {
         SharedSurfaceLayers shared = findSharedLayers(spr);
@@ -3713,6 +3867,10 @@ public:
     m_timer.Tick.connect([this] { pollAndRender(false); });
     m_timer.start();
 
+    // Grid buttons start off (no grid is on at studio open);
+    // syncGridButtonStates keeps the invariant in one place.
+    syncGridButtonStates();
+
     m_lastHash = 0;
     // Session marker for crash reporting: if a marker from a
     // previous studio session is still present, that session
@@ -3748,6 +3906,26 @@ public:
     if (m_previewWindow) {
       delete m_previewWindow;
       m_previewWindow = nullptr;
+    }
+    // Grid settings pop-up (G2): close it first — its Close
+    // handler reverts an unconfirmed draft, suppressed here by
+    // clearing the face first because the studio is going
+    // away — then delete the window.
+    m_gridPopupFace = -1;
+    if (m_gridWindow) {
+      m_gridWindow->closeWindow(nullptr);
+      delete m_gridWindow;
+      m_gridWindow = nullptr;
+    }
+    // Grid decorators (G2): detach them from the panel editors
+    // before deleting them, so a surviving editor never paints
+    // through a dead decorator. The editors themselves are
+    // children of the view's panes and die with the view.
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (m_editors[f] && m_gridDecorators[f] && m_editors[f]->decorator() == m_gridDecorators[f])
+        m_editors[f]->setDecorator(nullptr);
+      delete m_gridDecorators[f];
+      m_gridDecorators[f] = nullptr;
     }
     std::remove(easymetricHubMarkerPath().c_str());
     restoreWheelZoomPref();
@@ -5533,6 +5711,20 @@ private:
         ed->setState(newPanelState());
       }
     }
+    // Grid overlay decorators (G2): the editor's state
+    // re-installs its own decorator on every state entry, so
+    // re-install the grid decorator whenever it is missing —
+    // but only while the editor is idle, never under a
+    // selection-box or other temporary state (those install
+    // their own decorators).
+    for (int f = 0; f < kFaceCount; ++f) {
+      Editor* ed = m_editors[f];
+      if (ed && m_gridDecorators[f] && isPanelEditorIdle(ed) &&
+          ed->decorator() != m_gridDecorators[f]) {
+        ed->setDecorator(m_gridDecorators[f]);
+        ed->invalidate();
+      }
+    }
     Doc* doc = m_docView->document();
     const doc::frame_t frame = (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
 
@@ -5774,13 +5966,27 @@ private:
       }
     }
 
+    // Effective grids (committed, or the live draft while a
+    // pop-up is open for that face) — mixed into the render
+    // hash so a grid change re-renders, and passed to
+    // render3DModel below.
+    std::array<PanelGridSettings, kFaceCount> effGrids;
+    for (int f = 0; f < kFaceCount; ++f) {
+      effGrids[f] = gridForFace(f);
+      mix(uint64_t(effGrids[f].on ? 1 : 0));
+      mix(uint64_t(effGrids[f].countH));
+      mix(uint64_t(effGrids[f].spacingH));
+      mix(uint64_t(effGrids[f].countV));
+      mix(uint64_t(effGrids[f].spacingV));
+    }
+
     if (!force && h == m_lastHash)
       return;
     m_lastHash = h;
 
     render3DModel(data, yawDeg, pitchDeg, pivX, pivY, pivZ,
                   renderStyle, addOutline, allowCutouts,
-                  showDiff, showNorm, showDept);
+                  showDiff, showNorm, showDept, &effGrids);
 
     if (m_liveBakeCheck->isSelected() && doc && doc->sprite())
       bakeToActiveDocLayers();
@@ -5788,6 +5994,27 @@ private:
 
 public:
   bool isPreviewFloating() const { return m_previewFloating; }
+
+  // Per-panel grid (G2): the effective settings for a face —
+  // the live draft while its pop-up is open, else the committed
+  // values — and the face's UV rect in the sheet (sprite coords,
+  // which are also the panel editor's canvas coords).
+  PanelGridSettings gridForFace(int f) const
+  {
+    if (f < 0 || f >= kFaceCount)
+      return PanelGridSettings();
+    if (m_gridDraftValid[f])
+      return m_gridDraft[f];
+    return m_grid[f];
+  }
+
+  gfx::Rect gridFaceRect(int f) const
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    if (!doc || !doc->sprite() || f < 0 || f >= kFaceCount)
+      return gfx::Rect(0, 0, 0, 0);
+    return sharedFaceRect(doc->sprite(), f);
+  }
 
   void popOutPreview()
   {
@@ -5876,6 +6103,275 @@ public:
     m_previewWidget->invalidate();
   }
 
+  // Grid settings pop-up (G2): one modal window, reused per
+  // face. Edits write into the face's live draft, so the editor
+  // decorator and the Preview show the new grid immediately;
+  // Confirm commits the draft, closing any other way discards
+  // it. The window is modal (openWindowInForeground, the same
+  // pattern as Aseprite's own Grid Settings): Esc / the X
+  // button / Cancel all revert.
+  void openGridPopup(int face)
+  {
+    if (face < 0 || face >= kFaceCount)
+      return;
+    if (!m_gridWindow) {
+      buildGridPopup();
+      if (!m_gridWindow)
+        return;
+    }
+    m_gridPopupFace = face;
+    m_gridConfirmed = false;
+    m_gridDraft[face] = m_grid[face];
+    m_gridDraftValid[face] = true;
+    refillGridPopup();
+    m_gridWindow->setText(fmt::format("Grid - {}", kFaceSpecs[face].displayName));
+    m_gridWindow->remapWindow();
+    m_gridWindow->centerWindow();
+    m_gridWindow->openWindowInForeground();
+    // Modal loop done: if Confirm did not commit, revert the
+    // draft (the Close handler already did this for the X /
+    // Cancel paths; revertGridDraft is idempotent, so calling
+    // it again here is a no-op in that case).
+    if (!m_gridConfirmed)
+      revertGridDraft();
+    m_gridPopupFace = -1;
+  }
+
+  void buildGridPopup()
+  {
+    const int s = ui::guiscale();
+    m_gridWindow = new ui::Window(ui::Window::WithTitleBar, "Grid");
+    m_gridWindow->Close.connect([this](ui::CloseEvent&) { revertGridDraft(); });
+    ui::VBox* box = new ui::VBox;
+    box->setBorder(gfx::Border(4 * s));
+    box->setChildSpacing(3 * s);
+    m_gridWindow->addChild(box);
+
+    // Row 1: on/off + axis toggle.
+    ui::HBox* topRow = new ui::HBox;
+    topRow->setChildSpacing(4 * s);
+    m_gridOnCheck = new ui::CheckBox("Grid on");
+    m_gridOnCheck->Click.connect([this] { updateGridDraftFromPopup(); });
+    m_gridAxisCombo = new ui::ComboBox;
+    m_gridAxisCombo->addItem("Horizontal");
+    m_gridAxisCombo->addItem("Vertical");
+    m_gridAxisCombo->setSelectedItemIndex(0);
+    m_gridAxisCombo->Change.connect([this] { onGridAxisChanged(); });
+    topRow->addChild(m_gridOnCheck);
+    topRow->addChild(new ui::Label("Axis:"));
+    topRow->addChild(m_gridAxisCombo);
+    box->addChild(topRow);
+
+    // Row 2: number of grids + gap, for the chosen axis.
+    // Plain ui::Entry (not ExprEntry): the numbers are plain
+    // counts/gaps, and the draft write clamps them anyway.
+    ui::HBox* numRow = new ui::HBox;
+    numRow->setChildSpacing(4 * s);
+    m_gridCountEntry = new ui::Entry(4, "");
+    m_gridSpacingEntry = new ui::Entry(4, "");
+    m_gridCountEntry->setExpansive(true);
+    m_gridSpacingEntry->setExpansive(true);
+    m_gridCountEntry->Change.connect([this] { updateGridDraftFromPopup(); });
+    m_gridSpacingEntry->Change.connect([this] { updateGridDraftFromPopup(); });
+    numRow->addChild(new ui::Label("Grids:"));
+    numRow->addChild(m_gridCountEntry);
+    numRow->addChild(new ui::Label("Gap (px):"));
+    numRow->addChild(m_gridSpacingEntry);
+    box->addChild(numRow);
+
+    // Live status: the cell size for the edited axis, or why the
+    // numbers do not fit the face. Confirm reads it too.
+    m_gridStatusLabel = new ui::Label("");
+    box->addChild(m_gridStatusLabel);
+
+    // Row 3: Confirm / Cancel.
+    ui::HBox* btnRow = new ui::HBox;
+    btnRow->setChildSpacing(4 * s);
+    m_gridConfirmBtn = new ui::Button("Confirm");
+    m_gridCancelBtn = new ui::Button("Cancel");
+    m_gridConfirmBtn->Click.connect([this] { confirmGridPopup(); });
+    m_gridCancelBtn->Click.connect([this] {
+      if (m_gridWindow)
+        m_gridWindow->closeWindow(m_gridCancelBtn);
+    });
+    btnRow->addChild(m_gridConfirmBtn);
+    btnRow->addChild(m_gridCancelBtn);
+    box->addChild(btnRow);
+  }
+
+  void refillGridPopup()
+  {
+    const int face = m_gridPopupFace;
+    if (face < 0 || face >= kFaceCount || !m_gridWindow)
+      return;
+    const PanelGridSettings& draft = m_gridDraft[face];
+    m_gridRefillingPopup = true;
+    m_gridPopupAxis = 0;
+    m_gridOnCheck->setSelected(draft.on);
+    m_gridAxisCombo->setSelectedItemIndex(0);
+    m_gridCountEntry->setTextf("%d", draft.countH);
+    m_gridSpacingEntry->setTextf("%d", draft.spacingH);
+    m_gridRefillingPopup = false;
+    updateGridStatusLabel();
+  }
+
+  // The H/V toggle switches which axis the entries edit: write
+  // the entries back into the draft for the axis being left,
+  // then load the other axis's values.
+  void onGridAxisChanged()
+  {
+    if (m_gridRefillingPopup)
+      return;
+    const int face = m_gridPopupFace;
+    if (face < 0 || face >= kFaceCount || !m_gridAxisCombo)
+      return;
+    writeGridPopupEntriesToDraft();
+    m_gridPopupAxis = m_gridAxisCombo->getSelectedItemIndex();
+    const PanelGridSettings& draft = m_gridDraft[face];
+    if (m_gridPopupAxis == 0) {
+      m_gridCountEntry->setTextf("%d", draft.countH);
+      m_gridSpacingEntry->setTextf("%d", draft.spacingH);
+    }
+    else {
+      m_gridCountEntry->setTextf("%d", draft.countV);
+      m_gridSpacingEntry->setTextf("%d", draft.spacingV);
+    }
+    updateGridStatusLabel();
+  }
+
+  // Writes the entries into the draft for the axis currently
+  // being edited (m_gridPopupAxis), clamped to count [1, 64]
+  // and spacing [0, 256]. A half-typed entry reads as 0, which
+  // clamps to 1 / 0 — the value is corrected on the next edit,
+  // and Confirm re-reads the entries before validating.
+  void writeGridPopupEntriesToDraft()
+  {
+    const int face = m_gridPopupFace;
+    if (face < 0 || face >= kFaceCount || !m_gridCountEntry || !m_gridSpacingEntry)
+      return;
+    PanelGridSettings& draft = m_gridDraft[face];
+    const int count = std::clamp(m_gridCountEntry->textInt(), 1, 64);
+    const int spacing = std::clamp(m_gridSpacingEntry->textInt(), 0, 256);
+    if (m_gridPopupAxis == 0) {
+      draft.countH = count;
+      draft.spacingH = spacing;
+    }
+    else {
+      draft.countV = count;
+      draft.spacingV = spacing;
+    }
+  }
+
+  // Live preview: every edit in the pop-up writes the draft,
+  // refreshes the status line, and repaints the editor +
+  // Preview from the draft, so the user sees the grid change
+  // as they type. Same pattern as the Fields handlers, which
+  // also call pollAndRender(true) on every change.
+  void updateGridDraftFromPopup()
+  {
+    if (m_gridRefillingPopup)
+      return;
+    const int face = m_gridPopupFace;
+    if (face < 0 || face >= kFaceCount || !m_gridOnCheck)
+      return;
+    m_gridDraft[face].on = m_gridOnCheck->isSelected();
+    writeGridPopupEntriesToDraft();
+    updateGridStatusLabel();
+    if (m_editors[face])
+      m_editors[face]->invalidate();
+    pollAndRender(true);
+  }
+
+  void updateGridStatusLabel()
+  {
+    const int face = m_gridPopupFace;
+    if (face < 0 || face >= kFaceCount || !m_gridStatusLabel)
+      return;
+    const gfx::Rect faceRect = gridFaceRect(face);
+    const int axis = m_gridAxisCombo ? m_gridAxisCombo->getSelectedItemIndex() : 0;
+    // Axis 0 is Horizontal: its lines are spaced down the face
+    // height; axis 1 (Vertical) across the face width.
+    const int faceSize = (axis == 0) ? faceRect.h : faceRect.w;
+    const int count = m_gridCountEntry ? std::clamp(m_gridCountEntry->textInt(), 1, 64) : 1;
+    const int spacing = m_gridSpacingEntry ? std::clamp(m_gridSpacingEntry->textInt(), 0, 256) : 0;
+    std::vector<float> lines;
+    if (gridLinePositions(faceSize, count, spacing, lines)) {
+      const float cell = (float(faceSize) - float(count - 1) * float(spacing)) / float(count);
+      m_gridStatusLabel->setText(fmt::format("Cell: {:.1f}px, {} line{} on this axis",
+                                             cell, lines.size(),
+                                             lines.size() == 1 ? "" : "s"));
+    }
+    else {
+      const int need = (count - 1) * spacing + count;
+      m_gridStatusLabel->setText(fmt::format(
+        "Does not fit: {} grids with {}px gaps need at least {}px on a {}px face",
+        count, spacing, need, faceSize));
+    }
+  }
+
+  void confirmGridPopup()
+  {
+    const int face = m_gridPopupFace;
+    if (face < 0 || face >= kFaceCount || !m_gridWindow)
+      return;
+    // Write the entries back first (the user may Confirm without
+    // leaving the entry), then refuse with a reason when either
+    // axis does not fit the CURRENT face size (the face may have
+    // been resized via Fields while the pop-up was open). The
+    // fit check only applies while the grid is on: with it off
+    // the numbers are inert and draw nothing.
+    if (m_gridOnCheck)
+      m_gridDraft[face].on = m_gridOnCheck->isSelected();
+    writeGridPopupEntriesToDraft();
+    const gfx::Rect faceRect = gridFaceRect(face);
+    const PanelGridSettings& draft = m_gridDraft[face];
+    std::vector<float> lines;
+    std::string why;
+    if (draft.on) {
+      if (!gridLinePositions(faceRect.h, draft.countH, draft.spacingH, lines))
+        why = fmt::format("Horizontal: {} grids with {}px gaps do not fit a {}px face",
+                          draft.countH, draft.spacingH, faceRect.h);
+      else if (!gridLinePositions(faceRect.w, draft.countV, draft.spacingV, lines))
+        why = fmt::format("Vertical: {} grids with {}px gaps do not fit a {}px face",
+                          draft.countV, draft.spacingV, faceRect.w);
+    }
+    if (!why.empty()) {
+      if (m_gridStatusLabel)
+        m_gridStatusLabel->setText(why + " — adjust the numbers or turn the grid off.");
+      return;
+    }
+    m_grid[face] = draft;
+    m_gridDraftValid[face] = false;
+    m_gridConfirmed = true;
+    syncGridButtonStates();
+    if (m_editors[face])
+      m_editors[face]->invalidate();
+    pollAndRender(true);
+    m_gridWindow->closeWindow(m_gridConfirmBtn);
+  }
+
+  void revertGridDraft()
+  {
+    const int face = m_gridPopupFace;
+    if (face < 0 || face >= kFaceCount)
+      return;
+    if (!m_gridDraftValid[face])
+      return;
+    m_gridDraftValid[face] = false;
+    syncGridButtonStates();
+    if (m_editors[face])
+      m_editors[face]->invalidate();
+    pollAndRender(true);
+  }
+
+  void syncGridButtonStates()
+  {
+    for (int f = 0; f < kFaceCount; ++f) {
+      if (m_gridButtons[f])
+        m_gridButtons[f]->setOn(m_grid[f].on);
+    }
+  }
+
 private:
   void render3DModel(const SixSurfaceData& data,
                      int yawDeg,
@@ -5888,10 +6384,11 @@ private:
                      bool allowCutouts,
                      bool showDiff,
                      bool showNorm,
-                     bool showDept)
+                     bool showDept,
+                     const std::array<PanelGridSettings, kFaceCount>* grids = nullptr)
   {
     Render3DResult res = compute3DPreviewImages(data, yawDeg, pitchDeg, pivX, pivY, pivZ,
-                                                renderStyle, addOutline, allowCutouts);
+                                                renderStyle, addOutline, allowCutouts, grids);
     m_lastDiffImg = res.diffImg;
     m_lastNormImg = res.normImg;
     m_lastDeptImg = res.deptImg;
@@ -6310,7 +6807,8 @@ private:
   std::array<bool, 3> m_colLinked = { false, false, false };
 
   // Panel action buttons, one set per face header (priority order in
-  // each header: Link, Sym X, Sym Y, Flip H, Flip V).
+  // each header: Grid, Link, Sym X, Sym Y, Flip H, Flip V).
+  std::array<PaneActionButton*, kFaceCount> m_gridButtons = {};
   std::array<PaneActionButton*, kFaceCount> m_animLinkButtons = {};
   std::array<PaneActionButton*, kFaceCount> m_symXButtons = {};
   std::array<PaneActionButton*, kFaceCount> m_symYButtons = {};
@@ -6324,6 +6822,46 @@ private:
     doc::frame_t(0), doc::frame_t(0), doc::frame_t(0),
     doc::frame_t(0), doc::frame_t(0), doc::frame_t(0)
   };
+
+  // Per-panel grid (G2, 2026-11-07): committed settings per face
+  // plus a live draft while a grid pop-up is open for that face.
+  // The draft is what the editor decorator and the Preview render
+  // while the pop-up is open; Confirm copies it into m_grid,
+  // closing without Confirm discards it. In-memory only —
+  // closing the studio forgets the grids. Never document pixels,
+  // never in undo history: the grid is drawn as an overlay
+  // (decorator) and baked into the Preview's Diffuse image at
+  // render time, never into a cel.
+  std::array<PanelGridSettings, kFaceCount> m_grid;
+  std::array<PanelGridSettings, kFaceCount> m_gridDraft;
+  std::array<bool, kFaceCount> m_gridDraftValid = {};
+  // Base idle states for the grid decorators (the StandbyState*
+  // the Decorator base class needs; kept alive here because the
+  // editor's own state object is replaced on tool switches).
+  std::array<EditorStatePtr, kFaceCount> m_panelBaseStates;
+  std::array<EasymetricWheelZoomState::EasymetricGridDecorator*, kFaceCount> m_gridDecorators = {};
+  // Grid settings pop-up (one window, reused per face) and its
+  // widgets, refilled on every open.
+  ui::Window* m_gridWindow = nullptr;
+  ui::CheckBox* m_gridOnCheck = nullptr;
+  ui::ComboBox* m_gridAxisCombo = nullptr;
+  ui::Entry* m_gridCountEntry = nullptr;
+  ui::Entry* m_gridSpacingEntry = nullptr;
+  ui::Label* m_gridStatusLabel = nullptr;
+  ui::Button* m_gridConfirmBtn = nullptr;
+  ui::Button* m_gridCancelBtn = nullptr;
+  int m_gridPopupFace = -1;
+  // Which axis the pop-up's entries are editing right now (0 =
+  // Horizontal, 1 = Vertical); the axis switch writes the entries
+  // back into the draft for the axis being left first.
+  int m_gridPopupAxis = 0;
+  // True while refillGridPopup is setting the widgets: the
+  // ComboBox fires Change when its index actually changes, so
+  // without this the refill would run onGridAxisChanged with
+  // the previous pop-up's entry text still in the boxes and
+  // write it into the new face's draft.
+  bool m_gridRefillingPopup = false;
+  bool m_gridConfirmed = false;
 
   // Preview & Fields
   EasymetricPreviewWidget* m_previewWidget = nullptr;
@@ -6417,6 +6955,56 @@ private:
   doc::ImageRef m_lastNormImg;
   doc::ImageRef m_lastDeptImg;
 };
+
+void EasymetricWheelZoomState::EasymetricGridDecorator::postRenderDecorator(
+  EditorPostRender* render)
+{
+  // Base draws nothing in panels (early return); call it anyway
+  // so any future non-panel behaviour of the base is preserved.
+  StandbyState::Decorator::postRenderDecorator(render);
+  Editor* editor = render->getEditor();
+  if (!editor || !m_view || m_face < 0 || m_face >= kFaceCount)
+    return;
+  const PanelGridSettings grid = m_view->gridForFace(m_face);
+  if (!grid.on)
+    return;
+  const gfx::Rect faceRect = m_view->gridFaceRect(m_face);
+  if (faceRect.isEmpty())
+    return;
+  // drawLine takes editor (canvas) coords: the face rect is the
+  // UV rect in the sheet, so a vertical line at face-x `line` is
+  // canvas x = faceRect.x + line. The editor line is 1px at
+  // int(line); that pixel is always one of the Preview's
+  // straddled pixels (see the sim's editor_pixel check).
+  std::vector<float> lines;
+  // Vertical settings draw the vertical lines (face-x),
+  // Horizontal settings the horizontal lines (face-y).
+  if (gridLinePositions(faceRect.w, grid.countV, grid.spacingV, lines)) {
+    for (float line : lines) {
+      const int x = faceRect.x + int(line);
+      render->drawLine(gfx::rgba(255, 255, 255, 180),
+                       x, faceRect.y, x, faceRect.y + faceRect.h - 1);
+    }
+  }
+  if (gridLinePositions(faceRect.h, grid.countH, grid.spacingH, lines)) {
+    for (float line : lines) {
+      const int y = faceRect.y + int(line);
+      render->drawLine(gfx::rgba(255, 255, 255, 180),
+                       faceRect.x, y, faceRect.x + faceRect.w - 1, y);
+    }
+  }
+}
+
+void EasymetricWheelZoomState::EasymetricGridDecorator::getInvalidDecoratoredRegion(
+  Editor* editor, gfx::Region& region)
+{
+  StandbyState::Decorator::getInvalidDecoratoredRegion(editor, region);
+  // No extra region: the grid is locked to the canvas, so it
+  // scrolls and zooms with the face pixels and is redrawn by
+  // postRenderDecorator on every editor paint. Grid setting
+  // changes invalidate the editor explicitly (see
+  // updateGridDraftFromPopup / confirmGridPopup).
+}
 
 class EasymetricStudioCommand : public Command {
 public:
