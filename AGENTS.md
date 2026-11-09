@@ -18,3 +18,4 @@ AI-agent control via MCP, PixelLab extension integration, built-in project versi
 - Do NOT commit the PixelLab extension or any of its files (proprietary, contains license secret). It is installed at runtime from the user's own copy.
 - Do NOT touch `third_party/` (submodules) except when a phase explicitly says so.
 - New user-visible strings go in `data/strings/en.ini`; new menu items in `data/gui.xml`.
+- **No Redundant Acknowledgments**: When another agent confirms receipt ("got it", "understood", "acknowledged"), do NOT reply with redundant confirmations ("got your message", "got it", "acknowledged", "noted"). Eliminate ack ping-pong; only send messages that deliver new technical findings, changes, or direct questions.

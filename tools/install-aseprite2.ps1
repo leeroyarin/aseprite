@@ -32,6 +32,11 @@ try {
     Copy-Item $sourceExe -Destination $targetExe -Force
 }
 
+$sourcePdb = Join-Path $binDir "aseprite.pdb"
+if (Test-Path $sourcePdb) {
+    Copy-Item $sourcePdb -Destination (Join-Path $installDir "aseprite.pdb") -Force -ErrorAction SilentlyContinue
+}
+
 foreach ($dep in @("icudtl.dat", "zlib.dll")) {
     $srcDep = Join-Path $binDir $dep
     if (Test-Path $srcDep) {

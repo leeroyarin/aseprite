@@ -1,3 +1,19 @@
+## 2026-11-09 — Feature 4.3 Pop-out Reflow fixed: 3-column expansion + 4-column dock restoration
+
+- Part 1 validation Feature 4.3 Pop-out Reflow fixed in `src/app/commands/cmd_easymetric.cpp`:
+  - `computePaneLayout`: when `m_previewFloating` is true, computes a clean 3-column layout without 4th placeholder column; face columns 0..2 expand proportionally to fill the full freed width (`rc.w - 2 * bw`). Stored docked widths (`m_dockedColWpx`) are preserved on pop-out and restored on docking back (`dockPreview`), returning cleanly to the original 4-column layout.
+  - `splitterGapAt` & `onPaint`: horizontal and vertical separator bars and hit testing now constrain to 3 columns (splitters 1..2 and horizontal 10..12) when floating, preventing phantom splitters or bars for column 3.
+  - `onResize`: hides panes 6 and 7 (`setVisible(false)`) when floating instead of forcing them visible with placeholder text.
+  - `popOutPreview` & `dockPreview`: triggers `layout()` on the studio widget to reflow the layout and calls `recenterPanelCanvases()`.
+- MSVC / Ninja build pipeline: compiled `build/bin/aseprite.exe` (x64 Release with RelWithDebInfo). Installed to `%LOCALAPPDATA%\Programs\Aseprite 2.0\aseprite.exe` via `tools/install-aseprite2.ps1`.
+- Headless test suites: **163/163 PASS** (0 failures):
+  - `tests/easymetric_test.lua` (68/68)
+  - `tests/easymetric_adversarial_stress.lua` (54/54)
+  - `tests/easymetric_four_requirements_test.lua` (23/23)
+  - `tests/easymetric_texture_layer_panel_bugs.lua` (14/14)
+  - `tests/easymetric_depth_sculpt_test.lua` (4/4)
+- Agent Mesh Hub: sent chat update to `aseprite2` project via `tools/agent-mesh/run_arin_pc.py send` and posted message to channel API `https://agent-mesh-hub.slack-clone-arin.workers.dev/api/v2/channels/aseprite2:general/messages` (HTTP 201 Created).
+
 ## 2026-11-08 — Reconciled Aseprite-2.0 incoming changes
 
 - Codex: fetched `origin/Aseprite-2.0` through `f66ed5968` (PRs #34–#37: panel edge resizing, hidden-Base status tip, Grid, and per-panel symmetry) and merged it with the local branch, which already held the G2 draft commits. `cmd_easymetric.cpp` merged automatically; HANDOFF had one overlapping top-of-file insertion. Kept both the local G2 phase/build record and incoming G1 record, with no progress discarded.

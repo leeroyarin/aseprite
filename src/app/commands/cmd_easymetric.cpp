@@ -4716,53 +4716,90 @@ protected:
     const int s = std::max(1, ui::guiscale());
     const int bw = 6 * s;
     const int bh = 6 * s;
-    const int totalW = std::max(16, rc.w - 3 * bw);
     const int totalH = std::max(16, rc.h - bh);
-    // G1 (2026-11-07, William): panel borders are draggable again.
-    // The 2026-11-04 removal made surface columns fixed equal
-    // widths and surface rows fixed equal heights, which left
-    // William with no way to resize a panel at all. Now the
-    // stored splits drive the layout: m_colWpx[0..2] for the
-    // surface columns (Preview, col 3, stays the remainder, so
-    // a window resize still changes only Preview), and
-    // m_rowHpx[c] for every column's row split. A drag may only
-    // start in a real gap (splitterGapAt) and never while a
-    // panel editor is busy, so it still cannot entangle a
-    // drawing stroke. Minimum panel size is 80*guiscale px
-    // (PANEL_GOALS.md G1); minCol <= totalW/4 and
-    // minRow <= totalH/2 by construction, so every clamp
-    // below has a valid range.
-    const int minCol = std::min(80 * s, totalW / 4);
     const int minRow = std::min(80 * s, totalH / 2);
 
-    if (!m_colInit) {
-      m_colWpx[0] = totalW / 4;
-      m_colWpx[1] = totalW / 4;
-      m_colWpx[2] = totalW / 4;
-      for (int c = 0; c < 4; ++c)
-        m_rowHpx[c] = totalH / 2;
-      m_colInit = true;
+    if (m_previewFloating) {
+      // 3-column layout when preview column is floated:
+      // columns 0..2 expand to fill the entire freed width.
+      const int totalW = std::max(16, rc.w - 2 * bw);
+      const int minCol = std::min(80 * s, totalW / 3);
+
+      if (!m_colInit) {
+        m_colWpx[0] = totalW / 3;
+        m_colWpx[1] = totalW / 3;
+        m_colWpx[2] = totalW / 3;
+        for (int c = 0; c < 4; ++c)
+          m_rowHpx[c] = totalH / 2;
+        m_colInit = true;
+      }
+
+      if (!m_floatColInit) {
+        const int sumW = m_colWpx[0] + m_colWpx[1] + m_colWpx[2];
+        if (sumW > 0) {
+          m_floatColWpx[0] = (int)((int64_t)m_colWpx[0] * totalW / sumW);
+          m_floatColWpx[1] = (int)((int64_t)m_colWpx[1] * totalW / sumW);
+          m_floatColWpx[2] = totalW - m_floatColWpx[0] - m_floatColWpx[1];
+        }
+        else {
+          m_floatColWpx[0] = totalW / 3;
+          m_floatColWpx[1] = totalW / 3;
+          m_floatColWpx[2] = totalW - 2 * (totalW / 3);
+        }
+        m_floatColInit = true;
+      }
+
+      const int avail = totalW - minCol;
+      colW[0] = std::clamp(m_floatColWpx[0], minCol, avail - 2 * minCol);
+      colW[1] = std::clamp(m_floatColWpx[1], minCol, avail - colW[0] - minCol);
+      colW[2] = std::max(minCol, totalW - colW[0] - colW[1]);
+      colW[3] = 0;
+
+      colX[0] = rc.x;
+      colX[1] = rc.x + colW[0] + bw;
+      colX[2] = rc.x + colW[0] + bw + colW[1] + bw;
+      colX[3] = colX[2] + colW[2];
+
+      for (int c = 0; c < 3; ++c) {
+        colRowTopH[c] = std::clamp(m_rowHpx[c], minRow, std::max(minRow, totalH - minRow));
+        colRowBotH[c] = std::max(minRow, totalH - colRowTopH[c]);
+        colRowBotY[c] = rc.y + colRowTopH[c] + bh;
+      }
+      colRowTopH[3] = 0;
+      colRowBotH[3] = 0;
+      colRowBotY[3] = rc.y;
     }
+    else {
+      // 4-column docked layout: surface columns 0..2 keep stored widths,
+      // column 3 (preview/fields) absorbs the remainder.
+      const int totalW = std::max(16, rc.w - 3 * bw);
+      const int minCol = std::min(80 * s, totalW / 4);
 
-    // Surface columns use their stored widths. If the window
-    // shrank below the stored sum, the later columns clamp
-    // down first; the clamps are ordered so each upper bound
-    // stays >= its lower bound (see the minCol note above).
-    const int avail = totalW - minCol;
-    colW[0] = std::clamp(m_colWpx[0], minCol, avail - 2 * minCol);
-    colW[1] = std::clamp(m_colWpx[1], minCol, avail - colW[0] - minCol);
-    colW[2] = std::clamp(m_colWpx[2], minCol, avail - colW[0] - colW[1]);
-    colW[3] = std::max(minCol, totalW - colW[0] - colW[1] - colW[2]);
+      if (!m_colInit) {
+        m_colWpx[0] = totalW / 4;
+        m_colWpx[1] = totalW / 4;
+        m_colWpx[2] = totalW / 4;
+        for (int c = 0; c < 4; ++c)
+          m_rowHpx[c] = totalH / 2;
+        m_colInit = true;
+      }
 
-    colX[0] = rc.x;
-    colX[1] = rc.x + colW[0] + bw;
-    colX[2] = rc.x + colW[0] + bw + colW[1] + bw;
-    colX[3] = rc.x + colW[0] + bw + colW[1] + bw + colW[2] + bw;
+      const int avail = totalW - minCol;
+      colW[0] = std::clamp(m_colWpx[0], minCol, avail - 2 * minCol);
+      colW[1] = std::clamp(m_colWpx[1], minCol, avail - colW[0] - minCol);
+      colW[2] = std::clamp(m_colWpx[2], minCol, avail - colW[0] - colW[1]);
+      colW[3] = std::max(minCol, totalW - colW[0] - colW[1] - colW[2]);
 
-    for (int c = 0; c < 4; ++c) {
-      colRowTopH[c] = std::clamp(m_rowHpx[c], minRow, std::max(minRow, totalH - minRow));
-      colRowBotH[c] = std::max(minRow, totalH - colRowTopH[c]);
-      colRowBotY[c] = rc.y + colRowTopH[c] + bh;
+      colX[0] = rc.x;
+      colX[1] = rc.x + colW[0] + bw;
+      colX[2] = rc.x + colW[0] + bw + colW[1] + bw;
+      colX[3] = rc.x + colW[0] + bw + colW[1] + bw + colW[2] + bw;
+
+      for (int c = 0; c < 4; ++c) {
+        colRowTopH[c] = std::clamp(m_rowHpx[c], minRow, std::max(minRow, totalH - minRow));
+        colRowBotH[c] = std::max(minRow, totalH - colRowTopH[c]);
+        colRowBotY[c] = rc.y + colRowTopH[c] + bh;
+      }
     }
   }
 
@@ -4806,11 +4843,11 @@ protected:
     computePaneLayout(rc, colX, colW, colTopH, colBotY, colBotH);
     if (!rc.contains(pos))
       return 0;
-    for (int c = 1; c < 4; ++c) {
+    for (int c = 1; c < (m_previewFloating ? 3 : 4); ++c) {
       if (pos.x >= colX[c] - bw && pos.x < colX[c])
         return c;
     }
-    for (int c = 0; c < 4; ++c) {
+    for (int c = 0; c < (m_previewFloating ? 3 : 4); ++c) {
       if (c < 3 && m_colLinked[c])
         continue;
       if (pos.x >= colX[c] && pos.x < colX[c] + colW[c] && pos.y >= colBotY[c] - bh &&
@@ -4952,48 +4989,36 @@ protected:
           const int s = std::max(1, ui::guiscale());
           const int bw = 6 * s;
           const int bh = 6 * s;
-          const int totalW = std::max(16, rc.w - 3 * bw);
+          const int numCols = m_previewFloating ? 3 : 4;
+          const int totalW = std::max(16, rc.w - (numCols - 1) * bw);
           const int totalH = std::max(16, rc.h - bh);
-          // Pixel drag, adjacent pair only: the other columns'
-          // stored pixel widths are not touched, so stretching
-          // Preview (boundary 3) changes only Right/Left + Preview,
-          // never the other two surface columns, and a window
-          // resize (which only changes totalW) changes only
-          // Preview via computePaneLayout.
-          const int minColPx = std::min(80 * s, totalW / 4);
+          const int minColPx = std::min(80 * s, totalW / numCols);
           const int minRowPx = std::min(80 * s, totalH / 2);
-          if (m_dragSplitter < 10 && m_dragSplitter < 4) {
-            // m_dragStart is local (toClient at MouseDown), so the
-            // move position must be local too; the offset cancels
-            // in the delta either way, but mixing spaces is how
-            // the hit test broke, so keep one space here.
+          if (m_dragSplitter < 10 && m_dragSplitter < numCols) {
             const gfx::Point dragPos = toClient(mouseMsg->position());
             const int deltaPx = dragPos.x - m_dragStart.x;
             const int left = m_dragSplitter - 1;
             int pair = 0;
-            if (m_dragSplitter < 3)
+            if (m_previewFloating) {
               pair = m_dragColWpx[left] + m_dragColWpx[m_dragSplitter];
-            else
-              pair = m_dragColWpx[left] + m_dragPreviewW;
-            // std::clamp is undefined when its upper bound is
-            // below its lower bound. That happens when a pair
-            // of narrow columns is smaller than twice the
-            // minimum column width (small window, or HiDPI
-            // guiscale making 64*guiscale large): dragging
-            // that boundary then fed a shrinking / negative
-            // width into the layout, which is exactly the
-            // "panel shrinks, then it crashes at the end"
-            // pattern. Clamp the upper bound up to the lower
-            // bound first, so a drag can never produce a
-            // negative or below-minimum column width.
-            const int hiCol = std::max(minColPx, pair - minColPx);
-            const int newLeft = std::clamp(m_dragColWpx[left] + deltaPx,
-                                           minColPx, hiCol);
-            m_colWpx[left] = newLeft;
-            if (m_dragSplitter < 3)
-              m_colWpx[m_dragSplitter] = pair - newLeft;
-            // Boundary 3: Preview is the remainder, so it follows
-            // automatically from the new left width.
+              const int hiCol = std::max(minColPx, pair - minColPx);
+              const int newLeft = std::clamp(m_dragColWpx[left] + deltaPx,
+                                             minColPx, hiCol);
+              m_floatColWpx[left] = newLeft;
+              m_floatColWpx[m_dragSplitter] = pair - newLeft;
+            }
+            else {
+              if (m_dragSplitter < 3)
+                pair = m_dragColWpx[left] + m_dragColWpx[m_dragSplitter];
+              else
+                pair = m_dragColWpx[left] + m_dragPreviewW;
+              const int hiCol = std::max(minColPx, pair - minColPx);
+              const int newLeft = std::clamp(m_dragColWpx[left] + deltaPx,
+                                             minColPx, hiCol);
+              m_colWpx[left] = newLeft;
+              if (m_dragSplitter < 3)
+                m_colWpx[m_dragSplitter] = pair - newLeft;
+            }
           }
           else {
             const gfx::Point dragPos = toClient(mouseMsg->position());
@@ -5090,10 +5115,16 @@ protected:
     }
 
     // Col 3: Preview (6), Fields (7)
-    m_panes[6]->setVisible(true);
-    m_panes[7]->setVisible(true);
-    m_panes[6]->setBounds(gfx::Rect(colX[3], contentRc.y, colW[3], colTopH[3]));
-    m_panes[7]->setBounds(gfx::Rect(colX[3], colBotY[3], colW[3], colBotH[3]));
+    if (m_previewFloating) {
+      m_panes[6]->setVisible(false);
+      m_panes[7]->setVisible(false);
+    }
+    else {
+      m_panes[6]->setVisible(true);
+      m_panes[7]->setVisible(true);
+      m_panes[6]->setBounds(gfx::Rect(colX[3], contentRc.y, colW[3], colTopH[3]));
+      m_panes[7]->setBounds(gfx::Rect(colX[3], colBotY[3], colW[3], colBotH[3]));
+    }
 
     // NOTE: deliberately no fitClipSpriteBounds() here. Fitting on
     // every resize reset each surface editor's zoom/scroll whenever
@@ -5134,7 +5165,7 @@ protected:
     // where the bar is drawn. A linked column has no
     // horizontal bar: its top pane spans the full height.
     const gfx::Rect contentRc = contentBounds();
-    for (int c = 1; c < 4; ++c) {
+    for (int c = 1; c < (m_previewFloating ? 3 : 4); ++c) {
       const bool active = (m_hoverSplitter == c || m_dragSplitter == c);
       g->fillRect(active ? activeCol : sepCol,
                   gfx::Rect(colX[c] - bw, contentRc.y, bw, contentRc.h));
@@ -5143,7 +5174,7 @@ protected:
       g->fillRect(active ? activeCol : gripCol,
                   gfx::Rect(midX - 1 * s, midY - 12 * s, 2 * s, 24 * s));
     }
-    for (int c = 0; c < 4; ++c) {
+    for (int c = 0; c < (m_previewFloating ? 3 : 4); ++c) {
       if (c < 3 && m_colLinked[c])
         continue;
       const int gap = 10 + c;
@@ -6143,17 +6174,21 @@ public:
     m_columnBox->addChild(m_fieldsView);
     m_previewWidget->setExpansive(true);
     m_fieldsView->setExpansive(true);
+    for (int i = 0; i < 3; ++i)
+      m_dockedColWpx[i] = m_colWpx[i];
     m_previewFloating = true;
-    if (m_previewPlaceholder) m_previewPlaceholder->setVisible(true);
-    if (m_fieldsPlaceholder) m_fieldsPlaceholder->setVisible(true);
+    m_floatColInit = false;
+    m_hoverSplitter = 0;
+    m_dragSplitter = 0;
+    m_panes[kFaceCount]->setVisible(false);
+    m_panes[kFaceCount + 1]->setVisible(false);
+    if (m_previewPlaceholder) m_previewPlaceholder->setVisible(false);
+    if (m_fieldsPlaceholder) m_fieldsPlaceholder->setVisible(false);
     if (m_previewPopoutBtn) m_previewPopoutBtn->setText("Dock Column");
     if (m_previewPopoutHeaderBtn) m_previewPopoutHeaderBtn->setText("Dock");
-    // addChild/removeChild neither re-layout nor repaint the panes
-    // (see ui::Widget), so without this the panes keep showing the
-    // last painted frame — the cube and the fields — and the
-    // placeholder text that explains how to dock never appears.
-    m_panes[kFaceCount]->layout();
-    m_panes[kFaceCount + 1]->layout();
+    // Reflow the studio into a 3-column layout where the 3 face
+    // columns expand to fill the entire freed width.
+    layout();
     invalidate();
     m_previewWindow->remapWindow();
     m_previewWindow->centerWindow();
@@ -6177,17 +6212,24 @@ public:
     m_previewWidget->setExpansive(true);
     m_fieldsView->setExpansive(true);
     m_previewFloating = false;
+    for (int i = 0; i < 3; ++i)
+      m_colWpx[i] = m_dockedColWpx[i];
+    m_floatColInit = false;
+    m_hoverSplitter = 0;
+    m_dragSplitter = 0;
+    m_panes[kFaceCount]->setVisible(true);
+    m_panes[kFaceCount + 1]->setVisible(true);
     if (m_previewPlaceholder) m_previewPlaceholder->setVisible(false);
     if (m_fieldsPlaceholder) m_fieldsPlaceholder->setVisible(false);
     if (m_previewPopoutBtn) m_previewPopoutBtn->setText("Pop out Column");
     if (m_previewPopoutHeaderBtn) m_previewPopoutHeaderBtn->setText("Pop out");
     // Undo the floating size hints (see popOutPreview) and re-layout
-    // the panes, or the docked column keeps the floating sizes and
-    // the widgets paint in their old spots.
+    // the panes back into the original 4-column layout.
     m_previewWidget->resetSizeHint();
     m_fieldsView->resetSizeHint();
     m_panes[kFaceCount]->layout();
     m_panes[kFaceCount + 1]->layout();
+    layout();
     invalidate();
     m_previewWidget->invalidate();
   }
@@ -7025,8 +7067,11 @@ private:
   // (const, called from paint/hit-testing) lazily initialises
   // them on first layout; after that only a drag changes them.
   mutable int m_colWpx[3] = { 0, 0, 0 };
+  mutable int m_floatColWpx[3] = { 0, 0, 0 };
   mutable int m_rowHpx[4] = { 0, 0, 0, 0 };
   mutable bool m_colInit = false;
+  mutable bool m_floatColInit = false;
+  int m_dockedColWpx[3] = { 0, 0, 0 };
   int m_hoverSplitter = 0;
   int m_dragSplitter = 0;
   gfx::Point m_dragStart;
