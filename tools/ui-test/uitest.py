@@ -76,6 +76,10 @@ class UiTest:
             if os.path.exists(ready):
                 time.sleep(0.5)
                 self.call("ping")
+                # The very first injected click after launch is swallowed by the
+                # window activation; spend it on an inert spot (the status bar).
+                scr = self.ui()["screen"]
+                self.click(scr[2] // 2, scr[3] - 6)
                 return
             if self.proc.poll() is not None:
                 raise UiTestError("aseprite exited early with code %s" % self.proc.returncode)
@@ -89,8 +93,13 @@ class UiTest:
         cmd["id"] = self._seq
         tmp = os.path.join(self.cmd_dir, "cmd.tmp")
         res_path = os.path.join(self.cmd_dir, "res.json")
-        if os.path.exists(res_path):
-            os.remove(res_path)
+        for _ in range(100):
+            try:
+                if os.path.exists(res_path):
+                    os.remove(res_path)
+                break
+            except OSError:
+                time.sleep(0.02)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cmd, f)
         os.replace(tmp, os.path.join(self.cmd_dir, "cmd.json"))
@@ -100,9 +109,11 @@ class UiTest:
                 try:
                     with open(res_path, "r", encoding="utf-8") as f:
                         res = json.load(f)
-                except ValueError:
-                    time.sleep(0.02)
+                except (ValueError, PermissionError, OSError):
+                    time.sleep(0.02)       # the app is replacing the file right now
                     continue
+                if res.get("id") == -1:
+                    raise UiTestError("the app could not read the command: %s" % res.get("error"))
                 if res.get("id") == self._seq:
                     if not res.get("ok", False):
                         raise UiTestError("%s failed: %s" % (op, res.get("error")))
@@ -110,7 +121,24 @@ class UiTest:
             if self.proc.poll() is not None:
                 raise UiTestError("aseprite died during %s (exit %s)" % (op, self.proc.returncode))
             time.sleep(0.01)
-        raise UiTestError("timeout waiting for %s" % op)
+        try:
+            with open(os.path.join(self.cmd_dir, "server.log"), "r", encoding="utf-8", errors="replace") as f:
+                tail = "".join(f.readlines()[-8:])
+        except OSError:
+            tail = ""
+        pending = os.path.exists(os.path.join(self.cmd_dir, "cmd.json"))
+        raise UiTestError("timeout waiting for %s (cmd.json %s by the app)%s%s" % (
+            op, "NOT consumed" if pending else "consumed", ("\nserver.log tail:\n" + tail) if tail else "",
+            self._hang_report()))
+
+    def _hang_report(self):
+        """The app's watchdog writes hang-N.txt (UI-thread stack) when the UI stops responding."""
+        import glob
+        files = sorted(glob.glob(os.path.join(self.cmd_dir, "hang-*.txt")))
+        if not files:
+            return ""
+        with open(files[-1], "r", encoding="utf-8", errors="replace") as f:
+            return "\n--- UI thread stack at the hang (" + files[-1] + ") ---\n" + f.read()
 
     # ------------------------------------------------------------------ reads
     def state(self):

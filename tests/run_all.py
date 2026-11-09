@@ -25,10 +25,14 @@ for s in SUITES:
     if not ok:
         print(out[-1500:])
 if "--no-ui" not in sys.argv:
-    p = subprocess.run([sys.executable, os.path.join(REPO, "tests", "ui", "studio_selftest.py")], text=True, capture_output=True)
-    last = p.stdout.strip().splitlines()[-1] if p.stdout.strip() else "no output"
-    print("%s %-45s %s" % ("PASS" if p.returncode == 0 else "FAIL", "ui/studio_selftest.py", last))
-    failed |= p.returncode != 0
-    if p.returncode != 0:
-        print(p.stdout[-2500:], p.stderr[-800:])
+    ui_dir = os.path.join(REPO, "tests", "ui")
+    for name in sorted(os.listdir(ui_dir)):
+        if not name.endswith(".py"):
+            continue
+        p = subprocess.run([sys.executable, os.path.join(ui_dir, name)], text=True, capture_output=True)
+        last = p.stdout.strip().splitlines()[-1] if p.stdout.strip() else "no output"
+        print("%s %-45s %s" % ("PASS" if p.returncode == 0 else "FAIL", "ui/" + name, last))
+        failed |= p.returncode != 0
+        if p.returncode != 0:
+            print(p.stdout[-2500:], p.stderr[-800:])
 sys.exit(1 if failed else 0)

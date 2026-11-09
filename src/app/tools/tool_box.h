@@ -56,6 +56,7 @@ extern const char* MoveSlice;
 extern const char* Blur;
 extern const char* Jumble;
 extern const char* Text;
+extern const char* Depth;
 }; // namespace WellKnownInks
 
 namespace WellKnownControllers {

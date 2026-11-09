@@ -1561,6 +1561,36 @@
             traceepolicy="last" />
     </group>
 
+    <!-- Easymetric studio only (ToolBar shows this group while the studio is
+         open). The ink is a no-op: the studio panels edit the depth sheet. -->
+    <group id="easymetric_depth_tools">
+      <tool id="depth_brush"
+            text="@.depth_brush"
+            tooltip="@.depth_brush_tooltip"
+            ink="depth"
+            controller="freehand"
+            pointshape="brush"
+            intertwine="as_lines"
+            tracepolicy="accumulate"
+            default_brush_size="5" />
+      <tool id="depth_pencil"
+            text="@.depth_pencil"
+            tooltip="@.depth_pencil_tooltip"
+            ink="depth"
+            controller="freehand"
+            pointshape="brush"
+            intertwine="as_lines"
+            tracepolicy="accumulate"
+            default_brush_size="1" />
+      <tool id="depth_fill"
+            text="@.depth_fill"
+            tooltip="@.depth_fill_tooltip"
+            ink="depth"
+            controller="one_point"
+            pointshape="floodfill"
+            tracepolicy="accumulate" />
+    </group>
+
   </tools>
 
 </gui>

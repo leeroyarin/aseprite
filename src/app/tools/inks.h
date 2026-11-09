@@ -524,4 +524,17 @@ public:
   void prepareInk(ToolLoop* loop) override { setProc(get_ink_proc<XorInkProcessing>(loop)); }
 };
 
+// Easymetric depth tools (depth brush / pencil / fill). The studio panels
+// intercept the mouse and edit the Surface_DEPTH sheet themselves, so this
+// ink must NEVER touch the image: if a stroke ever reaches the normal tool
+// loop (e.g. the tool stays selected after the studio closed), it does
+// nothing instead of painting the foreground color.
+class DepthInk : public Ink {
+public:
+  Ink* clone() override { return new DepthInk(*this); }
+
+  void prepareInk(ToolLoop* loop) override {}
+  void inkHline(int x1, int y, int x2, ToolLoop* loop) override {}
+};
+
 }} // namespace app::tools

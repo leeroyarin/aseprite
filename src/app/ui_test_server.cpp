@@ -41,13 +41,17 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <atomic>
 #include <sstream>
+#include <thread>
 #include <string>
 #include <stdexcept>
 #include <typeinfo>
@@ -61,6 +65,8 @@
     #define NOMINMAX
   #endif
   #include <windows.h>
+  #include <dbghelp.h>
+  #pragma comment(lib, "dbghelp.lib")
 #else
   #include <unistd.h>
 #endif
@@ -265,11 +271,124 @@ os::Event::MouseButton buttonFromString(const std::string& s)
   return os::Event::LeftButton;
 }
 
+// ------------------------------------------------------------------ watchdog
+//
+// If the UI thread stops ticking the test-server timer for a few seconds the
+// app is hung (that is what a test sees as "timeout waiting for ..."). A
+// background thread then suspends the UI thread, walks its stack with
+// DbgHelp (symbols from aseprite.pdb next to the exe) and writes
+// <dir>/hang-N.txt, so a hang is diagnosed from the first occurrence instead
+// of being guessed at. Windows only; elsewhere it is a no-op.
+#if defined(_WIN32)
+class HangWatchdog {
+public:
+  HangWatchdog(const std::string& dir) : m_dir(dir)
+  {
+    ::DuplicateHandle(::GetCurrentProcess(), ::GetCurrentThread(), ::GetCurrentProcess(),
+                      &m_uiThread, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    m_lastTick = base::current_tick();
+    m_thread = std::thread([this] { run(); });
+    m_thread.detach();
+  }
+  void tick() { m_lastTick = base::current_tick(); }
+
+private:
+  void run()
+  {
+    bool dumped = false;
+    int n = 0;
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      const double idle = base::current_tick() - m_lastTick.load();
+      if (idle < 6000) {
+        dumped = false;
+        continue;
+      }
+      if (dumped)
+        continue;
+      dumped = true;
+      dump(++n, idle);
+    }
+  }
+
+  void dump(int n, double idleMs)
+  {
+    std::ostringstream out;
+    out << "UI thread silent for " << idleMs << " ms\n";
+    HANDLE proc = ::GetCurrentProcess();
+    static bool symInit = false;
+    if (!symInit) {
+      ::SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+      ::SymInitialize(proc, nullptr, TRUE);
+      symInit = true;
+    }
+    if (::SuspendThread(m_uiThread) == (DWORD)-1) {
+      out << "SuspendThread failed\n";
+    }
+    else {
+      CONTEXT ctx;
+      std::memset(&ctx, 0, sizeof(ctx));
+      ctx.ContextFlags = CONTEXT_FULL;
+      if (::GetThreadContext(m_uiThread, &ctx)) {
+        STACKFRAME64 frame;
+        std::memset(&frame, 0, sizeof(frame));
+        frame.AddrPC.Offset = ctx.Rip;
+        frame.AddrPC.Mode = AddrModeFlat;
+        frame.AddrFrame.Offset = ctx.Rbp;
+        frame.AddrFrame.Mode = AddrModeFlat;
+        frame.AddrStack.Offset = ctx.Rsp;
+        frame.AddrStack.Mode = AddrModeFlat;
+        for (int i = 0; i < 64; ++i) {
+          if (!::StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, m_uiThread, &frame, &ctx, nullptr,
+                             ::SymFunctionTableAccess64, ::SymGetModuleBase64, nullptr))
+            break;
+          if (frame.AddrPC.Offset == 0)
+            break;
+          char buf[sizeof(SYMBOL_INFO) + 256];
+          auto* sym = reinterpret_cast<SYMBOL_INFO*>(buf);
+          std::memset(sym, 0, sizeof(buf));
+          sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+          sym->MaxNameLen = 255;
+          DWORD64 disp = 0;
+          out << "  #" << i << " ";
+          if (::SymFromAddr(proc, frame.AddrPC.Offset, &disp, sym)) {
+            out << sym->Name;
+            IMAGEHLP_LINE64 line;
+            line.SizeOfStruct = sizeof(line);
+            DWORD ld = 0;
+            if (::SymGetLineFromAddr64(proc, frame.AddrPC.Offset, &ld, &line))
+              out << "  (" << line.FileName << ":" << line.LineNumber << ")";
+          }
+          else {
+            out << "0x" << std::hex << frame.AddrPC.Offset << std::dec;
+          }
+          out << "\n";
+        }
+      }
+      ::ResumeThread(m_uiThread);
+    }
+    std::ofstream f(fs::path(m_dir) / ("hang-" + std::to_string(n) + ".txt"));
+    f << out.str();
+  }
+
+  std::string m_dir;
+  HANDLE m_uiThread = nullptr;
+  std::atomic<double> m_lastTick{ 0 };
+  std::thread m_thread;
+};
+#else
+class HangWatchdog {
+public:
+  explicit HangWatchdog(const std::string&) {}
+  void tick() {}
+};
+#endif
+
 // ------------------------------------------------------------------- server
 
 class UiTestServer {
 public:
-  explicit UiTestServer(const std::string& dir) : m_dir(dir), m_timer(15)
+  explicit UiTestServer(const std::string& dir) : m_dir(dir), m_timer(15), m_watchdog(dir)
   {
     fs::create_directories(m_dir);
     m_timer.Tick.connect([this] { onTick(); });
@@ -301,13 +420,32 @@ private:
       std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
       f << text;
     }
-    std::error_code ec;
-    fs::remove(dst, ec);
-    fs::rename(tmp, dst, ec);
+    // The client may have the old file open for a moment (Windows refuses to
+    // replace it then): retry a few times instead of leaving a stale result.
+    // (Windows Defender / the client can hold a file for a few ms.)
+    for (int attempt = 0; attempt < 100; ++attempt) {
+      std::error_code ec;
+      fs::remove(dst, ec);
+      fs::rename(tmp, dst, ec);
+      if (!ec)
+        return;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    // Last resort: write the destination directly (the client retries on a
+    // half-written file), so a result is never silently lost.
+    std::ofstream f(dst, std::ios::binary | std::ios::trunc);
+    f << text;
+  }
+
+  void log(const std::string& line)
+  {
+    std::ofstream f(fs::path(m_dir) / "server.log", std::ios::app);
+    f << base::current_tick() << " " << line << "\n";
   }
 
   void onTick()
   {
+    m_watchdog.tick();
     const double now = base::current_tick();
     // Run due steps of the current command.
     if (m_busy) {
@@ -333,21 +471,32 @@ private:
       return;
     std::ifstream f(cmdPath, std::ios::binary);
     std::stringstream ss;
-    ss << f.rdbuf();
+    if (f)
+      ss << f.rdbuf();
     f.close();
-    fs::remove(cmdPath, ec);
     std::string err;
-    Json cmd = Json::parse(ss.str(), err);
-    if (!err.empty() || !cmd.is_object()) {
-      writeResult(Json::object{ { "ok", false }, { "error", "bad json: " + err } });
+    Json cmd = ss.str().empty() ? Json() : Json::parse(ss.str(), err);
+    if (ss.str().empty() || !err.empty() || !cmd.is_object()) {
+      // The file can be visible before the client's write is complete or
+      // while Windows still holds it: keep it and retry on the next tick;
+      // only give up (and answer, with id -1) after ~3 s.
+      if (++m_badReads < 200)
+        return;
+      m_badReads = 0;
+      fs::remove(cmdPath, ec);
+      log("bad cmd.json: " + err);
+      writeResult(Json::object{ { "id", -1 }, { "ok", false }, { "error", "bad json: " + err } });
       return;
     }
+    m_badReads = 0;
+    fs::remove(cmdPath, ec);
     begin(cmd);
   }
 
   void begin(const Json& cmd)
   {
     m_id = cmd["id"];
+    log("begin id=" + std::to_string(cmd["id"].int_value()) + " op=" + cmd["op"].string_value());
     m_result = Json::object();
     m_error.clear();
     m_steps.clear();
@@ -379,6 +528,7 @@ private:
     if (!m_error.empty())
       o["error"] = m_error;
     m_busy = false;
+    log("finish id=" + std::to_string(m_id.int_value()) + (m_error.empty() ? " ok" : " ERR " + m_error));
     writeResult(Json(o));
   }
 
@@ -656,7 +806,9 @@ private:
 
   std::string m_dir;
   ui::Timer m_timer;
+  HangWatchdog m_watchdog;
   bool m_busy = false;
+  int m_badReads = 0;
   double m_nextAt = 0;
   std::deque<Step> m_steps;
   Json m_id;

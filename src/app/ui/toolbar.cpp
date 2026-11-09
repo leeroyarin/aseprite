@@ -84,6 +84,7 @@ static Size getToolIconSize(const Widget* widget)
 // ToolBar
 
 ToolBar* ToolBar::m_instance = NULL;
+bool ToolBar::m_studioToolsVisible = false;
 
 ToolBar::ToolBar() : Widget(kGenericWidget), m_openedRecently(false), m_tipTimer(300, this)
 {
@@ -130,7 +131,7 @@ bool ToolBar::onProcessMessage(Message* msg)
       const Point mousePos = mouseMsg->positionForDisplay(display());
       ToolBox* toolbox = App::instance()->toolBox();
       int hidden = getHiddenGroups();
-      int groups = toolbox->getGroupsCount() - hidden;
+      int groups = totalGroups() - hidden;
       Rect toolrc;
 
       ToolGroupList::iterator it = toolbox->begin_group();
@@ -188,7 +189,7 @@ bool ToolBar::onProcessMessage(Message* msg)
       const Point mousePos = mouseMsg->positionForDisplay(display());
       ToolBox* toolbox = App::instance()->toolBox();
       int hidden = getHiddenGroups();
-      int groups = toolbox->getGroupsCount() - hidden;
+      int groups = totalGroups() - hidden;
       Tool* new_hot_tool = NULL;
       int new_hot_index = NoneIndex;
       Rect toolrc;
@@ -327,13 +328,61 @@ void ToolBar::onSizeHint(SizeHintEvent& ev)
 void ToolBar::onResize(ui::ResizeEvent& ev)
 {
   Widget::onResize(ev);
+  updateMinHeight();
+}
 
-  auto* toolbox = App::instance()->toolBox();
-  auto lastToolBounds = getToolGroupBounds(toolbox->getGroupsCount());
+void ToolBar::updateMinHeight()
+{
+  auto lastToolBounds = getToolGroupBounds(totalGroups());
   m_minHeight = lastToolBounds.y2() -
                 origin().y
                 // Preview and timeline buttons
                 + 2 * (getToolIconSize(this).h - 1) + 3 * guiscale();
+}
+
+// The studio group is always the last one in gui.xml.
+bool ToolBar::isStudioTool(const tools::Tool* tool)
+{
+  return tool && tool->getGroup() && tool->getGroup()->id() == "easymetric_depth_tools";
+}
+
+std::vector<std::pair<tools::Tool*, gfx::Rect>> ToolBar::visibleToolRects()
+{
+  std::vector<std::pair<tools::Tool*, gfx::Rect>> out;
+  ToolBox* toolbox = App::instance()->toolBox();
+  const int shown = totalGroups() - getHiddenGroups();
+  ToolGroupList::iterator it = toolbox->begin_group();
+  for (int c = 0; c < shown; ++c, ++it)
+    out.emplace_back(m_selectedInGroup[*it], getToolGroupBounds(c));
+  return out;
+}
+
+int ToolBar::totalGroups() const
+{
+  auto* toolbox = App::instance()->toolBox();
+  int n = toolbox->getGroupsCount();
+  if (!m_studioToolsVisible && n > 0) {
+    ToolGroupList::iterator it = toolbox->begin_group();
+    std::advance(it, n - 1);
+    if ((*it)->id() == "easymetric_depth_tools")
+      --n;
+  }
+  return n;
+}
+
+void ToolBar::setStudioToolsVisible(bool visible)
+{
+  if (m_studioToolsVisible == visible)
+    return;
+  if (m_popupWindow) {
+    closePopupWindow();
+    closeTipWindow();
+  }
+  m_studioToolsVisible = visible;
+  updateMinHeight();
+  invalidate();
+  if (parent())
+    parent()->layout();
 }
 
 void ToolBar::onPaint(ui::PaintEvent& ev)
@@ -344,7 +393,7 @@ void ToolBar::onPaint(ui::PaintEvent& ev)
   ToolBox* toolbox = App::instance()->toolBox();
   Tool* activeTool = App::instance()->activeTool();
   ToolGroupList::iterator it = toolbox->begin_group();
-  int groups = toolbox->getGroupsCount();
+  int groups = totalGroups();
   Rect toolrc;
   SkinPartPtr nw;
   os::Surface* icon;
@@ -414,7 +463,7 @@ int ToolBar::getToolGroupIndex(ToolGroup* group)
 {
   ToolBox* toolbox = App::instance()->toolBox();
   ToolGroupList::iterator it = toolbox->begin_group();
-  int groups = toolbox->getGroupsCount();
+  int groups = totalGroups();
 
   for (int c = 0; c < groups; ++c, ++it) {
     if (group == *it)
@@ -454,8 +503,8 @@ void ToolBar::openPopupWindow(GroupType group_type, int group_index, tools::Tool
 
     case GroupType::Overflow: {
       ToolGroupList::iterator it = toolbox->begin_group();
-      for (int i = 0; i < toolbox->getGroupsCount(); ++i, ++it) {
-        if (i < toolbox->getGroupsCount() - getHiddenGroups())
+      for (int i = 0; i < totalGroups(); ++i, ++it) {
+        if (i < totalGroups() - getHiddenGroups())
           continue;
 
         ToolGroup* it_group = *it;
@@ -520,7 +569,7 @@ void ToolBar::closePopupWindow()
 Rect ToolBar::getToolGroupBounds(int group_index)
 {
   ToolBox* toolbox = App::instance()->toolBox();
-  int groups = toolbox->getGroupsCount();
+  int groups = totalGroups();
   Size iconsize = getToolIconSize(this);
   Rect rc(bounds());
   rc.shrink(border());
@@ -571,7 +620,7 @@ void ToolBar::openTipWindow(int group_index, Tool* tool)
     return;
 
   int hidden = getHiddenGroups();
-  int groups = App::instance()->toolBox()->getGroupsCount() - hidden;
+  int groups = totalGroups() - hidden;
 
   std::string tooltip;
   if (!tool && hidden > 0 && group_index >= groups) {
@@ -708,7 +757,7 @@ int ToolBar::getHiddenGroups() const
   if (height < m_minHeight) {
     int hidden = (m_minHeight - height) / (getToolIconSize(this).h - 1 * guiscale());
     if (hidden >= 1)
-      return std::clamp(hidden + 1, 2, toolbox->getGroupsCount());
+      return std::clamp(hidden + 1, 2, totalGroups());
   }
   return 0;
 }
@@ -762,7 +811,7 @@ bool ToolBar::ToolStrip::onProcessMessage(Message* msg)
           if (m_group)
             m_toolbar->openTipWindow(m_group, m_hotTool);
           else {
-            int groups = App::instance()->toolBox()->getGroupsCount() -
+            int groups = m_toolbar->totalGroups() -
                          m_toolbar->getHiddenGroups();
             m_toolbar->openTipWindow(groups, m_hotTool);
           }

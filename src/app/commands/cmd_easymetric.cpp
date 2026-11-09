@@ -22,9 +22,12 @@
 #include "app/extra_cel.h"
 #include "app/file/file.h"
 #include "app/file_selector.h"
+#include "app/color_utils.h"
 #include "app/pref/preferences.h"
 #include "app/site.h"
+#include "app/tools/active_tool.h"
 #include "app/tools/tool.h"
+#include "app/tools/tool_box.h"
 #include "app/tx.h"
 #include "app/ui/color_button.h"
 #include "app/ui/doc_view.h"
@@ -32,6 +35,7 @@
 #include "app/ui/editor/editor.h"
 #include "app/ui/editor/editor_observer.h"
 #include "app/ui/editor/standby_state.h"
+#include "app/ui/toolbar.h"
 #include "doc/mask.h"
 #include "app/ui/editor/editor_view.h"
 #include "app/ui/skin/skin_theme.h"
@@ -40,6 +44,7 @@
 #include "app/util/conversion_to_surface.h"
 #include "base/fs.h"
 #include "doc/algorithm/flip_type.h"
+#include "doc/brush_type.h"
 #include "doc/cel.h"
 #include "doc/cels_range.h"
 #include "doc/color.h"
@@ -1300,6 +1305,67 @@ static json11::Json::object docStateObject(Doc* doc, doc::Layer* activeLayer, do
   return o;
 }
 
+// Mirror one face's pixels within its UV rect on frame `fr`, on every shared
+// sheet layer that has a cel on that frame (Base, Texture, Depth), in ONE
+// transaction (= one undo step). Used by the panel FH/FV buttons and by the
+// headless action flipFace (so it is testable without the UI).
+//
+// Coordinates: the face rect is in SPRITE coordinates; FlipImage works in
+// IMAGE coordinates, so it is converted with the cel position and clipped to
+// the cel image. A cel that does not fully contain the face is grown to the
+// whole sprite first (transparent padding), otherwise the mirrored pixels
+// could land outside the cel and be lost.
+// Returns false (and changes nothing) if there is nothing to flip.
+static bool flipFaceOnDoc(Doc* doc, int face, bool horizontal, doc::frame_t fr)
+{
+  if (!doc || !doc->sprite() || face < 0 || face >= kFaceCount)
+    return false;
+  doc::Sprite* spr = doc->sprite();
+  const gfx::Rect faceRect = sharedFaceRect(spr, face);
+  if (faceRect.isEmpty())
+    return false;
+  SharedSurfaceLayers shared = findSharedLayers(spr);
+  doc::LayerImage* layers[3] = { shared.baseLayer, shared.textureLayer, shared.depthLayer };
+  bool any = false;
+  for (doc::LayerImage* lyr : layers) {
+    if (lyr && lyr->cel(fr) && lyr->cel(fr)->image()) {
+      any = true;
+      break;
+    }
+  }
+  if (!any)
+    return false;
+  Tx tx(doc,
+        horizontal ? "Flip Easymetric Face Horizontally" : "Flip Easymetric Face Vertically",
+        ModifyDocument);
+  const doc::algorithm::FlipType type =
+    horizontal ? doc::algorithm::FlipHorizontal : doc::algorithm::FlipVertical;
+  for (doc::LayerImage* lyr : layers) {
+    if (!lyr)
+      continue;
+    doc::Cel* cel = lyr->cel(fr);
+    if (!cel || !cel->image())
+      continue;
+    gfx::Rect celRc(cel->x(), cel->y(), cel->image()->width(), cel->image()->height());
+    if (!celRc.contains(faceRect)) {
+      // Grow the cel to cover the whole sprite, keeping its pixels in place.
+      doc::ImageRef grown(doc::Image::create(cel->image()->pixelFormat(), spr->width(),
+                                             spr->height()));
+      grown->setMaskColor(cel->image()->maskColor());
+      doc::clear_image(grown.get(), cel->image()->maskColor());
+      doc::copy_image(grown.get(), cel->image(), cel->x(), cel->y());
+      DocApi api = doc->getApi(tx);
+      api.replaceImage(spr, cel->imageRef(), grown);
+      api.setCelPosition(spr, cel, 0, 0);
+      celRc = gfx::Rect(0, 0, spr->width(), spr->height());
+    }
+    const gfx::Rect inImage(faceRect.x - cel->x(), faceRect.y - cel->y(), faceRect.w, faceRect.h);
+    tx(new cmd::FlipImage(cel->image(), inImage, type));
+  }
+  tx.commit();
+  return true;
+}
+
 // Rebuild the three shared sheets from their old UV rects
 // (taken from the current slice bounds, which are the rects the
 // pixels actually sit in today) into new UV rects of the given
@@ -2004,6 +2070,24 @@ public:
     }
   }
 
+  // Icon buttons (2026-11-09, William: "icons instead of just the text").
+  // The icon is the theme part `partId` (drawn from the theme sheet, so the
+  // artist's pixel art lands without a rebuild) when the theme has it, else
+  // a built-in pixel placeholder of the same meaning (see drawFallbackIcon).
+  // The label text is kept for the accessible name / UI tests, and the
+  // tooltip is shown in the status bar on hover.
+  enum class Icon { None, FlipH, FlipV };
+
+  void setIcon(Icon icon, const std::string& partId)
+  {
+    m_icon = icon;
+    m_iconPart = partId;
+    invalidate();
+  }
+
+  void setTooltipText(const std::string& tip) { m_tip = tip; }
+  const std::string& tooltipText() const { return m_tip; }
+
 protected:
   void onSizeHint(ui::SizeHintEvent& ev) override
   {
@@ -2013,7 +2097,51 @@ protected:
     gfx::Size sz = ev.sizeHint();
     const int s = ui::guiscale();
     sz.h = 14 * s;
+    if (m_icon != Icon::None)
+      sz.w = 16 * s;
     ev.setSizeHint(sz);
+  }
+
+  bool onProcessMessage(ui::Message* msg) override
+  {
+    if (msg->type() == ui::kMouseEnterMessage && !m_tip.empty()) {
+      if (auto* sb = StatusBar::instance())
+        sb->showTip(2000, m_tip);
+    }
+    return ui::Button::onProcessMessage(msg);
+  }
+
+  // Pixel-art placeholder drawn in code: 11x9 (FlipH) / 9x11 (FlipV) grid,
+  // scaled by guiscale. Two triangles pointing at a dashed mirror line.
+  void drawFallbackIcon(ui::Graphics* g, const gfx::Rect& rc, gfx::Color col)
+  {
+    const int s = ui::guiscale();
+    const bool h = (m_icon == Icon::FlipH);
+    const int W = h ? 11 : 9;
+    const int H = h ? 9 : 11;
+    const int ox = rc.x + (rc.w - W * s) / 2;
+    const int oy = rc.y + (rc.h - H * s) / 2;
+    auto dot = [&](int x, int y) {
+      g->fillRect(col, gfx::Rect(ox + x * s, oy + y * s, s, s));
+    };
+    if (h) {
+      for (int c = 0; c < 5; ++c)
+        for (int r = 4 - c; r <= 4 + c; ++r) {
+          dot(c, r);
+          dot(10 - c, r);
+        }
+      for (int r = 0; r < 9; r += 2)
+        dot(5, r);
+    }
+    else {
+      for (int c = 0; c < 5; ++c)
+        for (int r = 4 - c; r <= 4 + c; ++r) {
+          dot(r, c);
+          dot(r, 10 - c);
+        }
+      for (int x = 0; x < 9; x += 2)
+        dot(x, 5);
+    }
   }
 
   void onPaint(ui::PaintEvent& ev) override
@@ -2035,6 +2163,22 @@ protected:
 
     g->fillRect(bg, rc);
     g->drawRect(borderCol, rc);
+    if (m_icon != Icon::None) {
+      os::Surface* surf = nullptr;
+      if (auto* theme = skin::SkinTheme::get(this)) {
+        if (auto part = theme->getPartById(m_iconPart))
+          surf = part->bitmap(0);
+      }
+      if (surf) {
+        g->drawRgbaSurface(surf,
+                           rc.x + (rc.w - surf->width()) / 2,
+                           rc.y + (rc.h - surf->height()) / 2);
+      }
+      else {
+        drawFallbackIcon(g, rc, textCol);
+      }
+      return;
+    }
     const gfx::Size textSz = g->measureText(text());
     g->drawText(text(),
                 textCol,
@@ -2046,6 +2190,9 @@ protected:
 private:
   bool m_isToggle;
   bool m_on;
+  Icon m_icon = Icon::None;
+  std::string m_iconPart;
+  std::string m_tip;
 };
 
 // Folder-tab ear header bar matching reference UI
@@ -3462,16 +3609,27 @@ private:
   double m_wheelAccum = 0.0;
 };
 
-// Depth-sculpt state for surface panels. Inherits the wheel-zoom
-// behaviour, and intercepts left-button strokes so they sculpt
-// the Surface_DEPTH layer instead of painting with the active
-// tool. The actual sculpting lives in EasymetricMultiPaneView
-// (paintDepthDab / endDepthStroke, via the callbacks below),
-// because only the view knows which panel editor is which face
-// and holds the tool-strip Depth Sculpt settings.
+// The three studio depth tools (toolbar group "easymetric_depth_tools").
+enum class DepthTool { None, Brush, Pencil, Fill };
+
+static DepthTool depthToolFromId(const std::string& id)
+{
+  if (id == "depth_brush") return DepthTool::Brush;
+  if (id == "depth_pencil") return DepthTool::Pencil;
+  if (id == "depth_fill") return DepthTool::Fill;
+  return DepthTool::None;
+}
+
+// Depth-tool state for surface panels. Inherits the wheel-zoom
+// behaviour, and intercepts mouse strokes so they edit the
+// Surface_DEPTH layer instead of painting with the active tool.
+// Left button = FG / raise, right button = BG / lower, exactly like
+// the normal tools. The actual editing lives in EasymetricMultiPaneView
+// (paintDepthDab / endDepthStroke, via the callbacks below), because
+// only the view knows which panel editor is which face.
 class EasymetricDepthState : public EasymetricWheelZoomState {
 public:
-  using PaintFn = std::function<void(Editor*, const gfx::Point&, bool)>;
+  using PaintFn = std::function<void(Editor*, const gfx::Point&, bool down, bool right)>;
   using EndFn = std::function<void()>;
   EasymetricDepthState(PaintFn paint, EndFn end)
     : m_paint(std::move(paint))
@@ -3480,24 +3638,30 @@ public:
   }
   bool onMouseDown(Editor* editor, ui::MouseMessage* msg) override
   {
-    if (msg->left()) {
-      m_paint(editor, msg->position(), true);
-      return true;
-    }
-    return false;
+    // Alt = eyedropper / customisation, Space = scroll, middle = scroll:
+    // leave all of those to the normal editor behaviour.
+    if (msg->altPressed() || (!msg->left() && !msg->right()))
+      return false;
+    m_paint(editor, msg->position(), true, msg->right());
+    // A stroke owns the mouse until the button is released (the normal
+    // DrawingState does the same), so the drag keeps arriving even when it
+    // leaves the panel.
+    editor->captureMouse();
+    return true;
   }
   bool onMouseMove(Editor* editor, ui::MouseMessage* msg) override
   {
     if (editor->hasCapture()) {
-      m_paint(editor, msg->position(), false);
+      m_paint(editor, msg->position(), false, msg->right() || msg->button() == ui::kButtonRight);
       return true;
     }
     return false;
   }
   bool onMouseUp(Editor* editor, ui::MouseMessage* msg) override
   {
-    (void)editor;
     (void)msg;
+    if (editor->hasCapture())
+      editor->releaseMouse();
     m_end();
     return true;
   }
@@ -3655,18 +3819,29 @@ static bool generateDepthFromBaseOnDoc(app::Doc* doc, doc::frame_t fr)
 // so both paths apply exactly the same step math.
 // Returns {depthChanged, baseChanged}. See paintDepthDab for
 // the spec (128 surface, step 128/D, black then through-hole).
+// `touched` (optional, face-sized): when given, a pixel is changed at most
+// once per stroke, so one stroke = one clean step (like painting with an
+// Aseprite brush); the GUI stroke engine passes it, the headless depthDab
+// action does not. `square` makes the dab a square instead of a disc.
 static std::pair<bool, bool> applyDepthDabToImages(doc::Image* depthWork,
                                                    doc::Image* baseWork,
                                                    const gfx::Rect& faceRect,
                                                    int u0, int v0,
-                                                   bool minus, float step, int radius)
+                                                   bool minus, float step, int radius,
+                                                   std::vector<uint8_t>* touched = nullptr,
+                                                   bool square = false)
 {
   bool depthChanged = false, baseChanged = false;
   for (int dy = -radius; dy <= radius; ++dy) {
     for (int dx = -radius; dx <= radius; ++dx) {
-      if (dx * dx + dy * dy > radius * radius) continue;
+      if (!square && dx * dx + dy * dy > radius * radius) continue;
       const int u = u0 + dx, v = v0 + dy;
       if (u < 0 || v < 0 || u >= faceRect.w || v >= faceRect.h) continue;
+      if (touched) {
+        uint8_t& tc = (*touched)[size_t(v) * size_t(faceRect.w) + size_t(u)];
+        if (tc) continue;
+        tc = 1;
+      }
       const int cx = faceRect.x + u, cy = faceRect.y + v;
       if (doc::rgba_geta(doc::get_pixel(baseWork, cx, cy)) <= 16) continue;
       const uint32_t dCol = doc::get_pixel(depthWork, cx, cy);
@@ -3690,6 +3865,130 @@ static std::pair<bool, bool> applyDepthDabToImages(doc::Image* depthWork,
           depthChanged = true;
         }
       }
+    }
+  }
+  return {depthChanged, baseChanged};
+}
+
+// Depth Pencil / Depth Fill target: an absolute depth value. `hole` = a
+// through-hole (depth transparent AND the Base pixel cleared, the same
+// semantics as Minus past black).
+struct DepthValue {
+  int gray = 128;
+  bool hole = false;
+};
+
+// Foreground/background color -> depth value: brightness is the depth
+// (white = out, 128 = flat, black = in); a (nearly) transparent color cuts
+// a hole.
+static DepthValue depthValueFromColor(const app::Color& c)
+{
+  DepthValue v;
+  const doc::color_t px = color_utils::color_for_image(c, doc::IMAGE_RGB);
+  v.hole = (doc::rgba_geta(px) <= 16);
+  v.gray = std::clamp(int(std::lround(0.299 * doc::rgba_getr(px) + 0.587 * doc::rgba_getg(px) +
+                                      0.114 * doc::rgba_getb(px))),
+                      0, 255);
+  return v;
+}
+
+// One pencil dab: sets every pixel of the brush (inside the face and inside
+// the Base silhouette, like every depth edit) to `val`. Returns
+// {depthChanged, baseChanged}.
+static std::pair<bool, bool> applyDepthPaintToImages(doc::Image* depthWork,
+                                                     doc::Image* baseWork,
+                                                     const gfx::Rect& faceRect,
+                                                     int u0, int v0,
+                                                     const DepthValue& val, int radius,
+                                                     bool square)
+{
+  bool depthChanged = false, baseChanged = false;
+  for (int dy = -radius; dy <= radius; ++dy) {
+    for (int dx = -radius; dx <= radius; ++dx) {
+      if (!square && dx * dx + dy * dy > radius * radius) continue;
+      const int u = u0 + dx, v = v0 + dy;
+      if (u < 0 || v < 0 || u >= faceRect.w || v >= faceRect.h) continue;
+      const int cx = faceRect.x + u, cy = faceRect.y + v;
+      if (doc::rgba_geta(doc::get_pixel(baseWork, cx, cy)) <= 16) continue;
+      const uint32_t old = doc::get_pixel(depthWork, cx, cy);
+      if (val.hole) {
+        if (old != 0) {
+          doc::put_pixel(depthWork, cx, cy, 0);
+          depthChanged = true;
+        }
+        doc::put_pixel(baseWork, cx, cy, 0);
+        baseChanged = true;
+      }
+      else {
+        const uint32_t nv = doc::rgba(val.gray, val.gray, val.gray, 255);
+        if (old != nv) {
+          doc::put_pixel(depthWork, cx, cy, nv);
+          depthChanged = true;
+        }
+      }
+    }
+  }
+  return {depthChanged, baseChanged};
+}
+
+// Depth Fill: 4-connected flood fill, inside the face and the Base
+// silhouette, of the pixels whose depth equals the clicked pixel's depth
+// (a transparent depth pixel counts as 128, like the sculpt). Returns
+// {depthChanged, baseChanged}.
+static std::pair<bool, bool> floodFillDepth(doc::Image* depthWork,
+                                            doc::Image* baseWork,
+                                            const gfx::Rect& faceRect,
+                                            int u0, int v0,
+                                            const DepthValue& val)
+{
+  bool depthChanged = false, baseChanged = false;
+  if (u0 < 0 || v0 < 0 || u0 >= faceRect.w || v0 >= faceRect.h)
+    return {false, false};
+  auto inside = [&](int u, int v) {
+    return u >= 0 && v >= 0 && u < faceRect.w && v < faceRect.h &&
+           doc::rgba_geta(doc::get_pixel(baseWork, faceRect.x + u, faceRect.y + v)) > 16;
+  };
+  auto depthKey = [&](int u, int v) {
+    const uint32_t d = doc::get_pixel(depthWork, faceRect.x + u, faceRect.y + v);
+    return (doc::rgba_geta(d) <= 16) ? 128 : int(doc::rgba_getr(d));
+  };
+  if (!inside(u0, v0))
+    return {false, false};
+  const int target = depthKey(u0, v0);
+  std::vector<uint8_t> seen(size_t(faceRect.w) * size_t(faceRect.h), 0);
+  std::vector<gfx::Point> stack;
+  stack.push_back(gfx::Point(u0, v0));
+  seen[size_t(v0) * size_t(faceRect.w) + size_t(u0)] = 1;
+  while (!stack.empty()) {
+    const gfx::Point p = stack.back();
+    stack.pop_back();
+    const int cx = faceRect.x + p.x, cy = faceRect.y + p.y;
+    if (val.hole) {
+      doc::put_pixel(depthWork, cx, cy, 0);
+      doc::put_pixel(baseWork, cx, cy, 0);
+      depthChanged = baseChanged = true;
+    }
+    else {
+      const uint32_t nv = doc::rgba(val.gray, val.gray, val.gray, 255);
+      if (doc::get_pixel(depthWork, cx, cy) != nv) {
+        doc::put_pixel(depthWork, cx, cy, nv);
+        depthChanged = true;
+      }
+    }
+    static const int dxs[4] = { 1, -1, 0, 0 };
+    static const int dys[4] = { 0, 0, 1, -1 };
+    for (int k = 0; k < 4; ++k) {
+      const int nu = p.x + dxs[k], nv2 = p.y + dys[k];
+      if (nu < 0 || nv2 < 0 || nu >= faceRect.w || nv2 >= faceRect.h)
+        continue;
+      uint8_t& s = seen[size_t(nv2) * size_t(faceRect.w) + size_t(nu)];
+      if (s)
+        continue;
+      s = 1;
+      // Each pixel is looked at once, before it is painted, so depthKey
+      // always reads the ORIGINAL value.
+      if (inside(nu, nv2) && depthKey(nu, nv2) == target)
+        stack.push_back(gfx::Point(nu, nv2));
     }
   }
   return {depthChanged, baseChanged};
@@ -3820,10 +4119,14 @@ public:
       m_headers[f]->addActionButton(m_symYButtons[f]);
 
       m_flipHButtons[f] = new PaneActionButton("FH", false);
+      m_flipHButtons[f]->setIcon(PaneActionButton::Icon::FlipH, "easymetric_flip_h");
+      m_flipHButtons[f]->setTooltipText("Flip this face horizontally (mirror left/right)");
       m_flipHButtons[f]->Click.connect([this, f] { flipFace(f, true); });
       m_headers[f]->addActionButton(m_flipHButtons[f]);
 
       m_flipVButtons[f] = new PaneActionButton("FV", false);
+      m_flipVButtons[f]->setIcon(PaneActionButton::Icon::FlipV, "easymetric_flip_v");
+      m_flipVButtons[f]->setTooltipText("Flip this face vertically (mirror top/bottom)");
       m_flipVButtons[f]->Click.connect([this, f] { flipFace(f, false); });
       m_headers[f]->addActionButton(m_flipVButtons[f]);
 
@@ -3981,7 +4284,9 @@ public:
     // Studio tool strip across the top (Draw / Depth Sculpt).
     // Built after the panes so it can be laid out above them
     // in onResize; the pane layout lives below it.
-    buildToolStrip();
+    // The depth tools are in the left toolbar now: show their group.
+    if (auto* tb = ToolBar::instance())
+      tb->setStudioToolsVisible(true);
 
     // Timer for real-time 3D model update
     m_timer.Tick.connect([this] { pollAndRender(false); });
@@ -4084,6 +4389,7 @@ public:
     if (m_exited)
       return;
     m_exited = true;
+    leaveDepthTools();
     std::remove(easymetricHubMarkerPath().c_str());
     restoreWheelZoomPref();
     if (Doc* doc = m_docView->document()) {
@@ -4120,7 +4426,11 @@ public:
   {
     json11::Json::object s;
     s["open"] = true;
-    s["toolMode"] = m_depthToolOn ? "depth" : "draw";
+    s["toolMode"] = m_depthTool == DepthTool::None ? "draw" : "depth";
+    s["depthTool"] = m_depthTool == DepthTool::Brush ? "brush"
+                     : m_depthTool == DepthTool::Pencil ? "pencil"
+                     : m_depthTool == DepthTool::Fill ? "fill" : "none";
+    s["depthStrokeActive"] = m_depthStrokeActive;
     s["previewFloating"] = m_previewFloating;
     s["activeFace"] = m_lastActiveFace;
     s["columnsPx"] = json11::Json::array{ m_colWpx[0], m_colWpx[1], m_colWpx[2] };
@@ -4579,43 +4889,22 @@ public:
     Doc* doc = m_docView ? m_docView->document() : nullptr;
     if (!doc || !doc->sprite())
       return;
-    doc::Sprite* spr = doc->sprite();
-    const gfx::Rect faceRect = sharedFaceRect(spr, face);
-    if (faceRect.isEmpty())
+    // The frame the PANEL shows (an unlinked panel can be pinned to a
+    // different frame than the main editor), not the main editor's.
+    const doc::frame_t fr = m_editors[face] ? m_editors[face]->frame()
+                                            : (m_docView->editor() ? m_docView->editor()->frame()
+                                                                   : doc::frame_t(0));
+    // A stroke or Move in progress owns the document; never flip under it.
+    if (anyPanelEditorBusy())
       return;
-    const doc::frame_t fr =
-      (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
-    SharedSurfaceLayers shared = findSharedLayers(spr);
-    doc::LayerImage* layers[3] = {
-      shared.baseLayer, shared.textureLayer, shared.depthLayer
-    };
-    bool any = false;
-    for (doc::LayerImage* lyr : layers) {
-      if (lyr && lyr->cel(fr) && lyr->cel(fr)->image()) {
-        any = true;
-        break;
-      }
-    }
-    if (!any)
+    if (!flipFaceOnDoc(doc, face, horizontal, fr))
       return;
-    Tx tx(doc,
-          horizontal ? "Flip Easymetric Face Horizontally"
-                     : "Flip Easymetric Face Vertically",
-          ModifyDocument);
-    const doc::algorithm::FlipType type = horizontal
-      ? doc::algorithm::FlipHorizontal
-      : doc::algorithm::FlipVertical;
-    for (doc::LayerImage* lyr : layers) {
-      if (!lyr)
-        continue;
-      doc::Cel* cel = lyr->cel(fr);
-      if (!cel || !cel->image())
-        continue;
-      tx(new cmd::FlipImage(cel->image(), faceRect, type));
-    }
-    tx.commit();
     m_lastHash = 0;
     pollAndRender(true);
+    if (auto* sb = StatusBar::instance())
+      sb->showTip(1500,
+                  fmt::format("Flipped {} {}", kFaceSpecs[face].displayName,
+                              horizontal ? "horizontally" : "vertically"));
   }
 
   // Bug 1/2 helper: an editor is idle only when it is in its
@@ -4663,85 +4952,114 @@ public:
   {
     if (depthBrushOn()) {
       return EditorStatePtr(new EasymetricDepthState(
-        [this](Editor* ed, const gfx::Point& pt, bool down) { paintDepthDab(ed, pt, down); },
+        [this](Editor* ed, const gfx::Point& pt, bool down, bool right) {
+          paintDepthDab(ed, pt, down, right);
+        },
         [this] { endDepthStroke(); }));
     }
     return EditorStatePtr(new EasymetricWheelZoomState);
   }
 
-  bool depthBrushOn() const
+  bool depthBrushOn() const { return m_depthTool != DepthTool::None; }
+
+  // The studio depth tools are real tools in the left toolbar (group
+  // "easymetric_depth_tools", visible only while the studio is open).
+  // The panels follow the ACTIVE TOOL: when it is one of the depth tools the
+  // panel editors get the depth state, otherwise the normal draw state. Called
+  // from every poll, so picking a tool in the toolbar, by shortcut, or from a
+  // script all work the same way.
+  void syncDepthToolFromApp()
   {
-    return m_depthToolOn;
+    tools::Tool* tool = App::instance() ? App::instance()->activeTool() : nullptr;
+    setDepthTool(tool ? depthToolFromId(tool->getId()) : DepthTool::None);
   }
 
-  // Switch the studio tool between Draw and Depth Sculpt, from the
-  // tool strip. Ends any depth stroke in progress and re-states
-  // every surface panel editor, exactly as the old Fields Depth
-  // Brush checkbox handler did.
-  void setToolMode(bool depth)
+  void setDepthTool(DepthTool tool)
   {
-    if (m_depthToolOn == depth) {
-      if (m_drawToolBtn) m_drawToolBtn->setOn(!depth);
-      if (m_depthToolBtn) m_depthToolBtn->setOn(depth);
+    if (m_depthTool == tool)
       return;
-    }
+    // Never switch under a stroke; the next poll retries.
+    for (int f = 0; f < kFaceCount; ++f)
+      if (m_editors[f] && m_editors[f]->hasCapture())
+        return;
     endDepthStroke();
-    m_depthToolOn = depth;
-    if (m_drawToolBtn) m_drawToolBtn->setOn(!depth);
-    if (m_depthToolBtn) m_depthToolBtn->setOn(depth);
-    if (m_depthModeCombo) m_depthModeCombo->setEnabled(depth);
-    if (m_depthBrushSlider) m_depthBrushSlider->setEnabled(depth);
+    m_depthTool = tool;
     for (int f = 0; f < kFaceCount; ++f) {
       Editor* ed = m_editors[f];
       if (ed && !ed->hasCapture())
         ed->setState(newPanelState());
     }
+    if (auto* sb = StatusBar::instance()) {
+      switch (tool) {
+        case DepthTool::Brush:
+          sb->showTip(3000, "Depth Brush: left click raises, right click lowers the surface. "
+                            "Brush size = the normal brush size.");
+          break;
+        case DepthTool::Pencil:
+          sb->showTip(3000, "Depth Pencil: paints the foreground (left) / background (right) "
+                            "color's brightness as depth. Transparent = hole.");
+          break;
+        case DepthTool::Fill:
+          sb->showTip(3000, "Depth Fill: fills the connected area of equal depth with the "
+                            "foreground (left) / background (right) color's brightness.");
+          break;
+        case DepthTool::None: break;
+      }
+    }
   }
 
-  // Build the studio tool strip: Draw / Depth Sculpt tools plus the
-  // depth Plus/Minus mode and brush size. The strip sits across the
-  // top of the studio (see onResize); nothing depth-tool related
-  // remains in Fields.
-  void buildToolStrip()
+  // Normal tool restored (and the toolbar group hidden) when the studio closes.
+  void leaveDepthTools()
   {
-    const int s = ui::guiscale();
-    m_toolStrip = new ui::HBox;
-    m_toolStrip->setChildSpacing(4 * s);
-    m_drawToolBtn = new PaneActionButton("Draw", true);
-    m_drawToolBtn->setOn(true);
-    m_drawToolBtn->Click.connect([this] { setToolMode(false); });
-    m_depthToolBtn = new PaneActionButton("Depth Sculpt", true);
-    m_depthToolBtn->setOn(false);
-    m_depthToolBtn->Click.connect([this] { setToolMode(true); });
-    m_depthModeCombo = new ui::ComboBox();
-    m_depthModeCombo->addItem("Plus (bump)");
-    m_depthModeCombo->addItem("Minus (carve)");
-    m_depthModeCombo->setEnabled(false);
-    m_depthBrushSlider = new ui::Slider(1, 16, 3);
-    m_depthBrushSlider->setExpansive(true);
-    m_depthBrushSlider->setEnabled(false);
-    m_toolStrip->addChild(new ui::Label("Tool:"));
-    m_toolStrip->addChild(m_drawToolBtn);
-    m_toolStrip->addChild(m_depthToolBtn);
-    m_toolStrip->addChild(m_depthModeCombo);
-    m_toolStrip->addChild(new ui::Label("Brush:"));
-    m_toolStrip->addChild(m_depthBrushSlider);
-    addChild(m_toolStrip);
+    endDepthStroke();
+    m_depthTool = DepthTool::None;
+    if (auto* tb = ToolBar::instance()) {
+      tools::Tool* active = App::instance() ? App::instance()->activeTool() : nullptr;
+      if (active && ToolBar::isStudioTool(active)) {
+        if (tools::Tool* pencil = App::instance()->toolBox()->getToolById("pencil"))
+          tb->selectTool(pencil);
+      }
+      tb->setStudioToolsVisible(false);
+    }
   }
 
-  // Depth-sculpt tool (William's spec, 2026-11-04; tool-strip
-  // placement 2026-11-07: the tool lives in the studio toolbar,
-  // not in Fields).
-  // PLUS = bump, whiter towards the user; MINUS = carve, darker
-  // into the plane. 128 = the main surface. 1 step = 1 pixel of
-  // depth, so the gray step is 128 / D, D = pixels from surface
-  // to box centre along the face normal (per-axis: Front/Back
-  // use depth/2, Top/Bottom use height/2, Right/Left use
-  // width/2). Black 0 = deepest, single-pixel thinness at the
-  // centre; one more MINUS step past black = through-hole:
-  // depth becomes transparent AND the Base pixel is cleared,
-  // so the hole is real, not just shading.
-  void paintDepthDab(Editor* ed, const gfx::Point& screenPt, bool isDown)
+  // Current brush of the active depth tool: the NORMAL Aseprite brush size
+  // and shape (context bar), so the depth brush feels like any brush.
+  struct DepthBrushSpec {
+    int radius = 1;
+    bool square = false;
+  };
+
+  DepthBrushSpec currentDepthBrush() const
+  {
+    DepthBrushSpec s;
+    if (tools::Tool* tool = App::instance() ? App::instance()->activeTool() : nullptr) {
+      auto& tp = Preferences::instance().tool(tool);
+      const int size = std::clamp(int(tp.brush.size()), 1, 64);
+      s.radius = std::max(0, (size - 1) / 2);
+      s.square = (tp.brush.type() == app::gen::BrushType::SQUARE);
+    }
+    return s;
+  }
+
+  // Depth tools (William's spec, 2026-11-04; toolbar tools 2026-11-09).
+  //  * Depth Brush: left = PLUS (bump, whiter towards the user), right = MINUS
+  //    (carve, darker into the plane). 128 = the main surface. 1 step = 1
+  //    voxel of depth, i.e. gray step 128 / D, D = pixels from surface to box
+  //    centre along the face normal (Front/Back use depth/2, Top/Bottom
+  //    height/2, Right/Left width/2). One stroke changes each pixel by at
+  //    most one step. Black 0 = deepest; one more MINUS step = through-hole
+  //    (depth transparent AND the Base pixel cleared, so the hole is real).
+  //  * Depth Pencil: sets the depth to the FG (left) / BG (right) color's
+  //    brightness. Depth Fill: flood fills equal-depth areas the same way.
+  // All edits stay inside the face and inside the Base silhouette.
+  //
+  // Performance: ONE transaction per stroke; the sheet images are copied
+  // once when the first pixel changes and then edited IN PLACE (undo restores
+  // the originals), and only the touched rectangle is invalidated. The old
+  // code copied the whole sheet and pushed an undo command for every mouse
+  // event, and repainted everything.
+  void paintDepthDab(Editor* ed, const gfx::Point& screenPt, bool isDown, bool right)
   {
     if (!depthBrushOn() || !ed) return;
     int face = -1;
@@ -4754,55 +5072,40 @@ public:
     SharedSurfaceLayers shared = findSharedLayers(spr);
     if (!shared.baseLayer) return;
 
-    const doc::frame_t fr = (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
+    // The frame THIS panel shows (an unlinked panel may be pinned to another
+    // frame than the main editor).
+    const doc::frame_t fr = ed->frame();
     const gfx::Point sp = ed->screenToEditor(screenPt);
     const gfx::Rect faceRect = sharedFaceRect(spr, face);
     const int u0 = sp.x - faceRect.x;
     const int v0 = sp.y - faceRect.y;
-    if (u0 < 0 || v0 < 0 || u0 >= faceRect.w || v0 >= faceRect.h) return;
-
-    int fw[kFaceCount], fh[kFaceCount];
-    sharedFaceSizes(spr, fw, fh);
-    int normalSize = 0;
-    if (face == kFaceTop || face == kFaceDown)
-      normalSize = fh[kFaceFront];
-    else if (face == kFaceFront || face == kFaceBack)
-      normalSize = fw[kFaceRight];
-    else
-      normalSize = fw[kFaceFront];
-    const int D = std::max(1, normalSize / 2);
-    const float step = 128.0f / float(D);
-    const bool minus = (m_depthModeCombo && m_depthModeCombo->getSelectedItemIndex() == 1);
-    const int brush = m_depthBrushSlider ? m_depthBrushSlider->getValue() : 3;
-    const int radius = std::max(0, (brush - 1) / 2);
+    const bool inFace = (u0 >= 0 && v0 >= 0 && u0 < faceRect.w && v0 < faceRect.h);
 
     try {
       if (isDown || !m_depthStrokeActive) {
         endDepthStroke();
+        if (!inFace) return;            // a stroke starts inside the face
         // The depth map must exist BEFORE the stroke Tx opens:
-        // generateDepthFromBaseOnDoc runs its own Tx, so it cannot
-        // be called once the stroke Tx is open. A blank transparent
-        // depth image is NOT a substitute — transparent depth reads
-        // as a through-hole everywhere, which empties the preview
-        // volume the moment the first dab lands (the cube vanished
-        // after the first GUI depth drag; the headless depthDab
-        // never had this bug because it generates first).
+        // generateDepthFromBaseOnDoc runs its own Tx, so it cannot be called
+        // once the stroke Tx is open. (A blank transparent depth image is
+        // NOT a substitute: transparent depth reads as a through-hole.)
         if (!shared.depthLayer || !shared.depthLayer->cel(fr)) {
           if (!generateDepthFromBaseOnDoc(doc, fr)) return;
           shared = findSharedLayers(spr);
           if (!shared.depthLayer || !shared.depthLayer->cel(fr)) return;
         }
-        // A depth layer created by an older build sits ON TOP of
-        // Base and paints its flat grey over the panels (see
-        // generateDepthFromBaseOnDoc). Restack it below Base now,
-        // inside the stroke Tx. Do NOT hide it instead: a hidden
-        // layer's pixels cannot be edited (probe 9, build5).
-        m_depthTx.reset(new Tx(doc, "Depth Sculpt", ModifyDocument));
-        DocApi api = doc->getApi(*m_depthTx);
-        if (shared.depthLayer && shared.baseLayer)
+        m_depthTx.reset(new Tx(doc, m_depthTool == DepthTool::Fill ? "Depth Fill"
+                                   : m_depthTool == DepthTool::Pencil ? "Depth Pencil"
+                                                                      : "Depth Brush",
+                               ModifyDocument));
+        // A depth layer created by an older build sits ON TOP of Base and
+        // paints its flat grey over the panels: restack it below Base. Do NOT
+        // hide it instead (a hidden layer's pixels cannot be edited).
+        if (shared.depthLayer && shared.baseLayer) {
+          DocApi api = doc->getApi(*m_depthTx);
           api.restackLayerBefore(shared.depthLayer, spr->root(), shared.baseLayer);
-        doc::LayerImage* depthLayer = shared.depthLayer;
-        doc::Cel* depthCel = depthLayer ? depthLayer->cel(fr) : nullptr;
+        }
+        doc::Cel* depthCel = shared.depthLayer->cel(fr);
         doc::Cel* baseCel = shared.baseLayer->cel(fr);
         if (!depthCel || !baseCel) {
           endDepthStroke();
@@ -4812,28 +5115,105 @@ public:
         m_depthWork.reset(doc::Image::createCopy(m_depthLive.get()));
         m_baseLive = baseCel->imageRef();
         m_baseWork.reset(doc::Image::createCopy(m_baseLive.get()));
+        m_depthInstalled = m_baseInstalled = false;
+        m_strokeFace = face;
+        m_strokeFrame = fr;
+        m_strokeRight = right;
+        m_strokeHasLast = false;
+        m_strokeTouched.assign(size_t(faceRect.w) * size_t(faceRect.h), 0);
         m_depthStrokeActive = true;
       }
-      if (!m_depthTx || !m_depthWork || !m_baseWork) return;
+      if (!m_depthTx || !m_depthWork || !m_baseWork || face != m_strokeFace)
+        return;
+      if (!inFace) {
+        m_strokeHasLast = false;        // do not draw a long line on re-entry
+        return;
+      }
+      if (m_strokeHasLast && m_strokeLastU == u0 && m_strokeLastV == v0)
+        return;                         // same face pixel as the last event
 
-      const auto changed = applyDepthDabToImages(m_depthWork.get(), m_baseWork.get(),
-                                               faceRect, u0, v0, minus, step, radius);
-      const bool depthChanged = changed.first, baseChanged = changed.second;
-      if (!depthChanged && !baseChanged) return;
-      DocApi api = doc->getApi(*m_depthTx);
-      if (depthChanged) {
-        doc::ImageRef next(doc::Image::createCopy(m_depthWork.get()));
-        api.replaceImage(spr, m_depthLive, next);
-        m_depthLive = next;
-        m_depthWork = next;
+      int fw[kFaceCount], fh[kFaceCount];
+      sharedFaceSizes(spr, fw, fh);
+      int normalSize = 0;
+      if (face == kFaceTop || face == kFaceDown)
+        normalSize = fh[kFaceFront];
+      else if (face == kFaceFront || face == kFaceBack)
+        normalSize = fw[kFaceRight];
+      else
+        normalSize = fw[kFaceFront];
+      const float step = 128.0f / float(std::max(1, normalSize / 2));
+      const DepthBrushSpec brush = currentDepthBrush();
+      auto& prefs = Preferences::instance();
+      const DepthValue value = depthValueFromColor(m_strokeRight ? prefs.colorBar.bgColor()
+                                                                  : prefs.colorBar.fgColor());
+
+      bool depthChanged = false, baseChanged = false;
+      gfx::Rect dirty;
+      auto applyAt = [&](int u, int v) {
+        std::pair<bool, bool> c;
+        switch (m_depthTool) {
+          case DepthTool::Brush:
+            c = applyDepthDabToImages(m_depthWork.get(), m_baseWork.get(), faceRect, u, v,
+                                      m_strokeRight, step, brush.radius, &m_strokeTouched,
+                                      brush.square);
+            break;
+          case DepthTool::Pencil:
+            c = applyDepthPaintToImages(m_depthWork.get(), m_baseWork.get(), faceRect, u, v,
+                                        value, brush.radius, brush.square);
+            break;
+          case DepthTool::Fill:
+            c = floodFillDepth(m_depthWork.get(), m_baseWork.get(), faceRect, u, v, value);
+            break;
+          case DepthTool::None: return;
+        }
+        depthChanged |= c.first;
+        baseChanged |= c.second;
+        if (c.first || c.second) {
+          const int r = (m_depthTool == DepthTool::Fill) ? 0 : brush.radius;
+          gfx::Rect rc(faceRect.x + u - r, faceRect.y + v - r, 2 * r + 1, 2 * r + 1);
+          if (m_depthTool == DepthTool::Fill)
+            rc = faceRect;
+          dirty = dirty.isEmpty() ? rc : dirty.createUnion(rc);
+        }
+      };
+
+      if (m_depthTool == DepthTool::Fill) {
+        if (isDown)
+          applyAt(u0, v0);
       }
-      if (baseChanged) {
-        doc::ImageRef next(doc::Image::createCopy(m_baseWork.get()));
-        api.replaceImage(spr, m_baseLive, next);
-        m_baseLive = next;
-        m_baseWork = next;
+      else if (m_strokeHasLast) {
+        // Walk the line from the last face pixel to this one, so a fast
+        // mouse movement leaves no gaps.
+        const int du = u0 - m_strokeLastU, dv = v0 - m_strokeLastV;
+        const int n = std::max(std::abs(du), std::abs(dv));
+        for (int i = 1; i <= n; ++i)
+          applyAt(m_strokeLastU + int(std::lround(double(du) * i / n)),
+                  m_strokeLastV + int(std::lround(double(dv) * i / n)));
       }
-      doc->notifyGeneralUpdate();
+      else {
+        applyAt(u0, v0);
+      }
+      m_strokeHasLast = true;
+      m_strokeLastU = u0;
+      m_strokeLastV = v0;
+
+      if (depthChanged || baseChanged) {
+        DocApi api = doc->getApi(*m_depthTx);
+        // Install the work copies in the cels the first time they change
+        // (the Tx records the ORIGINAL images for undo); after that they are
+        // edited in place.
+        if (depthChanged && !m_depthInstalled) {
+          api.replaceImage(spr, m_depthLive, m_depthWork);
+          m_depthLive = m_depthWork;
+          m_depthInstalled = true;
+        }
+        if (baseChanged && !m_baseInstalled) {
+          api.replaceImage(spr, m_baseLive, m_baseWork);
+          m_baseLive = m_baseWork;
+          m_baseInstalled = true;
+        }
+        doc->notifySpritePixelsModified(spr, gfx::Region(dirty), fr);
+      }
     }
     catch (const std::exception& e) {
       endDepthStroke();
@@ -4855,7 +5235,9 @@ public:
     m_depthLive.reset();
     m_baseWork.reset();
     m_baseLive.reset();
+    m_strokeTouched.clear();
     m_depthStrokeActive = false;
+    m_strokeHasLast = false;
     m_lastHash = 0;
   }
 
@@ -6032,6 +6414,7 @@ private:
   void pollAndRender(bool force)
   {
     if (!isVisible()) return;
+    syncDepthToolFromApp();
     // Wheel-zoom guarantee: a panel editor whose idle state has
     // fallen back to plain StandbyState (for any reason — a state
     // pop, a tool change, an editor recreated by a caller) would
@@ -7267,16 +7650,13 @@ private:
   // plus the Plus/Minus mode and brush size, in a strip across the
   // top of the studio. m_depthToolOn is the tool mode; the Fields
   // Depth Brush checkbox is gone.
-  ui::HBox* m_toolStrip = nullptr;
-  PaneActionButton* m_drawToolBtn = nullptr;
-  PaneActionButton* m_depthToolBtn = nullptr;
-  bool m_depthToolOn = false;
+  ui::HBox* m_toolStrip = nullptr;     // unused since 2026-11-09 (tools live in the toolbar)
+  DepthTool m_depthTool = DepthTool::None;
   // Hidden-Base status tip (2026-11-07): set while Surface_Base is
   // hidden and the tip has already been shown once for that hide,
   // so pollAndRender warns once per hide instead of every 33 ms.
   bool m_baseHiddenTipShown = false;
-  ui::ComboBox* m_depthModeCombo = nullptr;
-  ui::Slider* m_depthBrushSlider = nullptr;
+
   // Depth-sculpt stroke state: one Tx for the whole drag, so a
   // drag is a single undo step. Each dab installs a fresh copy
   // of the working image via replaceImage (the Tx groups them).
@@ -7286,6 +7666,15 @@ private:
   doc::ImageRef m_baseWork;
   doc::ImageRef m_baseLive;
   bool m_depthStrokeActive = false;
+  bool m_depthInstalled = false;
+  bool m_baseInstalled = false;
+  int m_strokeFace = -1;
+  doc::frame_t m_strokeFrame = 0;
+  bool m_strokeRight = false;
+  bool m_strokeHasLast = false;
+  int m_strokeLastU = 0;
+  int m_strokeLastV = 0;
+  std::vector<uint8_t> m_strokeTouched;
   ui::CheckBox* m_liveBakeCheck = nullptr;
   ui::CheckBox* m_linkDimensionsCheck = nullptr;
 
@@ -7428,6 +7817,15 @@ static std::string easymetricStateJsonText(Context* context)
   root["studio"] = studio;
   if (tools::Tool* tool = App::instance() ? App::instance()->activeTool() : nullptr)
     root["tool"] = tool->getId();
+  if (context && context->isUIAvailable() && ToolBar::instance()) {
+    json11::Json::array tb;
+    for (auto& tr : ToolBar::instance()->visibleToolRects())
+      tb.push_back(json11::Json::object{ { "id", tr.first->getId() },
+                                         { "rect", rectJson(tr.second) } });
+    root["toolbar"] = json11::Json::object{ { "tools", tb },
+                                            { "studioGroupVisible",
+                                              ToolBar::studioToolsVisible() } };
+  }
   return json11::Json(root).dump();
 }
 
@@ -7508,6 +7906,27 @@ protected:
         const bool minus = m_params.has_param("mode") && m_params.get("mode") == "minus";
         const int radius = m_params.has_param("radius") ? std::stoi(m_params.get("radius")) : 0;
         sculptDepthDabOnDoc(doc, doc::frame_t(0), faceIdx, u, v, minus, radius);
+      }
+      else if (action == "flipFace") {
+        // Params: face (top/down/front/back/right/left), axis (h|v, default h),
+        // frame (1-based like Lua, default = active frame).
+        const std::string faceStr = m_params.has_param("face") ? m_params.get("face") : "top";
+        int faceIdx = kFaceTop;
+        for (int f = 0; f < kFaceCount; ++f) {
+          std::string a = kFaceSpecs[f].sliceName, d = kFaceSpecs[f].displayName;
+          std::string q = faceStr;
+          for (auto* s : { &a, &d, &q })
+            std::transform(s->begin(), s->end(), s->begin(), [](unsigned char c) {
+              return char(std::tolower(c));
+            });
+          if (q == a || q == d || (q == "bottom" && f == kFaceDown))
+            faceIdx = f;
+        }
+        const bool horizontal = !(m_params.has_param("axis") && m_params.get("axis") == "v");
+        doc::frame_t fr = context->activeSite().frame();
+        if (m_params.has_param("frame"))
+          fr = doc::frame_t(std::max(1, std::stoi(m_params.get("frame"))) - 1);
+        flipFaceOnDoc(doc, faceIdx, horizontal, fr);
       }
       else if (action == "state") {
         // Params: out (file path, optional). Writes the machine-readable

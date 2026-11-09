@@ -18,6 +18,8 @@
 #include "ui/widget.h"
 
 #include <map>
+#include <utility>
+#include <vector>
 #include <memory>
 
 namespace ui {
@@ -37,6 +39,7 @@ class ToolBar : public ui::Widget,
                 public Dockable,
                 public tools::ActiveToolObserver {
   static ToolBar* m_instance;
+  static bool m_studioToolsVisible;
 
 public:
   static ToolBar* instance() { return m_instance; }
@@ -47,6 +50,17 @@ public:
 
   ToolBar();
   ~ToolBar();
+
+  // Easymetric studio tools (depth brush / pencil / fill): the
+  // "easymetric_depth_tools" group is only shown in the toolbar while the
+  // 6-panel studio is open (Studio calls this on enter/exit).
+  static bool studioToolsVisible() { return m_studioToolsVisible; }
+  void setStudioToolsVisible(bool visible);
+  static bool isStudioTool(const tools::Tool* tool);
+
+  // The tool shown for each visible group and its button rect (UI
+  // coordinates), for the UI test harness / machine-readable state.
+  std::vector<std::pair<tools::Tool*, gfx::Rect>> visibleToolRects();
 
   bool isToolVisible(tools::Tool* tool);
   void selectTool(tools::Tool* tool);
@@ -71,6 +85,10 @@ protected:
   void onVisible(bool visible) override;
 
 private:
+  // Number of tool groups currently shown (all groups, minus the studio
+  // group while the studio is closed; it is always the last group).
+  int totalGroups() const;
+  void updateMinHeight();
   enum class GroupType { Regular, Overflow };
 
   bool isDockedAtLeftSide() const;
