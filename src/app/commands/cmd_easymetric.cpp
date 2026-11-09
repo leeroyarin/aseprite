@@ -3927,6 +3927,43 @@ public:
       delete m_gridDecorators[f];
       m_gridDecorators[f] = nullptr;
     }
+    restoreStateOnExit();
+  }
+
+  // Studio exit (Feature 4.3 follow-up, 2026-11-09). The studio
+  // view is removed with DocView::exitMultiPaneMode(), which only
+  // *defers* its deletion, and ui::Manager collects deferred
+  // deletions only when no timer is running. This view's own
+  // polling timer keeps running, so the destructor never ran: a
+  // floating Preview & Fields window stayed on screen (and a
+  // second one appeared on the next entry), the face-centre
+  // symmetry axis leaked into the main editor, and the per-face
+  // mask was never restored. The Studio command calls this
+  // right before exitMultiPaneMode() so all of that happens at
+  // exit time; the destructor then skips the restores.
+  void prepareForExit()
+  {
+    if (m_exited)
+      return;
+    m_timer.stop();
+    // Closing the floating window runs its Close handler, which
+    // docks the column back (dockPreview), the same path as the
+    // window's own X button.
+    if (m_previewFloating && m_previewWindow)
+      m_previewWindow->closeWindow(nullptr);
+    restoreStateOnExit();
+  }
+
+  // Idempotent: restores what the studio changed outside its own
+  // widgets (hub marker, wheel-zoom pref, document symmetry,
+  // document mask). Runs once, from prepareForExit() or, when
+  // the view dies another way (document closed), from the
+  // destructor.
+  void restoreStateOnExit()
+  {
+    if (m_exited)
+      return;
+    m_exited = true;
     std::remove(easymetricHubMarkerPath().c_str());
     restoreWheelZoomPref();
     if (Doc* doc = m_docView->document()) {
@@ -4241,6 +4278,7 @@ public:
       m_symYFace[f] = symY;
     }
     m_savedSymMode = mode;
+    m_savedSymEnabled = Preferences::instance().symmetryMode.enabled();
     m_savedSymXAxis = docPref.symmetry.xAxis();
     m_savedSymYAxis = docPref.symmetry.yAxis();
     m_symDocSaved = true;
@@ -4306,6 +4344,10 @@ public:
     docPref.symmetry.mode(static_cast<app::gen::SymmetryMode>(m_savedSymMode));
     docPref.symmetry.xAxis(m_savedSymXAxis);
     docPref.symmetry.yAxis(m_savedSymYAxis);
+    // applyPanelSymmetry() switches the global "symmetry options"
+    // preference on; give it back too, or the main editor keeps
+    // the symmetry buttons in its context bar after the studio.
+    Preferences::instance().symmetryMode.enabled(m_savedSymEnabled);
     if (m_symXCheck)
       m_symXCheck->setSelected(
         (m_savedSymMode & int(app::gen::SymmetryMode::HORIZONTAL)) != 0);
@@ -5658,11 +5700,12 @@ private:
     exportObjBtn->Click.connect([this] { exportToWavefrontObj(); });
     exitBtn->Click.connect([this] {
       syncAllLinkedCels();
-      restoreWheelZoomPref();
-      // Clean studio exit: clear the session marker here as well
-      // as in the destructor, so a normal Exit can never be
-      // reported as a crash on the next entry.
-      std::remove(easymetricHubMarkerPath().c_str());
+      // Clean studio exit: prepareForExit() clears the session
+      // marker (so a normal Exit can never be reported as a crash
+      // on the next entry), restores the wheel-zoom pref,
+      // symmetry and mask, stops the polling timer and closes a
+      // floating Preview & Fields window.
+      prepareForExit();
       m_docView->exitMultiPaneMode();
     });
   }
@@ -7071,6 +7114,9 @@ private:
   mutable int m_rowHpx[4] = { 0, 0, 0, 0 };
   mutable bool m_colInit = false;
   mutable bool m_floatColInit = false;
+  // Set once the studio's exit restores have run (prepareForExit /
+  // restoreStateOnExit), so the destructor does not repeat them.
+  bool m_exited = false;
   int m_dockedColWpx[3] = { 0, 0, 0 };
   int m_hoverSplitter = 0;
   int m_dragSplitter = 0;
@@ -7093,6 +7139,7 @@ private:
   bool m_symYFace[kFaceCount] = { false, false, false, false, false, false };
   bool m_symFacesInit = false;
   int m_savedSymMode = int(app::gen::SymmetryMode::NONE);
+  bool m_savedSymEnabled = false;
   double m_savedSymXAxis = 0.0;
   double m_savedSymYAxis = 0.0;
   bool m_symDocSaved = false;
@@ -7276,6 +7323,11 @@ protected:
     if (docView->isMultiPane()) {
       if (auto* multiPane = dynamic_cast<EasymetricMultiPaneView*>(docView->multiPaneLayout())) {
         multiPane->syncAllLinkedCels();
+        // Close the floating Preview & Fields window, stop the
+        // polling timer and restore symmetry/mask now: the view's
+        // deferred deletion never completes while its timer runs
+        // (see prepareForExit).
+        multiPane->prepareForExit();
       }
       docView->exitMultiPaneMode();
       if (auto* sb = StatusBar::instance())
