@@ -56,6 +56,7 @@
 #include "app/ui/toolbar.h"
 #include "app/ui/workspace.h"
 #include "app/ui_context.h"
+#include "app/ui_test_server.h"
 #include "app/util/clipboard.h"
 #include "base/exception.h"
 #include "base/fs.h"
@@ -413,6 +414,11 @@ int App::initialize(const AppOptions& options)
     manager->updateAllDisplays(scale, gpu);
 #endif
   }
+
+  // Test-only: starts the in-app UI test server when
+  // ASEPRITE_UITEST_DIR is set (docs/aseprite2/UITEST.md).
+  if (isGui())
+    start_ui_test_server_if_requested();
 
 #ifdef ENABLE_SCRIPTING
   // Call the init() function from all plugins

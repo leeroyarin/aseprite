@@ -716,6 +716,7 @@ target_sources(app-lib PRIVATE
   ui/workspace_tabs.cpp
   ui/zoom_entry.cpp
   ui_context.cpp
+  ui_test_server.cpp
   util/autocrop.cpp
   util/buffer_region.cpp
   util/cel_ops.cpp

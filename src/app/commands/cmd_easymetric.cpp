@@ -24,6 +24,7 @@
 #include "app/file_selector.h"
 #include "app/pref/preferences.h"
 #include "app/site.h"
+#include "app/tools/tool.h"
 #include "app/tx.h"
 #include "app/ui/color_button.h"
 #include "app/ui/doc_view.h"
@@ -52,6 +53,7 @@
 #include "doc/tag.h"
 #include "doc/tags.h"
 #include "fmt/format.h"
+#include "json11.hpp"
 #include "os/sampling.h"
 #include "os/surface.h"
 #include "os/system.h"
@@ -1178,6 +1180,124 @@ static gfx::Size sharedSheetSize(doc::Sprite* spr)
   int colW[3], rowH[2];
   sharedLayout(w, h, colW, rowH);
   return gfx::Size(colW[0] + colW[1] + colW[2], rowH[0] + rowH[1]);
+}
+
+// ---------------------------------------------------------------------------
+// Machine-readable state ("test without looking at pixels", 2026-11-09).
+// EasymetricStudio{action="state", out=<file>} writes this JSON; the in-app
+// UI test server (ui_test_server.cpp) returns the same text. Everything an
+// agent needs to assert on without a screenshot is here: layers, per-face
+// pixel statistics per sheet layer, and (when the studio is open) panel
+// geometry, tool mode, symmetry, grid, flip/button state.
+// ---------------------------------------------------------------------------
+struct RectStats {
+  int opaque = 0;
+  int64_t sum = 0;       // sum of R+G+B over opaque pixels
+  uint64_t hash = 1469598103934665603ull;
+};
+
+// Statistics of `rect` (SPRITE coordinates) of a cel, honouring the cel
+// position, so it is correct even when the cel is not at (0, 0).
+static RectStats rectStatsOfCel(const doc::Cel* cel, const gfx::Rect& rect)
+{
+  RectStats st;
+  if (!cel || !cel->image())
+    return st;
+  const doc::Image* img = cel->image();
+  const int ox = cel->x();
+  const int oy = cel->y();
+  for (int y = rect.y; y < rect.y + rect.h; ++y) {
+    for (int x = rect.x; x < rect.x + rect.w; ++x) {
+      uint32_t px = 0;
+      const int ix = x - ox;
+      const int iy = y - oy;
+      if (ix >= 0 && iy >= 0 && ix < img->width() && iy < img->height())
+        px = img->getPixel(ix, iy);
+      // Image may be RGB or grayscale/indexed; only RGB sheets are used.
+      const int a = doc::rgba_geta(px);
+      if (a > 0) {
+        ++st.opaque;
+        st.sum += doc::rgba_getr(px) + doc::rgba_getg(px) + doc::rgba_getb(px);
+      }
+      st.hash ^= uint64_t(px);
+      st.hash *= 1099511628211ull;
+    }
+  }
+  return st;
+}
+
+static std::string hex64(uint64_t v)
+{
+  char buf[24];
+  std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(v));
+  return buf;
+}
+
+static json11::Json rectJson(const gfx::Rect& r)
+{
+  return json11::Json::array{ r.x, r.y, r.w, r.h };
+}
+
+static json11::Json rectStatsJson(const RectStats& st)
+{
+  return json11::Json::object{ { "opaque", st.opaque },
+                               { "sum", double(st.sum) },
+                               { "hash", hex64(st.hash) } };
+}
+
+// Document-level state: works headless (no UI needed).
+static json11::Json::object docStateObject(Doc* doc, doc::Layer* activeLayer, doc::frame_t fr)
+{
+  json11::Json::object o;
+  doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+  if (!spr) {
+    o["sprite"] = nullptr;
+    return o;
+  }
+  o["sprite"] = json11::Json::object{ { "width", spr->width() },
+                                      { "height", spr->height() },
+                                      { "frames", int(spr->totalFrames()) },
+                                      { "frame", int(fr) },
+                                      { "filename", doc->filename() } };
+  json11::Json::array layers;
+  for (doc::Layer* lyr : spr->allLayers()) {
+    json11::Json::object lo;
+    lo["name"] = lyr->name();
+    lo["kind"] = lyr->isGroup() ? "group" : (lyr->isImage() ? "image" : "other");
+    lo["visible"] = lyr->isVisible();
+    lo["editable"] = lyr->isEditable();
+    lo["active"] = (lyr == activeLayer);
+    if (lyr->isImage()) {
+      doc::Cel* cel = lyr->cel(fr);
+      lo["hasCel"] = (cel != nullptr);
+      if (cel)
+        lo["cel"] = rectJson(gfx::Rect(cel->x(), cel->y(), cel->image()->width(),
+                                       cel->image()->height()));
+    }
+    layers.push_back(lo);
+  }
+  o["layers"] = layers;
+  o["activeLayer"] = activeLayer ? activeLayer->name() : std::string();
+
+  SharedSurfaceLayers shared = findSharedLayers(spr);
+  json11::Json::object faces;
+  const struct { const char* key; doc::LayerImage* lyr; } sheets[3] = {
+    { "base", shared.baseLayer }, { "texture", shared.textureLayer }, { "depth", shared.depthLayer }
+  };
+  for (int f = 0; f < kFaceCount; ++f) {
+    const gfx::Rect rc = sharedFaceRect(spr, f);
+    json11::Json::object fo;
+    fo["uv"] = rectJson(rc);
+    for (const auto& sh : sheets) {
+      if (sh.lyr && sh.lyr->cel(fr))
+        fo[sh.key] = rectStatsJson(rectStatsOfCel(sh.lyr->cel(fr), rc));
+    }
+    faces[kFaceSpecs[f].sliceName] = fo;
+  }
+  o["faces"] = faces;
+  o["hasSurfaces"] = (shared.baseLayer != nullptr);
+  o["hasDepthLayer"] = (shared.depthLayer != nullptr);
+  return o;
 }
 
 // Rebuild the three shared sheets from their old UV rects
@@ -3991,6 +4111,77 @@ public:
       Preferences::instance().editor.zoomWithWheel(m_savedZoomWithWheel);
       m_restoreZoomWithWheel = false;
     }
+  }
+
+  // Studio part of the machine-readable state (see docStateObject).
+  // Screen rects are in UI (logical) coordinates, the same space the
+  // UI test server uses for injected mouse events.
+  json11::Json::object studioStateObject() const
+  {
+    json11::Json::object s;
+    s["open"] = true;
+    s["toolMode"] = m_depthToolOn ? "depth" : "draw";
+    s["previewFloating"] = m_previewFloating;
+    s["activeFace"] = m_lastActiveFace;
+    s["columnsPx"] = json11::Json::array{ m_colWpx[0], m_colWpx[1], m_colWpx[2] };
+    s["rowsPx"] = json11::Json::array{ m_rowHpx[0], m_rowHpx[1], m_rowHpx[2], m_rowHpx[3] };
+    s["bounds"] = rectJson(bounds());
+    doc::Sprite* spr = (m_docView && m_docView->document()) ? m_docView->document()->sprite()
+                                                              : nullptr;
+    json11::Json::array faces;
+    for (int f = 0; f < kFaceCount; ++f) {
+      json11::Json::object fo;
+      fo["name"] = kFaceSpecs[f].sliceName;
+      fo["title"] = kFaceSpecs[f].displayName;
+      if (spr)
+        fo["uv"] = rectJson(sharedFaceRect(spr, f));
+      if (m_editors[f]) {
+        // "viewport" = the visible panel area; "faceScreen" = where this
+        // face's pixels currently are, in UI coordinates (click inside it
+        // to paint on the face). "editor" is the scrolled canvas widget.
+        fo["editor"] = rectJson(m_editors[f]->bounds());
+        if (m_views[f])
+          fo["viewport"] = rectJson(m_views[f]->viewportBounds());
+        if (spr)
+          fo["faceScreen"] = rectJson(m_editors[f]->editorToScreen(sharedFaceRect(spr, f)));
+        fo["zoom"] = m_editors[f]->zoom().scale();
+        fo["layer"] = m_editors[f]->layer() ? m_editors[f]->layer()->name() : std::string();
+        fo["idle"] = isPanelEditorIdle(m_editors[f]);
+      }
+      if (m_headers[f])
+        fo["header"] = rectJson(m_headers[f]->bounds());
+      fo["symX"] = m_symXFace[f];
+      fo["symY"] = m_symYFace[f];
+      fo["animLinked"] = m_animLinked[f];
+      const PanelGridSettings& g = m_gridDraftValid[f] ? m_gridDraft[f] : m_grid[f];
+      fo["grid"] = json11::Json::object{ { "on", g.on },
+                                         { "countH", g.countH },
+                                         { "spacingH", g.spacingH },
+                                         { "countV", g.countV },
+                                         { "spacingV", g.spacingV } };
+      // Header buttons: label + toggle state + bounds, so a test can
+      // find and press them by name.
+      json11::Json::array btns;
+      auto addBtn = [&btns](const char* name, PaneActionButton* b) {
+        if (!b)
+          return;
+        btns.push_back(json11::Json::object{ { "name", name },
+                                             { "text", b->text() },
+                                             { "on", b->isOn() },
+                                             { "visible", b->isVisible() },
+                                             { "bounds", rectJson(b->bounds()) } });
+      };
+      addBtn("grid", m_gridButtons[f]);
+      addBtn("animLink", m_animLinkButtons[f]);
+      addBtn("symX", m_symXButtons[f]);
+      addBtn("symY", m_symYButtons[f]);
+      addBtn("flipH", m_flipHButtons[f]);
+      addBtn("flipV", m_flipVButtons[f]);
+      fo["buttons"] = btns;
+      faces.push_back(fo);
+    }
+    s["faces"] = faces;
+    return s;
   }
 
   std::vector<Editor*> surfaceEditors() const
@@ -7203,6 +7394,43 @@ void EasymetricWheelZoomState::EasymetricGridDecorator::getInvalidDecoratoredReg
   // updateGridDraftFromPopup / confirmGridPopup).
 }
 
+// Builds the machine-readable state text. Works headless (document part only)
+// and with the UI (adds studio panel geometry, tool mode, header buttons).
+static std::string easymetricStateJsonText(Context* context)
+{
+  json11::Json::object root;
+  Doc* doc = context ? static_cast<Doc*>(context->activeDocument()) : nullptr;
+  doc::Layer* activeLayer = nullptr;
+  doc::frame_t fr = 0;
+  if (context) {
+    Site site = context->activeSite();
+    activeLayer = site.layer();
+    fr = site.frame();
+  }
+  root["version"] = 1;
+  root["uiAvailable"] = (context && context->isUIAvailable());
+  if (doc) {
+    json11::Json::object d = docStateObject(doc, activeLayer, fr);
+    for (auto& kv : d)
+      root[kv.first] = kv.second;
+  }
+  else {
+    root["sprite"] = nullptr;
+  }
+  json11::Json::object studio{ { "open", false } };
+  if (context && context->isUIAvailable() && UIContext::instance()) {
+    DocView* view = UIContext::instance()->activeView();
+    if (view && view->isMultiPane()) {
+      if (auto* mp = dynamic_cast<EasymetricMultiPaneView*>(view->multiPaneLayout()))
+        studio = mp->studioStateObject();
+    }
+  }
+  root["studio"] = studio;
+  if (tools::Tool* tool = App::instance() ? App::instance()->activeTool() : nullptr)
+    root["tool"] = tool->getId();
+  return json11::Json(root).dump();
+}
+
 class EasymetricStudioCommand : public Command {
 public:
   EasymetricStudioCommand() : Command(CommandId::EasymetricStudio()) {}
@@ -7281,6 +7509,21 @@ protected:
         const int radius = m_params.has_param("radius") ? std::stoi(m_params.get("radius")) : 0;
         sculptDepthDabOnDoc(doc, doc::frame_t(0), faceIdx, u, v, minus, radius);
       }
+      else if (action == "state") {
+        // Params: out (file path, optional). Writes the machine-readable
+        // state JSON (docs/aseprite2/UITEST.md) to `out`; with no `out`
+        // it is printed to stdout, so a headless run can be asserted on
+        // without a screenshot or a file.
+        const std::string text = easymetricStateJsonText(context);
+        if (m_params.has_param("out") && !m_params.get("out").empty()) {
+          std::ofstream f(m_params.get("out"), std::ios::binary | std::ios::trunc);
+          f << text;
+        }
+        else {
+          std::printf("%s\n", text.c_str());
+          std::fflush(stdout);
+        }
+      }
       else if (action == "previewFloat") {
         // Params: mode (pop/dock/toggle, default toggle).
         // UI-only: needs the studio open, so it does nothing
@@ -7349,6 +7592,11 @@ private:
 };
 
 } // anonymous namespace
+
+std::string easymetric_state_json(Context* context)
+{
+  return easymetricStateJsonText(context);
+}
 
 Command* CommandFactory::createEasymetricStudioCommand()
 {
