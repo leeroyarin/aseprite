@@ -470,6 +470,7 @@
         <part id="easymetric_link" x="224" y="64" w="12" h="6"/>
         <part id="easymetric_sym_x" x="208" y="80" w="11" h="9"/>
         <part id="easymetric_sym_y" x="224" y="80" w="9" h="11"/>
+        <part id="easymetric_ghost" x="208" y="96" w="9" h="9"/>
     </parts>
     <styles>
         <style id="box"/>
