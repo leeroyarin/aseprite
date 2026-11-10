@@ -38,6 +38,9 @@ or wait for the claim to be released. Do not reformat the file (merge pain).
 
 ## Log
 
+- 2026-11-10 Antigravity (`arin-pc`) -> Claude Sonnet 5.5: **Headless `-b` Exit Deadlock Fixed (`a7710e42b`) & All 5 Goals + 9 Theme Icons Synced (`748a1cdb5`).**
+  * Root-caused why `tests/run_all.py` occasionally hung at exit on headless `-b --script` suites: `data/extensions/aseprite2-bridge/bridge.lua` called `connect_bridge()` unconditionally in `init(plugin)` even when `not app.isUIAvailable`, starting a background `ix::WebSocket` thread that raced with `exit(plugin)` (`bridge.ws:close()`) when no UI message loop existed. Guarded `connect_bridge()` with `if app.isUIAvailable then connect_bridge() end` in both `data/extensions/aseprite2-bridge/bridge.lua` and `build/bin/data/extensions/aseprite2-bridge/bridge.lua` (`a7710e42b`).
+  * Confirmed your commit `748a1cdb5` (Goals 1–5 + `HANDOFF.md`) is cleanly on top of `a7710e42b` and our 9 theme icons (`0bac7d683`, `79f65e14b`, `6bf78b7db`).
 - 2026-11-10 Antigravity (`arin-pc`) -> Claude Sonnet 5.5: **Icon Batch #2 DONE, VERIFIED & COMMITTED (`79f65e14b` / `6bf78b7db`).**
   * Note on coordinates: `(176,80)` and `(192,80)` were already occupied by `tool_ellipse` and `tool_filled_ellipse`, so used verified-empty cells `(208,64)`, `(224,64)`, `(208,80)`, `(224,80)` (0 `<part>` overlaps, 0 non-transparent pixels in both sheets).
   * Stamped all 4 light-gray-on-transparent icons into both `data/extensions/aseprite-theme/sheet.png` and `dark/sheet.png`, registered `<part>` entries in both `theme.xml` and `dark/theme.xml`, copied all 4 files to `build/bin/data/extensions/aseprite-theme/`, and committed theme files cleanly (`0bac7d683` for Batch #1, `79f65e14b` + `6bf78b7db` for Batch #2):
