@@ -280,6 +280,8 @@ Manager::~Manager()
   manager_thread = std::thread::id();
 }
 
+bool Manager::s_ignoreNativeInput = false;
+
 // static
 Display* Manager::getDisplayFromNativeWindow(os::Window* window)
 {
@@ -438,6 +440,26 @@ void Manager::generateMessagesFromOSEvents()
     m_eventQueue->getEvent(osEvent, timeout);
     if (osEvent.type() == os::Event::None)
       break;
+
+    // UI test mode (ASEPRITE_UITEST_DIR): drop the REAL mouse/keyboard input
+    // of the OS (it carries the native window; events injected by the test
+    // server carry none), so a person moving their own mouse over the window
+    // cannot disturb a running UI test.
+    if (s_ignoreNativeInput && osEvent.window()) {
+      switch (osEvent.type()) {
+        case os::Event::MouseEnter:
+        case os::Event::MouseLeave:
+        case os::Event::MouseMove:
+        case os::Event::MouseDown:
+        case os::Event::MouseUp:
+        case os::Event::MouseWheel:
+        case os::Event::MouseDoubleClick:
+        case os::Event::KeyDown:
+        case os::Event::KeyUp:
+        case os::Event::TouchMagnify:     continue;
+        default:                          break;
+      }
+    }
 
     Display* display = getDisplayFromNativeWindow(osEvent.window().get());
     if (!display)
@@ -636,6 +658,12 @@ void Manager::handleMouseMove(Display* display,
                               const PointerType pointerType,
                               const float pressure)
 {
+  if (s_ignoreNativeInput && display) {
+    // Opening a window (tips, pop-ups) re-syncs the widget under the mouse
+    // from the OS cursor; in test mode that must be the injected position.
+    const gfx::Point sp = display->nativeWindow()->pointToScreen(mousePos);
+    set_mouse_position_override(&sp);
+  }
   updateMouseWidgets(mousePos, display);
 
   // Send the mouse movement message

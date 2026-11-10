@@ -255,8 +255,20 @@ void _internal_no_mouse_position()
   update_custom_native_cursor(nullptr);
 }
 
+static bool g_mouse_override = false;
+static gfx::Point g_mouse_override_pos;
+
+void set_mouse_position_override(const gfx::Point* screenPos)
+{
+  g_mouse_override = (screenPos != nullptr);
+  if (screenPos)
+    g_mouse_override_pos = *screenPos;
+}
+
 gfx::Point get_mouse_position()
 {
+  if (g_mouse_override)
+    return g_mouse_override_pos;
   return os::System::instance()->mousePosition();
 }
 

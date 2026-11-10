@@ -27,7 +27,7 @@ for s in SUITES:
 if "--no-ui" not in sys.argv:
     ui_dir = os.path.join(REPO, "tests", "ui")
     for name in sorted(os.listdir(ui_dir)):
-        if not name.endswith(".py"):
+        if not (name.endswith("_test.py") or name.endswith("selftest.py")):
             continue
         p = subprocess.run([sys.executable, os.path.join(ui_dir, name)], text=True, capture_output=True)
         last = p.stdout.strip().splitlines()[-1] if p.stdout.strip() else "no output"

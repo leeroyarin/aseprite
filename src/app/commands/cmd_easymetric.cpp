@@ -43,6 +43,7 @@
 #include "app/ui_context.h"
 #include "app/util/conversion_to_surface.h"
 #include "base/fs.h"
+#include "base/time.h"
 #include "doc/algorithm/flip_type.h"
 #include "doc/brush_type.h"
 #include "doc/cel.h"
@@ -2076,7 +2077,7 @@ public:
   // a built-in pixel placeholder of the same meaning (see drawFallbackIcon).
   // The label text is kept for the accessible name / UI tests, and the
   // tooltip is shown in the status bar on hover.
-  enum class Icon { None, FlipH, FlipV };
+  enum class Icon { None, FlipH, FlipV, Grid, Link, SymX, SymY };
 
   void setIcon(Icon icon, const std::string& partId)
   {
@@ -2111,37 +2112,67 @@ protected:
     return ui::Button::onProcessMessage(msg);
   }
 
-  // Pixel-art placeholder drawn in code: 11x9 (FlipH) / 9x11 (FlipV) grid,
-  // scaled by guiscale. Two triangles pointing at a dashed mirror line.
+  // Pixel-art placeholders drawn in code (used only while the theme sheet has
+  // no part for the button). '#' = lit pixel. Each is scaled by guiscale.
+  static const std::vector<std::string>& fallbackPixmap(Icon icon)
+  {
+    static const std::vector<std::string> flipH = {
+      "#....#....#", "##...#...##", "###..#..###", "####.#.####", "#####.#####",
+      "####.#.####", "###..#..###", "##...#...##", "#....#....#" };
+    static const std::vector<std::string> flipV = {
+      "#########", "#########"  /* replaced below by a transpose of flipH */ };
+    static const std::vector<std::string> grid = {
+      "#########", "#...#...#", "#...#...#", "#...#...#", "#########",
+      "#...#...#", "#...#...#", "#...#...#", "#########" };
+    static const std::vector<std::string> link = {
+      ".####..####.", "#....##....#", "#....##....#", ".####..####." };
+    static const std::vector<std::string> symX = {
+      ".....#.....", ".#...#...#.", "##.......##", "#####.#####",
+      "##.......##", ".#...#...#.", ".....#....." };
+    (void)flipV;
+    switch (icon) {
+      case Icon::FlipH: return flipH;
+      case Icon::Grid: return grid;
+      case Icon::Link: return link;
+      case Icon::SymX: return symX;
+      default: break;
+    }
+    static const std::vector<std::string> none;
+    return none;
+  }
+
+  static std::vector<std::string> transposed(const std::vector<std::string>& src)
+  {
+    std::vector<std::string> out;
+    if (src.empty())
+      return out;
+    for (size_t x = 0; x < src[0].size(); ++x) {
+      std::string row;
+      for (size_t y = 0; y < src.size(); ++y)
+        row += src[y][x];
+      out.push_back(row);
+    }
+    return out;
+  }
+
   void drawFallbackIcon(ui::Graphics* g, const gfx::Rect& rc, gfx::Color col)
   {
     const int s = ui::guiscale();
-    const bool h = (m_icon == Icon::FlipH);
-    const int W = h ? 11 : 9;
-    const int H = h ? 9 : 11;
+    std::vector<std::string> map;
+    switch (m_icon) {
+      case Icon::FlipV: map = transposed(fallbackPixmap(Icon::FlipH)); break;
+      case Icon::SymY: map = transposed(fallbackPixmap(Icon::SymX)); break;
+      default: map = fallbackPixmap(m_icon); break;
+    }
+    if (map.empty())
+      return;
+    const int W = int(map[0].size()), H = int(map.size());
     const int ox = rc.x + (rc.w - W * s) / 2;
     const int oy = rc.y + (rc.h - H * s) / 2;
-    auto dot = [&](int x, int y) {
-      g->fillRect(col, gfx::Rect(ox + x * s, oy + y * s, s, s));
-    };
-    if (h) {
-      for (int c = 0; c < 5; ++c)
-        for (int r = 4 - c; r <= 4 + c; ++r) {
-          dot(c, r);
-          dot(10 - c, r);
-        }
-      for (int r = 0; r < 9; r += 2)
-        dot(5, r);
-    }
-    else {
-      for (int c = 0; c < 5; ++c)
-        for (int r = 4 - c; r <= 4 + c; ++r) {
-          dot(r, c);
-          dot(r, 10 - c);
-        }
-      for (int x = 0; x < 9; x += 2)
-        dot(x, 5);
-    }
+    for (int y = 0; y < H; ++y)
+      for (int x = 0; x < W; ++x)
+        if (map[y][x] == '#')
+          g->fillRect(col, gfx::Rect(ox + x * s, oy + y * s, s, s));
   }
 
   void onPaint(ui::PaintEvent& ev) override
@@ -3506,6 +3537,21 @@ class EasymetricMultiPaneView;
 
 class EasymetricWheelZoomState : public StandbyState {
 public:
+  // Called when a button goes down in this panel, BEFORE the stroke starts:
+  // the studio uses it to make this panel the active one (active editor, face
+  // mask, per-panel symmetry) right now instead of on the next 33 ms poll,
+  // which is why the first click in a not-yet-active panel used to draw
+  // nothing (its mask still pointed at the previous face).
+  using BeforePressFn = std::function<void(Editor*)>;
+  void setBeforePress(BeforePressFn fn) { m_beforePress = std::move(fn); }
+
+  bool onMouseDown(Editor* editor, ui::MouseMessage* msg) override
+  {
+    if (m_beforePress)
+      m_beforePress(editor);
+    return StandbyState::onMouseDown(editor, msg);
+  }
+
   bool onMouseWheel(Editor* editor, ui::MouseMessage* msg) override
   {
     if (msg->altPressed())
@@ -3605,6 +3651,9 @@ public:
     int m_face;
   };
 
+protected:
+  BeforePressFn m_beforePress;
+
 private:
   double m_wheelAccum = 0.0;
 };
@@ -3642,6 +3691,8 @@ public:
     // leave all of those to the normal editor behaviour.
     if (msg->altPressed() || (!msg->left() && !msg->right()))
       return false;
+    if (m_beforePress)
+      m_beforePress(editor);
     m_paint(editor, msg->position(), true, msg->right());
     // A stroke owns the mouse until the button is released (the normal
     // DrawingState does the same), so the drag keeps arriving even when it
@@ -4100,10 +4151,14 @@ public:
       // this panel only. It does not toggle the grid itself; the
       // pop-up's on/off checkbox does.
       m_gridButtons[f] = new PaneActionButton("Grid", true);
+      m_gridButtons[f]->setIcon(PaneActionButton::Icon::Grid, "easymetric_grid");
+      m_gridButtons[f]->setTooltipText("Grid: overlay a grid on this face (opens settings)");
       m_gridButtons[f]->Click.connect([this, f] { openGridPopup(f); });
       m_headers[f]->addActionButton(m_gridButtons[f]);
 
       m_animLinkButtons[f] = new PaneActionButton("Link", true);
+      m_animLinkButtons[f]->setIcon(PaneActionButton::Icon::Link, "easymetric_link");
+      m_animLinkButtons[f]->setTooltipText("Link: this panel follows the animation frame (off = stays on its frame)");
       m_animLinkButtons[f]->setOn(true);
       m_animLinkButtons[f]->Click.connect([this, f] {
         setAnimLinked(f, !m_animLinked[f]);
@@ -4111,10 +4166,14 @@ public:
       m_headers[f]->addActionButton(m_animLinkButtons[f]);
 
       m_symXButtons[f] = new PaneActionButton("SX", true);
+      m_symXButtons[f]->setIcon(PaneActionButton::Icon::SymX, "easymetric_sym_x");
+      m_symXButtons[f]->setTooltipText("Symmetry X: mirror strokes left/right around this face's centre");
       m_symXButtons[f]->Click.connect([this, f] { toggleSymmetryAxis(f, true); });
       m_headers[f]->addActionButton(m_symXButtons[f]);
 
       m_symYButtons[f] = new PaneActionButton("SY", true);
+      m_symYButtons[f]->setIcon(PaneActionButton::Icon::SymY, "easymetric_sym_y");
+      m_symYButtons[f]->setTooltipText("Symmetry Y: mirror strokes top/bottom around this face's centre");
       m_symYButtons[f]->Click.connect([this, f] { toggleSymmetryAxis(f, false); });
       m_headers[f]->addActionButton(m_symYButtons[f]);
 
@@ -4152,7 +4211,11 @@ public:
       // drawing/moving states return to. The state is also kept
       // alive here as the StandbyState* the grid decorator's
       // base class needs (G2).
-      m_panelBaseStates[f] = EditorStatePtr(new EasymetricWheelZoomState);
+      {
+        auto* base = new EasymetricWheelZoomState;
+        base->setBeforePress([this](Editor* e) { activatePanelForPress(e); });
+        m_panelBaseStates[f] = EditorStatePtr(base);
+      }
       ed->setState(m_panelBaseStates[f]);
       // Grid overlay decorator (G2): installed on the panel
       // editor; pollAndRender re-installs it whenever the
@@ -4287,6 +4350,7 @@ public:
     // The depth tools are in the left toolbar now: show their group.
     if (auto* tb = ToolBar::instance())
       tb->setStudioToolsVisible(true);
+    hideDebugOverlays();
 
     // Timer for real-time 3D model update
     m_timer.Tick.connect([this] { pollAndRender(false); });
@@ -4389,6 +4453,7 @@ public:
     if (m_exited)
       return;
     m_exited = true;
+    restoreDebugOverlays();
     leaveDepthTools();
     std::remove(easymetricHubMarkerPath().c_str());
     restoreWheelZoomPref();
@@ -4762,6 +4827,41 @@ public:
   // symmetry to restore on exit, and seed every panel's stored
   // state from it, so the studio opens consistent with the
   // document instead of always showing symmetry off.
+  // Debug overlays (2026-11-09, William: "I don't want the bounding boxes of
+  // the surfaces / layers in geometric mode"): Aseprite draws every slice as
+  // a labelled rectangle (the six TOP/DOWN/FRONT/... face slices that define
+  // the UV rects) and, if enabled, the active layer's edges, in every panel
+  // editor. They are internal data, not something to look at, so hide them
+  // while the studio is open and give the document its own settings back on
+  // exit (restoreStateOnExit).
+  void hideDebugOverlays()
+  {
+    if (m_overlaysSaved)
+      return;
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    if (!doc)
+      return;
+    auto& docPref = Preferences::instance().document(doc);
+    m_savedShowSlices = docPref.show.slices();
+    m_savedShowLayerEdges = docPref.show.layerEdges();
+    m_overlaysSaved = true;
+    docPref.show.slices(false);
+    docPref.show.layerEdges(false);
+  }
+
+  void restoreDebugOverlays()
+  {
+    if (!m_overlaysSaved)
+      return;
+    m_overlaysSaved = false;
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    if (!doc)
+      return;
+    auto& docPref = Preferences::instance().document(doc);
+    docPref.show.slices(m_savedShowSlices);
+    docPref.show.layerEdges(m_savedShowLayerEdges);
+  }
+
   void initPanelSymmetry()
   {
     if (m_symFacesInit)
@@ -4951,13 +5051,36 @@ public:
   EditorStatePtr newPanelState()
   {
     if (depthBrushOn()) {
-      return EditorStatePtr(new EasymetricDepthState(
+      auto* st = new EasymetricDepthState(
         [this](Editor* ed, const gfx::Point& pt, bool down, bool right) {
           paintDepthDab(ed, pt, down, right);
         },
-        [this] { endDepthStroke(); }));
+        [this] { endDepthStroke(); });
+      st->setBeforePress([this](Editor* e) { activatePanelForPress(e); });
+      return EditorStatePtr(st);
     }
-    return EditorStatePtr(new EasymetricWheelZoomState);
+    auto* st = new EasymetricWheelZoomState;
+    st->setBeforePress([this](Editor* e) { activatePanelForPress(e); });
+    return EditorStatePtr(st);
+  }
+
+  // Make the panel under a button press the active one NOW (see
+  // EasymetricWheelZoomState::setBeforePress).
+  void activatePanelForPress(Editor* ed)
+  {
+    if (!ed || m_docView->editor() == ed || m_depthStrokeActive)
+      return;
+    int face = -1;
+    for (int f = 0; f < kFaceCount; ++f)
+      if (m_editors[f] == ed)
+        face = f;
+    if (face < 0)
+      return;
+    m_docView->setActivePaneEditor(ed);
+    if (UIContext* ctx = UIContext::instance())
+      ctx->setActiveView(m_docView);
+    // Applies this face's mask and symmetry (the same code the poll runs).
+    pollAndRender(false);
   }
 
   bool depthBrushOn() const { return m_depthTool != DepthTool::None; }
@@ -6719,11 +6842,25 @@ private:
 
     if (!force && h == m_lastHash)
       return;
+    // Stroke throttle (2026-11-09, "lag while brushing"): while a stroke is in
+    // progress the 3D preview is re-rendered at most every
+    // max(120 ms, 3 x the last render's duration). The depth maps rebuild the
+    // whole sculpted volume (cost grows with the cube of the face size), and
+    // doing that on every 33 ms tick starved the mouse events (measured: a 256px
+    // depth stroke took 4x longer than the same stroke with a normal brush). The
+    // hash stays unchanged here, so the preview catches up the moment the
+    // throttle opens or the stroke ends (endDepthStroke / mouse up).
+    const double nowMs = double(base::current_tick());
+    if (!force && (m_depthStrokeActive || anyPanelEditorBusy()) &&
+        nowMs - m_lastRenderMs < std::max(120.0, 3.0 * m_lastRenderDurMs))
+      return;
     m_lastHash = h;
 
     render3DModel(data, yawDeg, pitchDeg, pivX, pivY, pivZ,
                   renderStyle, addOutline, allowCutouts,
                   showDiff, showNorm, showDept, &effGrids);
+    m_lastRenderMs = double(base::current_tick());
+    m_lastRenderDurMs = m_lastRenderMs - nowMs;
 
     if (m_liveBakeCheck->isSelected() && doc && doc->sprite())
       bakeToActiveDocLayers();
@@ -7697,6 +7834,9 @@ private:
   // Set once the studio's exit restores have run (prepareForExit /
   // restoreStateOnExit), so the destructor does not repeat them.
   bool m_exited = false;
+  bool m_overlaysSaved = false;
+  bool m_savedShowSlices = true;
+  bool m_savedShowLayerEdges = false;
   int m_dockedColWpx[3] = { 0, 0, 0 };
   int m_hoverSplitter = 0;
   int m_dragSplitter = 0;
@@ -7727,6 +7867,8 @@ private:
 
   ui::Timer m_timer;
   uint64_t m_lastHash = 0;
+  double m_lastRenderMs = 0;
+  double m_lastRenderDurMs = 0;
   uint64_t m_lastBaseSilhouetteHash = 0;
   doc::ImageRef m_lastDiffImg;
   doc::ImageRef m_lastNormImg;

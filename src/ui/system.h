@@ -61,6 +61,9 @@ void _internal_no_mouse_position();
 
 // Returns desktop/screen mouse position (relative to no-display)
 gfx::Point get_mouse_position();
+// Test mode: report this screen position instead of the real OS mouse
+// (see Manager::setIgnoreNativeInput). Pass nullptr to go back to the real one.
+void set_mouse_position_override(const gfx::Point* screenPos);
 
 // Sets the mouse position relative to a specific display (or
 // relative to the desktop if it's nullptr)

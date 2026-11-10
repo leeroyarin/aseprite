@@ -35,6 +35,9 @@ class Manager : public Widget,
                 public os::DragTarget {
 public:
   static Manager* getDefault() { return m_defaultManager; }
+
+  // Test mode only: ignore the OS mouse/keyboard events (see manager.cpp).
+  static void setIgnoreNativeInput(bool state) { s_ignoreNativeInput = state; }
   static bool widgetAssociatedToManager(Widget* widget);
 
   Manager(const os::WindowRef& nativeWindow);
@@ -232,6 +235,7 @@ private:
 
   // Last pressed mouse button.
   MouseButton m_mouseButton;
+  static bool s_ignoreNativeInput;
 
   // Widget over which the drag is being hovered in a drag & drop operation.
   Widget* m_dragOverWidget = nullptr;

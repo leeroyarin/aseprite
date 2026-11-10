@@ -447,6 +447,11 @@ private:
   {
     m_watchdog.tick();
     const double now = base::current_tick();
+    // UI stall metric: the longest gap between two timer ticks while a
+    // command runs (the timer fires every 15 ms when the UI thread is free).
+    if (m_lastTickAt > 0)
+      m_maxGapMs = std::max(m_maxGapMs, now - m_lastTickAt);
+    m_lastTickAt = now;
     // Run due steps of the current command.
     if (m_busy) {
       while (!m_steps.empty() && now >= m_nextAt) {
@@ -498,6 +503,7 @@ private:
     m_id = cmd["id"];
     log("begin id=" + std::to_string(cmd["id"].int_value()) + " op=" + cmd["op"].string_value());
     m_result = Json::object();
+    m_maxGapMs = 0;
     m_error.clear();
     m_steps.clear();
     m_busy = true;
@@ -521,6 +527,7 @@ private:
   {
     Json::object o = m_result.object_items();
     o["id"] = m_id;
+    o["uiMaxGapMs"] = m_maxGapMs;
     o["ok"] = m_error.empty();
     // Cursor as it is right after the injected input (the app re-evaluates
     // it on every real mouse event, so read it with the move, not later).
@@ -809,6 +816,8 @@ private:
   HangWatchdog m_watchdog;
   bool m_busy = false;
   int m_badReads = 0;
+  double m_lastTickAt = 0;
+  double m_maxGapMs = 0;
   double m_nextAt = 0;
   std::deque<Step> m_steps;
   Json m_id;
@@ -827,6 +836,11 @@ void start_ui_test_server_if_requested()
   if (!dir || !*dir)
     return;
   server = std::make_unique<UiTestServer>(dir);
+  // A test must not be disturbed by the person's own mouse over the window.
+  // ASEPRITE_UITEST_REAL_INPUT=1 keeps the real input (to watch a test live).
+  const char* real = std::getenv("ASEPRITE_UITEST_REAL_INPUT");
+  if (!(real && *real == '1'))
+    ui::Manager::setIgnoreNativeInput(true);
 }
 
 } // namespace app
