@@ -29,3 +29,7 @@ inbox_*.jsonl
 
 tools/agent-mesh/.*token*
 build-test
+
+# Python bytecode
+__pycache__/
+*.pyc
