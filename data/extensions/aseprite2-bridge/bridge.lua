@@ -1959,8 +1959,10 @@ end
 
 function init(plugin)
   log_debug("init(plugin) called")
-  -- Auto-start connection to MCP server
-  connect_bridge()
+  -- Auto-start connection to MCP server (GUI mode only; batch -b runs have no UI timer loop)
+  if app.isUIAvailable then
+    connect_bridge()
+  end
 
   -- Menu entry under File > Export > Export Preview Sheet (1x + 4x)...
   plugin:newCommand{
