@@ -132,6 +132,66 @@ describe("Flip face (FH / FV)", function()
   end)
 end)
 
+describe("Ghost hints (missing content on perpendicular surfaces)", function()
+  local function has(list, v) for _, x in ipairs(list) do if x == v then return true end end return false end
+  local function ghostOf(spr, face) return stateOf(spr).faces[face].ghost end
+  local function paintBase(spr, x0, y0, x1, y1)
+    local img = layer(spr, "Surface_Base"):cel(1).image
+    for y = y0, y1 do for x = x0, x1 do img:drawPixel(x, y, Color{ r = 255, g = 255, b = 255 }) end end
+  end
+  local function fresh()
+    local spr = Sprite(72, 60)
+    app.activeSprite = spr
+    app.command.EasymetricStudio{ action = "setupSurfaces" }
+    return spr
+  end
+
+  it("G1: an empty object has no ghosts", function()
+    local spr = fresh()
+    for _, f in ipairs({ "TOP", "DOWN", "FRONT", "BACK", "RIGHT", "LEFT" }) do
+      assert_eq(#ghostOf(spr, f).cols + #ghostOf(spr, f).rows, 0, f .. " has no ghost")
+    end
+    spr:close()
+  end)
+
+  it("G2: a rectangle on Front asks Top/Down for its columns and Right/Left for its rows", function()
+    local spr = fresh()
+    paintBase(spr, 24 + 5, 10, 24 + 9, 14)               -- Front u 5..9, v 10..14
+    local top = ghostOf(spr, "TOP")
+    for c = 5, 9 do assert_true(has(top.cols, c), "Top column " .. c .. " missing") end
+    assert_true(not has(top.cols, 4) and not has(top.cols, 10), "Top bands are exactly the rectangle's width")
+    assert_true(has(ghostOf(spr, "DOWN").cols, 7), "Down column 7 missing")
+    for r = 10, 14 do
+      assert_true(has(ghostOf(spr, "RIGHT").rows, r), "Right row " .. r .. " missing")
+      assert_true(has(ghostOf(spr, "LEFT").rows, r), "Left row " .. r .. " missing")
+    end
+    assert_eq(#ghostOf(spr, "FRONT").cols + #ghostOf(spr, "FRONT").rows, 0, "the source surface has no ghost")
+    assert_eq(#ghostOf(spr, "BACK").cols + #ghostOf(spr, "BACK").rows, 0, "the opposite surface is not compared")
+    spr:close()
+  end)
+
+  it("G3: drawing the matching shape on Top removes the Top ghost", function()
+    local spr = fresh()
+    paintBase(spr, 24 + 5, 10, 24 + 9, 14)
+    paintBase(spr, 5, 0, 9, 29)                           -- Top: columns 5..9, all depth
+    assert_eq(#ghostOf(spr, "TOP").cols, 0, "Top columns are now covered")
+    spr:close()
+  end)
+
+  it("G4: mirrored surfaces map correctly (Back flips X, Right flips Z)", function()
+    local spr = fresh()
+    paintBase(spr, 24 + 2, 30 + 3, 24 + 2, 30 + 3)        -- Back (u 2, v 3) -> X index 21, Y row 3
+    assert_true(has(ghostOf(spr, "TOP").cols, 21), "Back u=2 -> Top column 21")
+    assert_true(has(ghostOf(spr, "LEFT").rows, 3), "Back v=3 -> Left row 3")
+    local spr2 = fresh()
+    paintBase(spr2, 48 + 2, 5, 48 + 2, 5)                 -- Right (u 2, v 5) -> Z flipped, Y row 5
+    assert_true(has(ghostOf(spr2, "TOP").rows, 26), "Right u=2 -> Top row 26")
+    assert_true(has(ghostOf(spr2, "DOWN").rows, 3), "Right u=2 -> Down row 3 (Down flips Z)")
+    assert_true(has(ghostOf(spr2, "FRONT").rows, 5), "Right v=5 -> Front row 5")
+    spr:close(); spr2:close()
+  end)
+end)
+
 print("\n======================================================")
 print("     STUDIO TOOLS TEST SUITE EXECUTION SUMMARY      ")
 print("======================================================")

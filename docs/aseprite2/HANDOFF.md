@@ -1,3 +1,9 @@
+## 2026-11-10 (later) — Ghost hints (cross-surface consistency), Fields size row removed (Claude Sonnet 5.5)
+
+- **Ghost hints** (William: "when I draw a rectangle there should be a similar shape on the perpendicular surfaces; where missing show a faint marker; toggle it like onion skin"). `computeGhost` (cmd_easymetric.cpp): the six surfaces are the orthographic projections of one object, so a pixel on Front at (x, y) demands content in column x of Top/Down and row y of Right/Left (and likewise for every pair; mirrored axes follow `buildSculptedVolume`: Back flips X, Down flips Z, Right flips Z). Opposite surfaces are not compared. A demanded column/row with NO content is "missing" and is drawn as a low-opacity band in the demanding surface's colour on that panel (post-render decorator, never document pixels). Toggle: icon button "Ghost" in the Preview header + "Ghost hints" checkbox in Fields; default ON. State: `studio.ghostOn`, per face `ghost{cols,rows}` (headless too). Tests: G1-G4 in `tests/easymetric_studio_tools_test.lua`, `tests/ui/ghost_test.py`.
+- **Removed** the Fields row "Size: <face combo> + 2 sliders + Apply Size" (per-face XY / YZ resizing). Resizing is only the three-dimension "Object W/H/D" row now.
+- Icon art `easymetric_ghost` requested from Antigravity (code placeholder until then).
+
 ## 2026-11-10 — Testing infra, depth tools in the toolbar, icon buttons, flip fix, lag + first-click fixes (Claude Sonnet 5.5, with Antigravity for icon art)
 
 William's brief (2026-11-09): make testing possible without looking at pixels; depth brush/fill tools like normal tools in the toolbar; icons instead of text on the panel buttons; proper flip H/V; smooth brushing and layer/tool switching; hide the bounding boxes in the studio; fix the quality issues. All done, verified by `python tests/run_all.py` (171 headless Lua checks + 36 UI checks, no screenshots).

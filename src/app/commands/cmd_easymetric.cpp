@@ -1251,6 +1251,174 @@ static json11::Json rectStatsJson(const RectStats& st)
                                { "hash", hex64(st.hash) } };
 }
 
+// ---------------------------------------------------------------------------
+// Ghost hints (2026-11-10, William): "when I draw a rectangle on one surface
+// there should be a similar shape on the perpendicular surfaces; where it is
+// missing show a faint marker, toggleable like onion skin".
+//
+// The six surfaces are the six orthographic projections of ONE object, so they
+// constrain each other: a pixel of Front at (x, y) says the object occupies
+// column x of Top/Down (some depth z) and row y of Right/Left (some z). If that
+// column/row of the other surface has NO content at all, the object cannot be
+// built there: that is a flaw in the 3D object, and this reports it.
+// Opposite surfaces (Top/Down, Front/Back, Right/Left) are NOT compared: they
+// may legitimately differ (concave shapes).
+//
+// World axes per surface (fractions of the object size, 0..1) — identical to the
+// mirroring buildSculptedVolume uses:
+//   Top:   X = u        Z = v          Down:  X = u        Z = 1 - v
+//   Front: X = u        Y = v          Back:  X = 1 - u    Y = v
+//   Right: Z = 1 - u    Y = v          Left:  Z = u        Y = v
+// ---------------------------------------------------------------------------
+struct GhostAxis {
+  int axis;      // 0 = X, 1 = Y, 2 = Z
+  int coord;     // 0 = along u, 1 = along v
+  bool flip;
+};
+
+static int ghostAxesOfFace(int face, GhostAxis out[2])
+{
+  switch (face) {
+    case kFaceTop:   out[0] = { 0, 0, false }; out[1] = { 2, 1, false }; return 2;
+    case kFaceDown:  out[0] = { 0, 0, false }; out[1] = { 2, 1, true };  return 2;
+    case kFaceFront: out[0] = { 0, 0, false }; out[1] = { 1, 1, false }; return 2;
+    case kFaceBack:  out[0] = { 0, 0, true };  out[1] = { 1, 1, false }; return 2;
+    case kFaceRight: out[0] = { 2, 0, true };  out[1] = { 1, 1, false }; return 2;
+    case kFaceLeft:  out[0] = { 2, 0, false }; out[1] = { 1, 1, false }; return 2;
+  }
+  return 0;
+}
+
+static int ghostOppositeFace(int face)
+{
+  switch (face) {
+    case kFaceTop:   return kFaceDown;
+    case kFaceDown:  return kFaceTop;
+    case kFaceFront: return kFaceBack;
+    case kFaceBack:  return kFaceFront;
+    case kFaceRight: return kFaceLeft;
+    default:         return kFaceRight;
+  }
+}
+
+struct GhostData {
+  // [dst][src] -> 1 where dst's column / row is demanded by src but empty.
+  std::vector<uint8_t> col[kFaceCount][kFaceCount];
+  std::vector<uint8_t> row[kFaceCount][kFaceCount];
+  int w[kFaceCount] = {};
+  int h[kFaceCount] = {};
+  bool any = false;
+
+  bool colMissing(int dst, int c) const
+  {
+    for (int s = 0; s < kFaceCount; ++s)
+      if (c >= 0 && c < int(col[dst][s].size()) && col[dst][s][size_t(c)])
+        return true;
+    return false;
+  }
+  bool rowMissing(int dst, int r) const
+  {
+    for (int s = 0; s < kFaceCount; ++s)
+      if (r >= 0 && r < int(row[dst][s].size()) && row[dst][s][size_t(r)])
+        return true;
+    return false;
+  }
+};
+
+// Content = alpha > 16 on the Base sheet (the silhouette the preview carves
+// from), else the Texture sheet when there is no Base.
+static GhostData computeGhost(Doc* doc, doc::frame_t fr)
+{
+  GhostData g;
+  doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+  if (!spr)
+    return g;
+  SharedSurfaceLayers shared = findSharedLayers(spr);
+  doc::LayerImage* lyr = shared.baseLayer ? shared.baseLayer : shared.textureLayer;
+  doc::Cel* cel = lyr ? lyr->cel(fr) : nullptr;
+  if (!cel || !cel->image())
+    return g;
+  const doc::Image* img = cel->image();
+
+  std::vector<uint8_t> occ[kFaceCount];
+  std::vector<uint8_t> colHas[kFaceCount], rowHas[kFaceCount];
+  for (int f = 0; f < kFaceCount; ++f) {
+    const gfx::Rect rc = sharedFaceRect(spr, f);
+    g.w[f] = rc.w;
+    g.h[f] = rc.h;
+    occ[f].assign(size_t(std::max(0, rc.w)) * size_t(std::max(0, rc.h)), 0);
+    colHas[f].assign(size_t(std::max(0, rc.w)), 0);
+    rowHas[f].assign(size_t(std::max(0, rc.h)), 0);
+    for (int v = 0; v < rc.h; ++v) {
+      for (int u = 0; u < rc.w; ++u) {
+        const int ix = rc.x + u - cel->x();
+        const int iy = rc.y + v - cel->y();
+        if (ix < 0 || iy < 0 || ix >= img->width() || iy >= img->height())
+          continue;
+        if (doc::rgba_geta(img->getPixel(ix, iy)) > 16) {
+          occ[f][size_t(v) * size_t(rc.w) + size_t(u)] = 1;
+          colHas[f][size_t(u)] = 1;
+          rowHas[f][size_t(v)] = 1;
+        }
+      }
+    }
+  }
+
+  for (int d = 0; d < kFaceCount; ++d)
+    for (int s = 0; s < kFaceCount; ++s) {
+      g.col[d][s].assign(size_t(std::max(0, g.w[d])), 0);
+      g.row[d][s].assign(size_t(std::max(0, g.h[d])), 0);
+    }
+
+  for (int s = 0; s < kFaceCount; ++s) {
+    if (g.w[s] <= 0 || g.h[s] <= 0)
+      continue;
+    GhostAxis sAxes[2];
+    ghostAxesOfFace(s, sAxes);
+    for (int v = 0; v < g.h[s]; ++v) {
+      for (int u = 0; u < g.w[s]; ++u) {
+        if (!occ[s][size_t(v) * size_t(g.w[s]) + size_t(u)])
+          continue;
+        const double fu = (u + 0.5) / g.w[s];
+        const double fv = (v + 0.5) / g.h[s];
+        for (int k = 0; k < 2; ++k) {
+          const GhostAxis& sa = sAxes[k];
+          double a = (sa.coord == 0) ? fu : fv;
+          if (sa.flip)
+            a = 1.0 - a;
+          for (int d = 0; d < kFaceCount; ++d) {
+            if (d == s || d == ghostOppositeFace(s) || g.w[d] <= 0 || g.h[d] <= 0)
+              continue;
+            GhostAxis dAxes[2];
+            ghostAxesOfFace(d, dAxes);
+            for (int m = 0; m < 2; ++m) {
+              const GhostAxis& da = dAxes[m];
+              if (da.axis != sa.axis)
+                continue;
+              const double pos = da.flip ? 1.0 - a : a;
+              if (da.coord == 0) {
+                const int idx = std::clamp(int(pos * g.w[d]), 0, g.w[d] - 1);
+                if (!colHas[d][size_t(idx)]) {
+                  g.col[d][s][size_t(idx)] = 1;
+                  g.any = true;
+                }
+              }
+              else {
+                const int idx = std::clamp(int(pos * g.h[d]), 0, g.h[d] - 1);
+                if (!rowHas[d][size_t(idx)]) {
+                  g.row[d][s][size_t(idx)] = 1;
+                  g.any = true;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return g;
+}
+
 // Document-level state: works headless (no UI needed).
 static json11::Json::object docStateObject(Doc* doc, doc::Layer* activeLayer, doc::frame_t fr)
 {
@@ -1287,6 +1455,7 @@ static json11::Json::object docStateObject(Doc* doc, doc::Layer* activeLayer, do
 
   SharedSurfaceLayers shared = findSharedLayers(spr);
   json11::Json::object faces;
+  const GhostData ghost = computeGhost(doc, fr);
   const struct { const char* key; doc::LayerImage* lyr; } sheets[3] = {
     { "base", shared.baseLayer }, { "texture", shared.textureLayer }, { "depth", shared.depthLayer }
   };
@@ -1297,6 +1466,16 @@ static json11::Json::object docStateObject(Doc* doc, doc::Layer* activeLayer, do
     for (const auto& sh : sheets) {
       if (sh.lyr && sh.lyr->cel(fr))
         fo[sh.key] = rectStatsJson(rectStatsOfCel(sh.lyr->cel(fr), rc));
+    }
+    {
+      json11::Json::array gc, gr;
+      for (int c = 0; c < ghost.w[f]; ++c)
+        if (ghost.colMissing(f, c))
+          gc.push_back(c);
+      for (int r = 0; r < ghost.h[f]; ++r)
+        if (ghost.rowMissing(f, r))
+          gr.push_back(r);
+      fo["ghost"] = json11::Json::object{ { "cols", gc }, { "rows", gr } };
     }
     faces[kFaceSpecs[f].sliceName] = fo;
   }
@@ -2077,7 +2256,7 @@ public:
   // a built-in pixel placeholder of the same meaning (see drawFallbackIcon).
   // The label text is kept for the accessible name / UI tests, and the
   // tooltip is shown in the status bar on hover.
-  enum class Icon { None, FlipH, FlipV, Grid, Link, SymX, SymY };
+  enum class Icon { None, FlipH, FlipV, Grid, Link, SymX, SymY, Ghost };
 
   void setIcon(Icon icon, const std::string& partId)
   {
@@ -2129,8 +2308,12 @@ protected:
     static const std::vector<std::string> symX = {
       ".....#.....", ".#...#...#.", "##.......##", "#####.#####",
       "##.......##", ".#...#...#.", ".....#....." };
+    static const std::vector<std::string> ghost = {
+      "#.#.#.#.#", "#.......#", "#.......#", "#...#...#", "#..###..#",
+      "#...#...#", "#.......#", "#.......#", "#.#.#.#.#" };
     (void)flipV;
     switch (icon) {
+      case Icon::Ghost: return ghost;
       case Icon::FlipH: return flipH;
       case Icon::Grid: return grid;
       case Icon::Link: return link;
@@ -4310,6 +4493,13 @@ public:
       else popOutPreview();
     });
     m_headers[kFaceCount]->addActionButton(m_previewPopoutHeaderBtn);
+    m_ghostHeaderBtn = new PaneActionButton("Ghost", true);
+    m_ghostHeaderBtn->setIcon(PaneActionButton::Icon::Ghost, "easymetric_ghost");
+    m_ghostHeaderBtn->setTooltipText("Ghost hints: faint bands where another surface is missing "
+                                     "content for a shape you drew (like onion skin)");
+    m_ghostHeaderBtn->setOn(m_ghostOn);
+    m_ghostHeaderBtn->Click.connect([this] { setGhostOn(!m_ghostOn); });
+    m_headers[kFaceCount]->addActionButton(m_ghostHeaderBtn);
 
     m_panes[kFaceCount] = new ui::VBox;
     m_panes[kFaceCount]->addChild(m_headers[kFaceCount]);
@@ -4497,6 +4687,9 @@ public:
                      : m_depthTool == DepthTool::Fill ? "fill" : "none";
     s["depthStrokeActive"] = m_depthStrokeActive;
     s["previewFloating"] = m_previewFloating;
+    s["ghostOn"] = m_ghostOn;
+    if (m_fieldsView)
+      s["fieldsViewport"] = rectJson(m_fieldsView->viewportBounds());
     s["activeFace"] = m_lastActiveFace;
     s["columnsPx"] = json11::Json::array{ m_colWpx[0], m_colWpx[1], m_colWpx[2] };
     s["rowsPx"] = json11::Json::array{ m_rowHpx[0], m_rowHpx[1], m_rowHpx[2], m_rowHpx[3] };
@@ -6021,51 +6214,25 @@ private:
     symRow->addChild(m_cutoutCheck);
     symRow->addChild(m_lockBordersCheck);
     symRow->addChild(m_linkDimensionsCheck);
+    m_ghostCheck = new ui::CheckBox("Ghost hints");
+    m_ghostCheck->setSelected(m_ghostOn);
+    m_ghostCheck->Click.connect([this] { setGhostOn(m_ghostCheck->isSelected()); });
     symRow->addChild(m_symXCheck);
     symRow->addChild(m_symYCheck);
     symRow->addChild(centerSymBtn);
     m_fieldsBox->addChild(symRow);
 
-    // Row 5b: Linked Dimension Controls
-    auto* dimRow = new ui::HBox;
-    dimRow->setChildSpacing(4 * s);
-    auto* faceDimCombo = new ui::ComboBox;
-    faceDimCombo->addItem("Top (X/Z)");
-    faceDimCombo->addItem("Bottom (X/Z)");
-    faceDimCombo->addItem("Front (X/Y)");
-    faceDimCombo->addItem("Back (X/Y)");
-    faceDimCombo->addItem("Right (Z/Y)");
-    faceDimCombo->addItem("Left (Z/Y)");
-    faceDimCombo->setSelectedItemIndex(0);
+    // Ghost hints get their own short row: the sym row is already wider than
+    // the Fields pane.
+    auto* ghostRow = new ui::HBox;
+    ghostRow->setChildSpacing(4 * s);
+    ghostRow->addChild(m_ghostCheck);
+    ghostRow->addChild(new ui::Label("(faint bands where another surface lacks content)"));
+    m_fieldsBox->addChild(ghostRow);
 
-    auto* dimWSlider = new ui::Slider(4, 128, 24);
-    auto* dimHSlider = new ui::Slider(4, 128, 24);
-    dimWSlider->setExpansive(true);
-    dimHSlider->setExpansive(true);
-    auto* applyDimBtn = new ui::Button("Apply Size");
-
-    dimRow->addChild(new ui::Label("Size:"));
-    dimRow->addChild(faceDimCombo);
-    dimRow->addChild(dimWSlider);
-    dimRow->addChild(dimHSlider);
-    dimRow->addChild(applyDimBtn);
-    m_fieldsBox->addChild(dimRow);
-
-    applyDimBtn->Click.connect([this, faceDimCombo, dimWSlider, dimHSlider] {
-      Doc* doc = m_docView->document();
-      if (!doc || !doc->sprite()) return;
-      int selFace = faceDimCombo->getSelectedItemIndex();
-      int nw = dimWSlider->getValue();
-      int nh = dimHSlider->getValue();
-      SixSurfaceData data;
-      extractSixSurfaces(doc, 0, data);
-      propagateLinkedDimensions(doc, data, selFace, nw, nh);
-      initLayersAndFraming();
-      m_lastHash = 0;
-      pollAndRender(true);
-      if (auto* sb = StatusBar::instance())
-        sb->showTip(1200, "Propagated linked dimensions across surfaces");
-    });
+    // (Row 5b, the per-face "Size:" combo with Top/Front/Right/... XY/YZ resizing,
+    // was removed 2026-11-10 at William's request: the object is resized only
+    // through the three-dimension Object W/H/D controls below.)
 
     // Row 5c: Object Size (Width/Height/Depth) — one set of
     // three dimensions for the whole object, applied to ALL
@@ -6842,6 +7009,16 @@ private:
 
     if (!force && h == m_lastHash)
       return;
+    if (m_ghostOn) {
+      const GhostData before = m_ghost;
+      recomputeGhost();
+      bool changed = (before.any != m_ghost.any);
+      for (int d = 0; d < kFaceCount && !changed; ++d)
+        for (int s = 0; s < kFaceCount && !changed; ++s)
+          changed = (before.col[d][s] != m_ghost.col[d][s] || before.row[d][s] != m_ghost.row[d][s]);
+      if (changed)
+        invalidateAllPanels();
+    }
     // Stroke throttle (2026-11-09, "lag while brushing"): while a stroke is in
     // progress the 3D preview is re-rendered at most every
     // max(120 ms, 3 x the last render's duration). The depth maps rebuild the
@@ -6868,6 +7045,69 @@ private:
 
 public:
   bool isPreviewFloating() const { return m_previewFloating; }
+
+  // ---- Ghost hints (see computeGhost) ----
+  bool ghostOn() const { return m_ghostOn; }
+
+  void setGhostOn(bool on)
+  {
+    m_ghostOn = on;
+    if (m_ghostHeaderBtn)
+      m_ghostHeaderBtn->setOn(on);
+    if (m_ghostCheck)
+      m_ghostCheck->setSelected(on);
+    if (on)
+      recomputeGhost();
+    invalidateAllPanels();
+    if (auto* sb = StatusBar::instance())
+      sb->showTip(2500, on ? "Ghost hints ON: faint bands mark where another surface still "
+                             "has no content for a shape you drew."
+                           : "Ghost hints OFF");
+  }
+
+  void recomputeGhost()
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    m_ghost = computeGhost(doc, m_editors[0] ? m_editors[0]->frame() : doc::frame_t(0));
+  }
+
+  void invalidateAllPanels()
+  {
+    for (int f = 0; f < kFaceCount; ++f)
+      if (m_editors[f])
+        m_editors[f]->invalidate();
+  }
+
+  // Draws this panel's missing-content bands (called from the grid decorator's
+  // post-render). One low-opacity band per demanding surface, in that
+  // surface's colour, so it is clear WHICH surface asks for the content.
+  void drawGhostBands(EditorPostRender* render, int dst) const
+  {
+    if (!m_ghostOn || !m_ghost.any || dst < 0 || dst >= kFaceCount)
+      return;
+    const gfx::Rect rc = gridFaceRect(dst);
+    if (rc.isEmpty())
+      return;
+    for (int s = 0; s < kFaceCount; ++s) {
+      const gfx::Color col = gfx::rgba(kFaceSpecs[s].r, kFaceSpecs[s].g, kFaceSpecs[s].b, 56);
+      const auto& cols = m_ghost.col[dst][s];
+      for (int c = 0; c < int(cols.size());) {
+        if (!cols[size_t(c)]) { ++c; continue; }
+        int e = c;
+        while (e < int(cols.size()) && cols[size_t(e)]) ++e;
+        render->fillRect(col, gfx::Rect(rc.x + c, rc.y, e - c, rc.h));
+        c = e;
+      }
+      const auto& rows = m_ghost.row[dst][s];
+      for (int r = 0; r < int(rows.size());) {
+        if (!rows[size_t(r)]) { ++r; continue; }
+        int e = r;
+        while (e < int(rows.size()) && rows[size_t(e)]) ++e;
+        render->fillRect(col, gfx::Rect(rc.x, rc.y + r, rc.w, e - r));
+        r = e;
+      }
+    }
+  }
 
   // Per-panel grid (G2): the effective settings for a face —
   // the live draft while its pop-up is open, else the committed
@@ -7834,6 +8074,10 @@ private:
   // Set once the studio's exit restores have run (prepareForExit /
   // restoreStateOnExit), so the destructor does not repeat them.
   bool m_exited = false;
+  bool m_ghostOn = true;
+  GhostData m_ghost;
+  PaneActionButton* m_ghostHeaderBtn = nullptr;
+  ui::CheckBox* m_ghostCheck = nullptr;
   bool m_overlaysSaved = false;
   bool m_savedShowSlices = true;
   bool m_savedShowLayerEdges = false;
@@ -7884,6 +8128,7 @@ void EasymetricWheelZoomState::EasymetricGridDecorator::postRenderDecorator(
   Editor* editor = render->getEditor();
   if (!editor || !m_view || m_face < 0 || m_face >= kFaceCount)
     return;
+  m_view->drawGhostBands(render, m_face);
   const PanelGridSettings grid = m_view->gridForFace(m_face);
   if (!grid.on)
     return;
