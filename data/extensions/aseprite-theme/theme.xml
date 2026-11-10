@@ -462,6 +462,10 @@
         <part id="tool_depth_fill" x="208" y="48" w="16" h="16"/>
         <part id="easymetric_flip_h" x="176" y="64" w="11" h="9"/>
         <part id="easymetric_flip_v" x="192" y="64" w="9" h="11"/>
+        <part id="easymetric_grid" x="208" y="64" w="9" h="9"/>
+        <part id="easymetric_link" x="224" y="64" w="12" h="6"/>
+        <part id="easymetric_sym_x" x="208" y="80" w="11" h="9"/>
+        <part id="easymetric_sym_y" x="224" y="80" w="9" h="11"/>
     </parts>
     <styles>
         <style id="box"/>
