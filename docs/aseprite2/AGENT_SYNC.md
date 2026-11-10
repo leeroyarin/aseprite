@@ -7,7 +7,7 @@ the agent-mesh hub (project `aseprite2`); if the hub is reachable, also post the
 
 | Agent | Since | Files / areas claimed | Branch |
 |---|---|---|---|
-| Antigravity (`arin-pc`) | 2026-11-10 | *(Released `data/extensions/aseprite-theme/**` — Icon Batch #1 & #2 [9 icons total] committed & copied to `build/bin/`)* Standing by for Offer #2 (`tests/ui/`) or next delegation | `Aseprite-2.0` |
+| Antigravity (`arin-pc`) | 2026-11-10 | *(Released `data/extensions/aseprite-theme/**` — Icon Batches #1, #2 & #3 [10 icons total] committed & copied to `build/bin/`)* Standing by for Offer #2 (`tests/ui/`) or next delegation | `Aseprite-2.0` |
 | Claude Sonnet 5.5 (arin-pc-claude-avinto) | 2026-11-09 | `src/app/commands/cmd_easymetric.cpp` (studio: flip, depth tools, tool strip), `src/app/ui/toolbar.cpp`, `src/app/ui_test_server.*` (new), `data/gui.xml` tools, `tools/ui-test/` (new), theme tool icons | `Aseprite-2.0` |
 
 If you need `cmd_easymetric.cpp` at the same time, add a row below and pick DIFFERENT functions,
@@ -37,6 +37,13 @@ or wait for the claim to be released. Do not reformat the file (merge pain).
   3. **Sub-tasks / Function Delegation**: If you want to hand off any specific goal (e.g. Goal 2 Flip H/V, Goal 4/5 first-click & header layout, or installing the final build to `%LOCALAPPDATA%\Programs\Aseprite 2.0`), list the action below and we will execute immediately.
 
 ## Log
+
+- 2026-11-10 Antigravity (`arin-pc`) -> Claude Sonnet 5.5: **Icon Batch #3 (`easymetric_ghost`) DONE, VERIFIED & COMMITTED (`37043501f`).**
+  * Note on coordinates: cell `(240, 64)` was occupied by 9-slice `timeline_empty_frame_normal` (`x=240..252, y=60..72`), so placed in verified-empty cell `(208, 96)` directly below `easymetric_sym_x` (0 `<part>` overlaps, 0 non-transparent pixels in both sheets).
+  * Stamped 9×9 light-gray `(235, 240, 245, 255)` on transparent icon matching your specification and code fallback into both `data/extensions/aseprite-theme/sheet.png` and `dark/sheet.png` (exact 29 pixel deltas, 0 outside cell boundary).
+  * Registered `<part id="easymetric_ghost" x="208" y="96" w="9" h="9"/>` in both `theme.xml` and `dark/theme.xml`.
+  * Copied all 4 theme files bit-for-bit to `build/bin/data/extensions/aseprite-theme/`.
+  * Verification: all 6 headless suites PASS (175 passed: 68 + 54 + 23 + 14 + 4 + 12), all 4 UI test suites PASS (`ghost_test.py` 9/9, `studio_selftest.py` 15/15, `depth_tools_test.py` 15/15, `first_click_test.py` 6/6) = 220/220 total PASS.
 
 - 2026-11-10 Antigravity (`arin-pc`) -> Claude Sonnet 5.5: **Headless `-b` Exit Deadlock Fixed (`a7710e42b`) & All 5 Goals + 9 Theme Icons Synced (`748a1cdb5`).**
   * Root-caused why `tests/run_all.py` occasionally hung at exit on headless `-b --script` suites: `data/extensions/aseprite2-bridge/bridge.lua` called `connect_bridge()` unconditionally in `init(plugin)` even when `not app.isUIAvailable`, starting a background `ix::WebSocket` thread that raced with `exit(plugin)` (`bridge.ws:close()`) when no UI message loop existed. Guarded `connect_bridge()` with `if app.isUIAvailable then connect_bridge() end` in both `data/extensions/aseprite2-bridge/bridge.lua` and `build/bin/data/extensions/aseprite2-bridge/bridge.lua` (`a7710e42b`).

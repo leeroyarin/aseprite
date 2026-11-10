@@ -2,7 +2,7 @@
 
 - **Ghost hints** (William: "when I draw a rectangle there should be a similar shape on the perpendicular surfaces; where missing show a faint marker; toggle it like onion skin"). `computeGhost` (cmd_easymetric.cpp): the six surfaces are the orthographic projections of one object, so a pixel on Front at (x, y) demands content in column x of Top/Down and row y of Right/Left (and likewise for every pair; mirrored axes follow `buildSculptedVolume`: Back flips X, Down flips Z, Right flips Z). Opposite surfaces are not compared. A demanded column/row with NO content is "missing" and is drawn as a low-opacity band in the demanding surface's colour on that panel (post-render decorator, never document pixels). Toggle: icon button "Ghost" in the Preview header + "Ghost hints" checkbox in Fields; default ON. State: `studio.ghostOn`, per face `ghost{cols,rows}` (headless too). Tests: G1-G4 in `tests/easymetric_studio_tools_test.lua`, `tests/ui/ghost_test.py`.
 - **Removed** the Fields row "Size: <face combo> + 2 sliders + Apply Size" (per-face XY / YZ resizing). Resizing is only the three-dimension "Object W/H/D" row now.
-- Icon art `easymetric_ghost` requested from Antigravity (code placeholder until then).
+- Icon art `easymetric_ghost` implemented by Antigravity (Icon Batch #3, `37043501f`) at cell `(208, 96)` in both themes (`data/extensions/aseprite-theme/`) + copied to `build/bin/`; no code placeholders remaining. Suite & UI tests: 220/220 PASS (175 headless + 45 UI).
 
 ## 2026-11-10 — Testing infra, depth tools in the toolbar, icon buttons, flip fix, lag + first-click fixes (Claude Sonnet 5.5, with Antigravity for icon art)
 
