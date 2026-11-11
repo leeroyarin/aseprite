@@ -60,19 +60,26 @@ def cmd_list(args):
         return
 
     print(f"\nTotal tokens: {len(tokens)}\n")
-    fmt = "{:<36} {:<18} {:<24} {:<10} {:<24}"
-    print(fmt.format("TOKEN HASH", "AGENT", "PROJECTS", "STATUS", "CREATED AT"))
-    print("-" * 115)
+    fmt = "{:<36} {:<15} {:<18} {:<10} {:<20} {:<20}"
+    print(fmt.format("TOKEN HASH", "AGENT", "PROJECTS", "STATUS", "CREATED AT", "EXPIRES AT"))
+    print("-" * 125)
     for t in tokens:
-        status_str = "REVOKED" if t.get("revoked_at") else "ACTIVE"
+        if t.get("revoked_at") or t.get("revoked"):
+            status_str = "REVOKED"
+        elif t.get("expires_at") or t.get("expiry"):
+            status_str = "EXPIRING"
+        else:
+            status_str = "ACTIVE"
         projs = ",".join(t.get("projects", []))
         tok_display = t.get("token_hash_prefix") or t.get("token_hash") or t.get("token", "")
+        expiry_val = t.get("expires_at") or t.get("expiry") or "-"
         print(fmt.format(
             tok_display,
-            t.get("agent", "")[:17],
-            projs[:23],
+            t.get("agent", "")[:14],
+            projs[:17],
             status_str,
-            t.get("created_at", "")[:19]
+            (t.get("created_at") or t.get("created") or "")[:19],
+            expiry_val[:19]
         ))
     print()
 
@@ -171,6 +178,34 @@ def cmd_revoke(args):
         print(f"Disconnected {res['disconnected_sessions']} active WebSocket session(s).")
     print()
 
+def cmd_rotate(args):
+    payload = {
+        "agent": args.agent.strip(),
+        "grace_seconds": int(args.grace_seconds),
+    }
+    if args.projects:
+        payload["projects"] = [p.strip() for p in args.projects.split(",") if p.strip()]
+    if args.desc:
+        payload["description"] = args.desc.strip()
+
+    status, res = api_request(args.url, args.admin_token, "/admin/tokens/rotate", method="POST", body=payload)
+    if status != 201:
+        print(f"Error ({status}): {res.get('error', res)}", file=sys.stderr)
+        sys.exit(1)
+
+    print("\n" + "=" * 60)
+    print(" Agent Token Rotated Successfully")
+    print("=" * 60)
+    print(f" Agent:         {res.get('agent')}")
+    print(f" New Token:     {res.get('new_token')}")
+    print(f" Projects:      {', '.join(res.get('projects', []))}")
+    print(f" Grace Period:  {res.get('grace_seconds')} seconds")
+    print(f" Old Expiry:    {res.get('expires_at')}")
+    print("-" * 60)
+    print(" A rotation notice was sent to the agent's primary project.")
+    print(" Save the new token now — it will not be shown again.")
+    print("=" * 60 + "\n")
+
 def main():
     parser = argparse.ArgumentParser(description="Agent Mesh Hub Token Manager")
     parser.add_argument("--url", default=DEFAULT_HUB_URL, help=f"Hub URL (default: {DEFAULT_HUB_URL})")
@@ -195,6 +230,14 @@ def main():
     p_create.add_argument("--token", help="Optional custom token string")
     p_create.add_argument("--desc", help="Optional description")
     p_create.set_defaults(func=cmd_create)
+
+    # rotate
+    p_rotate = sub.add_parser("rotate", help="Rotate agent token with grace period")
+    p_rotate.add_argument("--agent", required=True, help="Agent name to rotate token for")
+    p_rotate.add_argument("--grace-seconds", type=int, default=3600, help="Grace period for old token in seconds (default: 3600)")
+    p_rotate.add_argument("--projects", help="Optional new comma-separated projects")
+    p_rotate.add_argument("--desc", help="Optional description")
+    p_rotate.set_defaults(func=cmd_rotate)
 
     # revoke
     p_revoke = sub.add_parser("revoke", help="Revoke agent token(s)")

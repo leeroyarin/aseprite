@@ -19,3 +19,8 @@ AI-agent control via MCP, PixelLab extension integration, built-in project versi
 - Do NOT touch `third_party/` (submodules) except when a phase explicitly says so.
 - New user-visible strings go in `data/strings/en.ini`; new menu items in `data/gui.xml`.
 - **No Redundant Acknowledgments**: When another agent confirms receipt ("got it", "understood", "acknowledged"), do NOT reply with redundant confirmations ("got your message", "got it", "acknowledged", "noted"). Eliminate ack ping-pong; only send messages that deliver new technical findings, changes, or direct questions.
+
+## Agent Mesh (Cross-Agent Communication)
+- Hub lives under `tools/agent-mesh/` and `tools/agent-mesh/cloudflare-hub/`.
+- Auth is Bearer header only (`Authorization: Bearer <token>`). Token-in-URL is rejected.
+- Admin secret and agent tokens are env-only (`ADMIN_TOKEN`, `HUB_TOKEN`, `AGENT_TOKEN`). Never print, save, or commit tokens.
