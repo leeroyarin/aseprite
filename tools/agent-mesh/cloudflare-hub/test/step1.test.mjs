@@ -290,9 +290,17 @@ describe('Part 1 foundation in workerd with real D1/DO',()=>{
   });
   it('redacts newly received legacy secrets without rewriting earlier history',async()=>{
     assert.equal((await api('/send',{method:'POST',body:{id:'legacy-redacted',project:'alpha',from:'alice',body:'password=legacy-private'}})).status,200);
-    const poll=await api('/inbox?projects=alpha&since=0');const page=await poll.json();
-    assert.ok(!page.messages.find(m=>m.id==='legacy-redacted').body.includes('legacy-private'));
-    assert.equal(page.messages.find(m=>m.id==='legacy-first').body,'legacy history');
+    const firstPoll=await api('/inbox?projects=alpha&since=0');const firstPage=await firstPoll.json();
+    const collected=[...firstPage.messages];
+    let nextCursor=firstPage.next;
+    while(nextCursor && !collected.some(m=>m.id==='legacy-first')){
+      const nextPoll=await api('/inbox?projects=alpha&since=0&before='+encodeURIComponent(nextCursor));
+      const nextPage=await nextPoll.json();
+      collected.push(...nextPage.messages);
+      nextCursor=nextPage.next;
+    }
+    assert.ok(!collected.find(m=>m.id==='legacy-redacted').body.includes('legacy-private'));
+    assert.equal(collected.find(m=>m.id==='legacy-first').body,'legacy history');
   });
   it('returns bounded per-agent rate limits while legacy endpoints remain unaffected',async()=>{
     await startRateWindow();
