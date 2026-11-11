@@ -372,6 +372,7 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-12 — Gemini: Created `bundle/aseprite2-unmerged-features` from `Aseprite-2.0` merging `upstream/main` (`9cf3c128f`), `feature/agent-mesh-hub-v3` (`c3ec249e7`), and `codex/agent-hub-v2-step1` (`e4545841f`) cleanly (127 Worker + 33 Python sidecar tests + `tsc` pass; remote `test_phase_a.py` hits live worker and still returns old `?token=` behavior until user approves deploy). Optimized `rotsprite_image`, `image_scale2x_tpl`, `image_scale_tpl`, and `draw_scanline` (row pointers, zero-copy Scale2x ping-pong, subpixel `double` overload in `LayerSmartObject::renderTransformedImage`, block-center downsample), dropping `256x256` 37° from `84.26ms` to `32.89ms` and `2x@45°` from `212.41ms` to `22.07ms`. Added undoable `cmd::SetSmartObjectTransform` with UI `Rotate`, `Flip`, and `Layer Properties` (`Angle`, `Scale`, `Flip H/V`, `Reset`) support. Verified with `test_rotation_speed_quality_ui.lua`, `run_tests.ps1` (140/140), M2 stress (`test_m2_empirical_stress.lua`, `challenger_m2_it3_scaled_right_angles_stress.lua` 15,360/15,360), `tests/run_all.py` (all 10 suites pass), and installed to `%LOCALAPPDATA%\Programs\Aseprite 2.0`.
 - 2026-11-05 — Codex: Built and reinstalled the current Windows app at
   `b9cb6c7c8`; the installed executable matches the build and remained running
   during a launch check. No regression suites were run in this install check.

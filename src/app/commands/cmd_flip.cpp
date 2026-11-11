@@ -16,6 +16,7 @@
 #include "app/cmd/flip_masked_cel.h"
 #include "app/cmd/set_cel_bounds.h"
 #include "app/cmd/set_mask_position.h"
+#include "app/cmd/set_smart_object_transform.h"
 #include "app/cmd/trim_cel.h"
 #include "app/commands/params.h"
 #include "app/context_access.h"
@@ -35,10 +36,33 @@
 #include "doc/cels_range.h"
 #include "doc/image.h"
 #include "doc/layer.h"
+#include "doc/layer_smart_object.h"
 #include "doc/mask.h"
 #include "doc/sprite.h"
 
+#include <algorithm>
+#include <vector>
+
 namespace app {
+
+namespace {
+
+void collect_smart_objects_recursive(doc::LayerGroup* group,
+                                     std::vector<doc::LayerSmartObject*>& out)
+{
+  if (!group)
+    return;
+  for (doc::Layer* lay : group->layers()) {
+    if (lay->isSmartObject()) {
+      out.push_back(static_cast<doc::LayerSmartObject*>(lay));
+    }
+    else if (lay->isGroup()) {
+      collect_smart_objects_recursive(static_cast<doc::LayerGroup*>(lay), out);
+    }
+  }
+}
+
+} // namespace
 
 FlipCommand::FlipCommand() : Command(CommandId::Flip())
 {
@@ -67,6 +91,7 @@ void FlipCommand::onExecute(Context* ctx)
   LockTimelineRange lockRange(App::instance()->timeline());
 
   CelList cels;
+  std::vector<doc::LayerSmartObject*> smartLayers;
   if (m_flipMask) {
     // If we want to flip the visible mask we can go to
     // MovingPixelsState (even when the range is enabled, because now
@@ -83,7 +108,24 @@ void FlipCommand::onExecute(Context* ctx)
     }
 
     cels = site.selectedUniqueCelsToEditPixels();
-    if (cels.empty()) {
+
+    if (!site.document()->isMaskVisible()) {
+      auto addSmartIfEditable = [&](doc::Layer* lay) {
+        if (lay && lay->isSmartObject() && lay->isEditable() &&
+            std::find(smartLayers.begin(), smartLayers.end(), lay) == smartLayers.end()) {
+          smartLayers.push_back(static_cast<doc::LayerSmartObject*>(lay));
+        }
+      };
+      if (site.range().enabled()) {
+        for (doc::Layer* lay : site.range().selectedLayers())
+          addSmartIfEditable(lay);
+      }
+      else {
+        addSmartIfEditable(const_cast<doc::Layer*>(site.layer()));
+      }
+    }
+
+    if (cels.empty() && smartLayers.empty()) {
       if (ctx->isUIAvailable()) {
         StatusBar::instance()->showTip(1000, Strings::statusbar_tips_all_layers_are_locked());
       }
@@ -92,7 +134,11 @@ void FlipCommand::onExecute(Context* ctx)
   }
   // Flip the whole sprite (even locked layers)
   else {
-    cels = site.sprite()->uniqueCels().toList();
+    for (Cel* c : site.sprite()->uniqueCels()) {
+      if (c && c->layer() && !c->layer()->isSmartObject())
+        cels.push_back(c);
+    }
+    collect_smart_objects_recursive(site.sprite()->root(), smartLayers);
   }
 
   ContextWriter writer(ctx);
@@ -185,6 +231,45 @@ void FlipCommand::onExecute(Context* ctx)
       }
 
       api.flipImage(image, image->bounds(), m_flipType);
+    }
+
+    for (doc::LayerSmartObject* sm : smartLayers) {
+      if (!sm)
+        continue;
+
+      const bool horiz = (m_flipType == doc::algorithm::FlipHorizontal);
+      const bool vert = (m_flipType == doc::algorithm::FlipVertical);
+      const bool newFlipH = horiz ? !sm->flipH() : sm->flipH();
+      const bool newFlipV = vert ? !sm->flipV() : sm->flipV();
+      const double newAngle = (sm->angle() != 0.0) ? -sm->angle() : 0.0;
+      gfx::PointF newPos = sm->position();
+
+      if (!m_flipMask) {
+        double srcW = static_cast<double>(sm->sourceSize().w);
+        double srcH = static_cast<double>(sm->sourceSize().h);
+        if ((srcW <= 0.0 || srcH <= 0.0) && !sm->cels().empty()) {
+          if (doc::Cel* c0 = sm->cels().front()) {
+            if (c0->image()) {
+              srcW = static_cast<double>(c0->image()->width());
+              srcH = static_cast<double>(c0->image()->height());
+            }
+          }
+        }
+        const double ox = sm->pivot().x * srcW;
+        const double oy = sm->pivot().y * srcH;
+        if (horiz)
+          newPos.x = (sprite->width() - (sm->position().x + ox)) - ox;
+        if (vert)
+          newPos.y = (sprite->height() - (sm->position().y + oy)) - oy;
+      }
+
+      tx(new cmd::SetSmartObjectTransform(sm,
+                                          newPos,
+                                          sm->scale(),
+                                          newAngle,
+                                          newFlipH,
+                                          newFlipV,
+                                          sm->pivot()));
     }
   }
 

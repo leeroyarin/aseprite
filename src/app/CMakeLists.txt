@@ -339,6 +339,7 @@ target_sources(app-lib PRIVATE
   cmd/set_pixel_ratio.cpp
   cmd/set_slice_key.cpp
   cmd/set_slice_name.cpp
+  cmd/set_smart_object_transform.cpp
   cmd/set_sprite_size.cpp
   cmd/set_sprite_tile_management_plugin.cpp
   cmd/set_tag_anidir.cpp

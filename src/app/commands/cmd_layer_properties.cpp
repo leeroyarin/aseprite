@@ -14,6 +14,7 @@
 #include "app/cmd/set_layer_name.h"
 #include "app/cmd/set_layer_opacity.h"
 #include "app/cmd/set_layer_tileset.h"
+#include "app/cmd/set_smart_object_transform.h"
 #include "app/cmd/set_tileset_base_index.h"
 #include "app/cmd/set_tileset_match_flags.h"
 #include "app/cmd/set_tileset_name.h"
@@ -35,7 +36,12 @@
 #include "base/convert_to.h"
 #include "base/scoped_value.h"
 #include "doc/layer.h"
+#include "doc/layer_smart_object.h"
 #include "doc/layer_tilemap.h"
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include "doc/sprite.h"
 #include "doc/tileset.h"
 #include "doc/tilesets.h"
@@ -125,6 +131,12 @@ public:
     name()->Change.connect([this] { onStartTimer(); });
     mode()->Change.connect([this] { onStartTimer(); });
     opacity()->Change.connect([this] { onStartTimer(); });
+    smAngle()->Change.connect([this] { onStartTimer(); });
+    smScaleX()->Change.connect([this] { onStartTimer(); });
+    smScaleY()->Change.connect([this] { onStartTimer(); });
+    smFlipH()->Click.connect([this] { onStartTimer(); });
+    smFlipV()->Click.connect([this] { onStartTimer(); });
+    smReset()->Click.connect([this] { onResetSmartTransform(); });
     m_timer.Tick.connect([this] { onCommitChange(); });
     userData()->Click.connect([this] { onToggleUserData(); });
     tileset()->Click.connect([this] { onTileset(); });
@@ -206,7 +218,8 @@ private:
   {
     switch (msg->type()) {
       case kKeyDownMessage:
-        if (name()->hasFocus() || opacity()->hasFocus() || mode()->hasFocus()) {
+        if (name()->hasFocus() || opacity()->hasFocus() || mode()->hasFocus() ||
+            smAngle()->hasFocus() || smScaleX()->hasFocus() || smScaleY()->hasFocus()) {
           KeyScancode scancode = static_cast<KeyMessage*>(msg)->scancode();
           if (scancode == kKeyEnter || scancode == kKeyEsc) {
             onCommitChange();
@@ -258,12 +271,37 @@ private:
     const doc::UserData newUserData = m_userDataView.userData();
     doc::BlendMode newBlendMode = blendModeValue();
 
+    bool smartChanged = false;
+    gfx::PointF newSmScale(1.0, 1.0);
+    double newSmAngle = 0.0;
+    bool newSmFlipH = false;
+    bool newSmFlipV = false;
+    if (count == 1 && m_layer && m_layer->isSmartObject() && m_layer->isEditable()) {
+      const auto* sm = static_cast<const doc::LayerSmartObject*>(m_layer);
+      newSmAngle = parseDoubleOr(smAngle()->text(), sm->angle());
+      double sx = parseDoubleOr(smScaleX()->text(), sm->scale().x);
+      double sy = parseDoubleOr(smScaleY()->text(), sm->scale().y);
+      if (std::abs(sx) < 0.01)
+        sx = sm->scale().x;
+      if (std::abs(sy) < 0.01)
+        sy = sm->scale().y;
+      newSmScale = gfx::PointF(sx, sy);
+      newSmFlipH = smFlipH()->isSelected();
+      newSmFlipV = smFlipV()->isSelected();
+      smartChanged = (std::abs(newSmAngle - sm->angle()) > 1e-6 ||
+                      std::abs(newSmScale.x - sm->scale().x) > 1e-6 ||
+                      std::abs(newSmScale.y - sm->scale().y) > 1e-6 ||
+                      newSmFlipH != sm->flipH() ||
+                      newSmFlipV != sm->flipV());
+    }
+
     if ((count > 1) ||
         (count == 1 && m_layer &&
          (newName != m_layer->name() || newUserData != m_layer->userData() ||
-          (m_layer->isImage() ||
-           (m_layer->isGroup() && Preferences::instance().experimental.composeGroups())) ||
-          (newOpacity != m_layer->opacity() || newBlendMode != m_layer->blendMode())))) {
+          smartChanged ||
+          ((m_layer->isImage() ||
+            (m_layer->isGroup() && Preferences::instance().experimental.composeGroups())) &&
+           (newOpacity != m_layer->opacity() || newBlendMode != m_layer->blendMode()))))) {
       try {
         ContextWriter writer(UIContext::instance());
         Tx tx(writer, "Set Layer Properties");
@@ -301,6 +339,17 @@ private:
             if (blendModeChanged && newBlendMode != static_cast<LayerImage*>(layer)->blendMode())
               tx(new cmd::SetLayerBlendMode(static_cast<LayerImage*>(layer), newBlendMode));
           }
+        }
+
+        if (smartChanged && m_layer && m_layer->isSmartObject()) {
+          auto* sm = static_cast<doc::LayerSmartObject*>(m_layer);
+          tx(new cmd::SetSmartObjectTransform(sm,
+                                              sm->position(),
+                                              newSmScale,
+                                              newSmAngle,
+                                              newSmFlipH,
+                                              newSmFlipV,
+                                              sm->pivot()));
         }
 
         // Redraw timeline because the layer's name/user data/color
@@ -430,6 +479,58 @@ private:
     }
   }
 
+  static double parseDoubleOr(const std::string& s, double fallback)
+  {
+    if (s.empty())
+      return fallback;
+    char* end = nullptr;
+    const double val = std::strtod(s.c_str(), &end);
+    if (end == s.c_str() || !std::isfinite(val))
+      return fallback;
+    while (*end == ' ' || *end == '\t')
+      ++end;
+    if (*end != '\0')
+      return fallback;
+    return val;
+  }
+
+  static std::string formatNumber(double val)
+  {
+    char buf[32];
+    if (std::abs(val) < 1e-6)
+      val = 0.0;
+    std::snprintf(buf, sizeof(buf), "%.4g", val);
+    return std::string(buf);
+  }
+
+  void onResetSmartTransform()
+  {
+    if (!m_layer || !m_layer->isSmartObject() || !m_layer->isEditable())
+      return;
+
+    m_timer.stop();
+    m_pendingChanges = false;
+    auto* sm = static_cast<doc::LayerSmartObject*>(m_layer);
+    try {
+      base::ScopedValue switchSelf(m_selfUpdate, true);
+      ContextWriter writer(UIContext::instance());
+      Tx tx(writer, "Reset Smart Object Transform");
+      tx(new cmd::SetSmartObjectTransform(sm,
+                                          sm->position(),
+                                          gfx::PointF(1.0, 1.0),
+                                          0.0,
+                                          false,
+                                          false,
+                                          gfx::PointF(0.5, 0.5)));
+      tx.commit();
+    }
+    catch (const std::exception& e) {
+      Console::showException(e);
+    }
+    updateFromLayer();
+    update_screen_for_document(m_document);
+  }
+
   void updateFromLayer()
   {
     if (m_selfUpdate)
@@ -440,6 +541,7 @@ private:
     base::ScopedValue switchSelf(m_selfUpdate, true);
 
     const bool tilemapVisibility = (m_layer && m_layer->isTilemap());
+    const bool smartVisibility = (m_layer && m_layer->isSmartObject());
     if (m_layer) {
       name()->setText(m_layer->name().c_str());
       name()->setEnabled(true);
@@ -487,6 +589,29 @@ private:
 
     if (uuidVisible)
       uuid()->setText(m_layer ? base::convert_to<std::string>(m_layer->uuid()) : std::string());
+
+    smAngleLabel()->setVisible(smartVisibility);
+    smAngle()->setVisible(smartVisibility);
+    smScaleLabel()->setVisible(smartVisibility);
+    smScaleBox()->setVisible(smartVisibility);
+    smActionsLabel()->setVisible(smartVisibility);
+    smActionsBox()->setVisible(smartVisibility);
+
+    if (smartVisibility) {
+      const auto* sm = static_cast<const doc::LayerSmartObject*>(m_layer);
+      const bool editable = m_layer->isEditable();
+      smAngle()->setText(formatNumber(sm->angle()));
+      smAngle()->setEnabled(editable);
+      smScaleX()->setText(formatNumber(sm->scale().x));
+      smScaleX()->setEnabled(editable);
+      smScaleY()->setText(formatNumber(sm->scale().y));
+      smScaleY()->setEnabled(editable);
+      smFlipH()->setSelected(sm->flipH());
+      smFlipH()->setEnabled(editable);
+      smFlipV()->setSelected(sm->flipV());
+      smFlipV()->setEnabled(editable);
+      smReset()->setEnabled(editable);
+    }
 
     if (tileset()->isVisible() != tilemapVisibility) {
       tileset()->setVisible(tilemapVisibility);

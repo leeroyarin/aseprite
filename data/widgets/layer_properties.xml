@@ -18,6 +18,23 @@
 
       <label id="uuid_label" text="@.uuid" visible="false" for="uuid" />
       <entry id="uuid" readonly="true" maxsize="36" cell_hspan="2" visible="false"/>
+
+      <label id="sm_angle_label" text="@.sm_angle" visible="false" for="sm_angle" />
+      <entry id="sm_angle" visible="false" maxsize="16" minwidth="64" cell_align="horizontal" cell_hspan="2" />
+
+      <label id="sm_scale_label" text="@.sm_scale" visible="false" />
+      <hbox id="sm_scale_box" visible="false" cell_hspan="2">
+        <entry id="sm_scale_x" maxsize="16" minwidth="44" />
+        <label text="×" />
+        <entry id="sm_scale_y" maxsize="16" minwidth="44" />
+      </hbox>
+
+      <label id="sm_actions_label" text="" visible="false" />
+      <hbox id="sm_actions_box" visible="false" cell_hspan="2">
+        <check id="sm_flip_h" text="@.sm_flip_h" />
+        <check id="sm_flip_v" text="@.sm_flip_v" />
+        <button id="sm_reset" text="@.sm_reset" />
+      </hbox>
     </grid>
   </vbox>
 </window>

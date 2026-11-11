@@ -58,41 +58,68 @@ static void image_scale_tpl(Image* dst,
                             int src_h,
                             BlendFunc blend)
 {
-  LockImageBits<ImageTraits> dst_bits(dst, gfx::Rect(dst_x, dst_y, dst_w, dst_h));
-  typename LockImageBits<ImageTraits>::iterator dst_it = dst_bits.begin();
-  fixed x, first_x = itofix(src_x);
+  if (dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0)
+    return;
+
+  const fixed first_x = itofix(src_x);
   fixed y = itofix(src_y);
-  fixed dx = fixdiv(itofix(src_w - 1), itofix(dst_w - 1));
-  fixed dy = fixdiv(itofix(src_h - 1), itofix(dst_h - 1));
-  int old_x, new_x;
+  const fixed dx = (dst_w > 1) ? fixdiv(itofix(src_w - 1), itofix(dst_w - 1)) : 0;
+  const fixed dy = (dst_h > 1) ? fixdiv(itofix(src_h - 1), itofix(dst_h - 1)) : 0;
 
-  for (int v = 0; v < dst_h; ++v) {
-    old_x = fixtoi(x = first_x);
+  if constexpr (ImageTraits::pixels_per_byte == 0) {
+    using pixel_t = typename ImageTraits::pixel_t;
+    const int srcXLimit = src_x + src_w;
 
-    const LockImageBits<ImageTraits> src_bits(src, gfx::Rect(src_x, fixtoi(y), src_w, 1));
-    auto src_it = src_bits.begin();
+    for (int v = 0; v < dst_h; ++v) {
+      const pixel_t* srcRow = reinterpret_cast<const pixel_t*>(src->getPixelAddress(0, fixtoi(y)));
+      pixel_t* dstRow = reinterpret_cast<pixel_t*>(dst->getPixelAddress(dst_x, dst_y + v));
+      fixed x = first_x;
 
-    for (int u = 0; u < dst_w; ++u) {
-      ASSERT(dst_it != dst_bits.end());
-
-      *dst_it = blend(*dst_it, *src_it);
-      ++dst_it;
-
-      x = fixadd(x, dx);
-      new_x = fixtoi(x);
-      if (old_x != new_x) {
-        // We don't want to move the "src_it" iterator outside the src
-        // image bounds.
-        if (new_x < src_w) {
-          src_it += (new_x - old_x);
-          old_x = new_x;
-        }
-        else
+      for (int u = 0; u < dst_w; ++u) {
+        const int sx = fixtoi(x);
+        if (sx >= srcXLimit)
           break;
+        dstRow[u] = static_cast<pixel_t>(blend(dstRow[u], srcRow[sx]));
+        x = fixadd(x, dx);
       }
-    }
 
-    y = fixadd(y, dy);
+      y = fixadd(y, dy);
+    }
+  }
+  else {
+    LockImageBits<ImageTraits> dst_bits(dst, gfx::Rect(dst_x, dst_y, dst_w, dst_h));
+    typename LockImageBits<ImageTraits>::iterator dst_it = dst_bits.begin();
+    int old_x, new_x;
+
+    for (int v = 0; v < dst_h; ++v) {
+      fixed x;
+      old_x = fixtoi(x = first_x);
+
+      const LockImageBits<ImageTraits> src_bits(src, gfx::Rect(src_x, fixtoi(y), src_w, 1));
+      auto src_it = src_bits.begin();
+
+      for (int u = 0; u < dst_w; ++u) {
+        ASSERT(dst_it != dst_bits.end());
+
+        *dst_it = blend(*dst_it, *src_it);
+        ++dst_it;
+
+        x = fixadd(x, dx);
+        new_x = fixtoi(x);
+        if (old_x != new_x) {
+          // We don't want to move the "src_it" iterator outside the src
+          // image bounds.
+          if (new_x < src_w) {
+            src_it += (new_x - old_x);
+            old_x = new_x;
+          }
+          else
+            break;
+        }
+      }
+
+      y = fixadd(y, dy);
+    }
   }
 }
 
@@ -267,24 +294,61 @@ static void draw_scanline(Image* bmp,
 {
   r_bmp_x >>= 16;
   l_bmp_x >>= 16;
+  const int count = static_cast<int>(r_bmp_x) - static_cast<int>(l_bmp_x) + 1;
+  if (count <= 0)
+    return;
 
-  delegate.lockBits(bmp, gfx::Rect(l_bmp_x, bmp_y_i, r_bmp_x - l_bmp_x + 1, 1));
+  if constexpr (Traits::pixels_per_byte == 0) {
+    using pixel_t = typename Traits::pixel_t;
+    pixel_t* dstPtr = reinterpret_cast<pixel_t*>(bmp->getPixelAddress((int)l_bmp_x, bmp_y_i));
+    const uint8_t* sprBase = spr->getPixelAddress(0, 0);
+    const size_t sprRowBytes = spr->rowBytes();
 
-  gfx::Rect maskBounds = (mask ? mask->bounds() : spr->bounds());
-
-  for (int x = (int)l_bmp_x; x <= (int)r_bmp_x; ++x) {
-    int u = l_spr_x >> 16;
-    int v = l_spr_y >> 16;
-
-    if (!mask || (maskBounds.contains(u, v) && get_pixel_fast<BitmapTraits>(mask, u, v)))
-      delegate.putPixel(spr, u, v);
-    delegate.nextPixel();
-
-    l_spr_x += spr_dx;
-    l_spr_y += spr_dy;
+    if (!mask) {
+      for (int i = 0; i < count; ++i) {
+        const int u = l_spr_x >> 16;
+        const int v = l_spr_y >> 16;
+        const pixel_t c =
+          *(reinterpret_cast<const pixel_t*>(sprBase + (size_t)v * sprRowBytes) + u);
+        delegate.putColor(dstPtr + i, c);
+        l_spr_x += spr_dx;
+        l_spr_y += spr_dy;
+      }
+    }
+    else {
+      const gfx::Rect maskBounds = mask->bounds();
+      for (int i = 0; i < count; ++i) {
+        const int u = l_spr_x >> 16;
+        const int v = l_spr_y >> 16;
+        if (maskBounds.contains(u, v) && get_pixel_fast<BitmapTraits>(mask, u, v)) {
+          const pixel_t c =
+            *(reinterpret_cast<const pixel_t*>(sprBase + (size_t)v * sprRowBytes) + u);
+          delegate.putColor(dstPtr + i, c);
+        }
+        l_spr_x += spr_dx;
+        l_spr_y += spr_dy;
+      }
+    }
   }
+  else {
+    delegate.lockBits(bmp, gfx::Rect(l_bmp_x, bmp_y_i, count, 1));
 
-  delegate.unlockBits();
+    gfx::Rect maskBounds = (mask ? mask->bounds() : spr->bounds());
+
+    for (int x = (int)l_bmp_x; x <= (int)r_bmp_x; ++x) {
+      int u = l_spr_x >> 16;
+      int v = l_spr_y >> 16;
+
+      if (!mask || (maskBounds.contains(u, v) && get_pixel_fast<BitmapTraits>(mask, u, v)))
+        delegate.putPixel(spr, u, v);
+      delegate.nextPixel();
+
+      l_spr_x += spr_dx;
+      l_spr_y += spr_dy;
+    }
+
+    delegate.unlockBits();
+  }
 }
 
 template<class Traits>
@@ -316,6 +380,14 @@ class RgbDelegate : public GenericDelegate<RgbTraits> {
 public:
   RgbDelegate(color_t mask_color) { m_mask_color = mask_color; }
 
+  inline void putColor(uint32_t* dst, uint32_t c) const
+  {
+    if ((rgba_geta(m_mask_color) == 0) || ((c & rgba_rgb_mask) != (m_mask_color & rgba_rgb_mask))) {
+      if (rgba_geta(c) != 0)
+        *dst = (*dst == m_mask_color) ? c : rgba_blender_normal(*dst, c);
+    }
+  }
+
   void putPixel(const Image* spr, int spr_x, int spr_y)
   {
     ASSERT(m_it != m_end);
@@ -333,6 +405,14 @@ class GrayscaleDelegate : public GenericDelegate<GrayscaleTraits> {
 public:
   GrayscaleDelegate(color_t mask_color) { m_mask_color = mask_color; }
 
+  inline void putColor(uint16_t* dst, uint16_t c) const
+  {
+    if ((graya_geta(m_mask_color) == 0) || ((c & graya_v_mask) != (m_mask_color & graya_v_mask))) {
+      if (graya_geta(c) != 0)
+        *dst = (*dst == m_mask_color) ? c : graya_blender_normal(*dst, c, 255);
+    }
+  }
+
   void putPixel(const Image* spr, int spr_x, int spr_y)
   {
     ASSERT(m_it != m_end);
@@ -349,6 +429,12 @@ private:
 class IndexedDelegate : public GenericDelegate<IndexedTraits> {
 public:
   IndexedDelegate(color_t mask_color) : m_mask_color(mask_color) {}
+
+  inline void putColor(uint8_t* dst, uint8_t c) const
+  {
+    if (c != m_mask_color)
+      *dst = c;
+  }
 
   void putPixel(const Image* spr, int spr_x, int spr_y)
   {
@@ -378,6 +464,12 @@ public:
 class TilemapDelegate : public GenericDelegate<TilemapTraits> {
 public:
   TilemapDelegate(color_t mask_color) : m_mask_color(mask_color) {}
+
+  inline void putColor(TilemapTraits::pixel_t* dst, TilemapTraits::pixel_t c) const
+  {
+    if (c != m_mask_color)
+      *dst = c;
+  }
 
   void putPixel(const Image* spr, int spr_x, int spr_y)
   {
