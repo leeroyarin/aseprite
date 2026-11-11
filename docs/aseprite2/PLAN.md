@@ -86,3 +86,12 @@ AI agent ──MCP stdio──> tools/aseprite2-mcp (Node/TS)
 - Run `build/bin/aseprite.exe`: title "Aseprite 2.0 v2.0…", `%APPDATA%\Aseprite2` created.
 - Versioning manual test (3 versions, history, restore, open copy, delete).
 - MCP: `npx @modelcontextprotocol/inspector node tools/aseprite2-mcp/dist/index.js`; smoke script `tools/aseprite2-mcp/scripts/smoke.mjs`.
+
+
+## Standalone tooling scope: Agent Hub cloud foundation (Arin, 2026-11-05)
+
+The user explicitly authorized tools/agent-mesh/cloudflare-hub work separate from Aseprite
+C++ phases. The existing agent-mesh-hub Worker stays the cloud middleman; agents connect out.
+See that folder's PLAN.md and docs/USER-REQUIREMENTS.md for the six gated parts. Part 1 is
+implemented and awaiting review in codex/agent-hub-v2-step1. No merge/deploy/secrets/token
+changes are authorized. The earlier local-server/tunnel architecture is superseded.

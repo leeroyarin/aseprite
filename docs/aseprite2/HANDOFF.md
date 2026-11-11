@@ -307,6 +307,21 @@ powershell -File tools\install-aseprite2.ps1
 powershell -File tools\start-aseprite2.ps1
 ```
 
+## Agent Hub cloud review gate
+- [x] Part 1 source, D1 migrations and isolated verification implemented on codex/agent-hub-v2-step1.
+- [x] Continued into Part 2 after the user's complete-it instruction.
+- [x] Part 2 source and isolated verification: projects/channels, registry/supervisor/tasks, docs, labels, search and portal.
+- [x] Arin approved Part 2 coverage/permissions and requested continuation with usage/final-handoff support.
+- [x] Part 3 rule book and approved usage/handoff extension: 89 Worker + 14 Python tests, typecheck/dry-run.
+- [x] Arin approved Part 3 and the 15% usage warning / 10-minute freshness defaults.
+- [x] Part 4 enrollment/logger/private challenges: 109 Worker + 32 Python tests, typecheck/artifact/dry-run.
+- [x] Arin authorized Parts 5 and 6 together; enforcement/recovery and versioned onboarding implemented.
+- [x] 113 Worker + 33 Python tests pass; source remains record_only.
+- [x] Arin approved production deployment; Worker and seven additive D1 migrations deployed on 2026-11-05.
+- [x] Arin rejected payment setup; approved GitHub provider deployed with owner ID 298677609 (arin-avinto).
+- [x] Arin entered encrypted OAuth secret; actual arin-avinto login, portal assets/data and SSE verified live.
+- [ ] Real-agent WebSocket and scheduled Cron execution acceptance remain pending; no merge.
+
 ## Status
 - [x] **Phase 0** docs (AGENTS.md, docs/aseprite2/*) — fully completed and current
 - [x] **Phase 1** branding — completed and verified
@@ -360,6 +375,71 @@ powershell -File tools\start-aseprite2.ps1
 - 2026-11-05 — Codex: Built and reinstalled the current Windows app at
   `b9cb6c7c8`; the installed executable matches the build and remained running
   during a launch check. No regression suites were run in this install check.
+- 2026-11-05 — Codex: Verified user-completed encrypted GitHub credential setup without retrieving
+  any secret. Actual arin-avinto authorization/callback succeeds; live owner portal shows active
+  stream, 50 existing mesh messages and no UI errors. Anonymous admin session denied (401), login
+  page 200, GitHub-start 303, original authenticated connections and agent inbox both 200. Current
+  dashboard version 2fa814ad-2537-4512-901a-62d829416881 preserves the DO namespace. Owner login is
+  activated without Cloudflare Access payment setup. No test messages, policy changes or project
+  fixtures created. Native WebSocket/Cron acceptance remains separate. See docs/GITHUB-LOGIN.md
+  under tools/agent-mesh/cloudflare-hub for evidence and outstanding production checks.
+- 2026-11-05 — Codex: Replaced payment-gated owner Access setup with Arin-approved GitHub OAuth.
+  Only arin-avinto (numeric ID 298677609) is allowed. Added single-use state/PKCE, hashed eight-hour
+  sessions, same-origin mutation checks, logout and /admin/inbox redirect. Existing transport and
+  Access-mode regression tests pass: 127 Worker + 33 Python = 160, zero failures/skips; typecheck,
+  exact artifact and dry-run pass. Additive migration 0008 and version 4551ae52-ac2b-4db1-8857-bac7c51e86b9
+  deployed. Live native connections/inbox still return 200; login remains fail-closed until Arin
+  generates and enters the client secret in the prepared browser forms. No payment info, secrets
+  or existing agent tokens changed. See tools/agent-mesh/cloudflare-hub/docs/GITHUB-LOGIN.md.
+- 2026-11-05 — Codex: Deployed approved Agent Hub backend version e08e087c-bdc7-4077-b7db-d811e689ed7f,
+  seven additive D1 migrations and five-minute Cron. Existing DO namespace and both secret bindings
+  preserved. Read-only live root, legacy admin connections/inbox and per-agent v2 inbox pass.
+  Record-only default verified; owner routes fail closed until Access is configured. Free Zero Trust
+  activation requires user payment details/overage terms; left form open for Arin. Existing native
+  sockets reported zero at the check; live agent reconnect and Cron invocation are unverified.
+  See tools/agent-mesh/cloudflare-hub/docs/DEPLOYMENT-2026-11-05.md. No local server retired.
+- 2026-11-05 — Codex: Implemented Parts 5 and 6 together as Arin requested. Owner-only immutable
+  enrollment settings/grace, enforce gates/socket closure, periodic fresh proofs and private recovery;
+  real-rulebook onboarding revisions preserve custom Connect your agent and require connection +
+  version acknowledgement + active proof. Record-only stays default; no production enforcement,
+  secrets/tokens, deploy or remote migration. 113 Worker + 33 Python tests pass, typecheck/artifact/
+  dry-run pass. See cloudflare-hub/PART5-6-REVIEW.md. Production/browser/actual-agent cutover remains
+  approval-gated; local prototype not retired. No Aseprite C++/submodule changes.
+
+- 2026-11-05 — Codex: Part 4 source implements immutable read/accept/install/prove enrollment, exact
+  downloadable logger bytes, metadata-based local path discovery, disjoint folders, append-only
+  command receipts/statuses, private five-minute one-use challenges, packet/hash/path/receipt checks,
+  and record-only owner revoke/allow. No network/command execution in the standalone logger.
+  Actual this-PC Codex sessions metadata checked without copying chat text; real other-agent installs
+  remain pending. 109 Worker + 32 Python tests passed, typecheck/artifact/dry-run passed. No production
+  resources, secrets/tokens, native endpoints or C++/submodules changed. Stop for Part 4 check; Parts 5-6
+  remain required. See cloudflare-hub/PART4-REVIEW.md, docs/ENROLLMENT.md and docs/CONTINUATION.md.
+
+- 2026-11-05 — Codex: Arin approved Part 2 policies and added usage-aware final handoffs. Implemented
+  Part 3 owner-only immutable rule-book versions/SHA-256/CAS plus real-or-unknown usage snapshots,
+  <=15% warning, low-usage takeover exclusion, incomplete pushed/not-pushed checkpoint evidence and
+  successor acknowledgement. Worker console and outbound client expose reports; no Git/code execution
+  or private usage inference occurs in the hub. Redacts JSON secret keys as well as values.
+  89 Worker + 14 Python tests passed, typecheck and local dry-run passed. Migration 0005 is empty/additive.
+  Source work branch codex/agent-hub-v2-step1 is an incomplete handoff; see cloudflare-hub/docs/CONTINUATION.md
+  and PART3-REVIEW.md. Production config/secrets/tokens unchanged, no merge/deploy. Stop for Part 3 check;
+  enrollment, enforcement and final onboarding remain pending. No Aseprite C++/submodule changes.
+
+- 2026-11-05 — Codex: Agent Hub Part 2 implemented in the isolated codex/agent-hub-v2-step1
+  branch: private channel fan-out through existing native transport, registry, five-minute supervisor
+  source and task coverage, versioned docs/suggestions/acks, parent sub labels, private activity/search,
+  same-Worker Access portal/SSE, outbound-only sidecar reuse. Additive D1 migrations, no samples.
+  68 Worker/runtime tests + 8 Python client tests passed; typecheck and dry-run passed.
+  Production configuration/secrets/tokens and shared checkout unchanged; no merge/push/deploy.
+  Stop for Part 2 owner check before Part 3. Local prototype not retired; cloud/actual-agent and browser
+  visual/Access validation remain pending. Review tools/agent-mesh/cloudflare-hub/PART2-REVIEW.md.
+
+- 2026-11-05 — Codex: Agent Hub cloud Part 1 implemented only in isolated branch
+  `codex/agent-hub-v2-step1`, preserving the shared checkout. Local source baseline tagged
+  `agent-mesh-hub-v2.1.0-baseline-20261105`. Additive `/api/v2` foundation uses D1/DO, not a PC
+  backend/tunnel. 39 Workers-runtime/policy/schema tests, typecheck and dry-run passed.
+  Production/secrets/tokens unchanged. Stopped for Arin check; Parts 2-6 remain gated.
+  Review: `tools/agent-mesh/cloudflare-hub/PART1-REVIEW.md`. No Aseprite C++ changes/build.
 - 2026-11-04 — Codex: Pulled `f4439b4c2` and built it with MSVC x64. Windows
   suites passed: Easymetric 68/68, adversarial 54/54, four requirements 23/23,
   texture/layer/panel 14/14, all exit 0. PR #19 was closed as superseded;
@@ -570,7 +650,7 @@ powershell -File tools\start-aseprite2.ps1
   - **Defect 3 Fixed (Cel Offset Preservation)**: In `propagateLinkedDimensions()`, replaced hardcoded `api.setCelPosition(spr, cel, 0, 0)` with `api.setCelPosition(spr, cel, cel->x(), cel->y())`, preventing non-zero cel offsets from being clobbered away from slice boundaries.
   - **Defect 4 Fixed (Slice-Bounded 2-Layer Setup)**: In `setupTwoLayerStructure()`, initialized cels using `slice->bounds().w, h` and positioned them at `slice->bounds().x, y` instead of whole-canvas `sw x sh` at `(0, 0)`.
   - **Hardened Convert to Groups**: Implemented safe `while(true)` restart in `convertSmartObjectsToGroups()` to prevent iterator/pointer invalidation during batch layer conversion.
-  - **Verification**: Built with MSVC x64 + Ninja. 284/284 tests passed across all test suites (23/23 R1-R4 E2E, 67/67 Live Studio E2E, 54/54 Adversarial Stress, 140/140 Smart Object E2E).
+  - **Verification**: Built with MSVC x64 + Ninja. 284/284 tests passed across all test suites (23/23 R1-R4 E2E, 67/67 Live Studio E2E, 54/54 Adversarial Stress, 141/141 Smart Object E2E).
 - 2026-11-02 — Gemini (Antigravity): Easymetric 6-Surface Live Studio Shared UV Sheets & Versioning Fix:
   - **Unified Shared UV Sheets**: Replaced 6 per-face layer groups with single Surface_Base clipping layer and single Surface_Texture Smart Object layer over 3x2 UV grid matching user workflow specification.
   - **Dynamic Git Versioning**: Added CMAKE_CONFIGURE_DEPENDS (.git/HEAD, .git/index) in src/ver/CMakeLists.txt ensuring window title version string updates on every commit without manual cmake reconfigure.
@@ -581,7 +661,7 @@ powershell -File tools\start-aseprite2.ps1
   - **R2 Smart Object Hierarchy & Safety**: Fixed fake Smart Object creation by calling `ConvertLayer(to="smartobject")`, resolved headless null pointer crash via context fallback in `convertSmartObjectsToGroups()`, fixed layer discovery inside unpacked groups in `findSurfaceLayers()`, and protected editor pixel-editing lockout in `FacePaneBox`.
   - **R3 Canvas Isolation**: Fixed case-insensitive and prefix-stripped slice matching in `isEasymetricSurfaceSliceName()` (`tool_loop_impl.cpp`), preventing drawing bleed on shared layers.
   - **R4 Linked Dimensions Propagation**: Resurrected dead propagation code; integrated live propagation into `EasymetricMultiPaneView::pollAndRender()`, added interactive dimension spin controls in `FieldsPanelBox`, added CLI/script parameter support (`action="linkDims"`), multi-frame cel safe resize, canvas auto-expansion, and depth layer propagation.
-  - **Verification**: Built with MSVC x64 + Ninja. 277/277 tests passed across all suites (16/16 R1-R4 E2E, 67/67 Live Studio E2E, 54/54 Adversarial Stress, 140/140 Smart Object E2E).
+  - **Verification**: Built with MSVC x64 + Ninja. 277/277 tests passed across all suites (16/16 R1-R4 E2E, 67/67 Live Studio E2E, 54/54 Adversarial Stress, 141/141 Smart Object E2E).
 - 2026-11-01 — Gemini (Antigravity): Implemented **Smart Object Layers** ported from Rust Photoshop replica (https://github.com/leeroyarin/Photoshop.git) into native Aseprite 2.0 C++ (src/doc/layer_smart_object.{h,cpp}, src/app/commands/cmd_place_smart_object.cpp, src/app/commands/convert_layer.cpp, src/app/smart_object_manager.{h,cpp}, src/app/ui/editor/tool_loop_impl.cpp, src/render/render.cpp, src/dio/aseprite_decoder.cpp, data/gui.xml):
   - **External .aseprite Linking & Auto-Refresh**: Non-destructive doc::LayerSmartObject linked to external .aseprite files. SmartObjectManager tracks file modification timestamps and automatically re-renders linked layers on disk changes.
   - **Non-Destructive Pixel Protection**: Drawing tools (brush, pencil, eraser, paint bucket, stroke/fill, filters, script tool loops, Lua iterators) strictly blocked with UI warning; layer position translation and 2D affine transformations (scale, rotate, flip H/V, custom pivot) fully supported without rasterization.
@@ -589,7 +669,7 @@ powershell -File tools\start-aseprite2.ps1
   - **Context Menu & Conversion**:
     - File > Import > Place Linked (Smart Object)...
     - Right-click layer context menu: Convert To > Smart Object, Convert To > Separate Smart Objects, and Convert To > Group.
-  - **Verification**: 140/140 E2E tests and 1,145 adversarial/empirical assertions passed across 2 independent victory audits. Installed to %LOCALAPPDATA%\Programs\Aseprite 2.0\aseprite.exe.
+  - **Verification**: 141/141 E2E tests and 1,145 adversarial/empirical assertions passed across 2 independent victory audits. Installed to %LOCALAPPDATA%\Programs\Aseprite 2.0\aseprite.exe.
 - 2026-10-31 — Worker M1 (Teamwork): Implemented Milestone 1: Easymetric 6-Surface Live Studio Core Upgrade (R1 + R2):
   - **R1 Canvas Mount Box Framing & Slice Offset Removal**:
     - Eliminated artificial 112x96 atlas grid expansion in `setupSixSurfacesOnDoc`; canvas maintains user-specified dimensions (e.g. 24x24).
@@ -637,7 +717,7 @@ powershell -File tools\start-aseprite2.ps1
   - **R2/R3 Slice Auto-Creation**: Fixed `setupTwoLayerStructure` to automatically generate face slices on initial setup, preventing slice isolation bypass.
   - **R3 Dynamic Surface Isolation**: Fixed premature mouse cursor coordinate lock in headless/test mode in `ToolLoopBase` and `PointShape` inverted span clamping (`x1 > x2`).
   - **R1/R2 Translucent Texture Blending & Format Handling**: Fixed alpha blending math (`texA * texCol + (255 - texA) * baseCol`) and extended surface sampling to RGB, Grayscale, and Indexed sprite formats. Added headless `bake3D`/`render3D` command.
-  - **Full E2E Verification**: All 19 tests in `easymetric_four_requirements_test.lua`, 54 tests in `easymetric_adversarial_stress.lua`, and 140+ Smart Object tests pass cleanly with 0 failures.
+  - **Full E2E Verification**: All 19 tests in `easymetric_four_requirements_test.lua`, 54 tests in `easymetric_adversarial_stress.lua`, and 141+ Smart Object tests pass cleanly with 0 failures.
 - 2026-11-01 — SWE Light Implementer (Antigravity): Completed 4 core Easymetric 6-Surface Live Studio requirements:
   - **3D Preview Geometry Clipping Fix**: Fixed orthographic ray origin placement (`camDist = maxDepthRange * 2.5f`, `ox/oy/oz` pulled backwards along view vector), raymarch near/far plane intersection bounds (`nearPlane = 1.0f`, `farPlane = 2.0f * camDist + maxDepthRange`), and relative depth normalization `(tHit - camDist + maxDepthRange * 0.5) / maxDepthRange`.
   - **Two-Layer Smart Object & Clipping Structure**: Implemented base layer alpha clipping mask (`baseAlpha <= 16` masked out, `baseAlpha > 16` uses texture override or falls back to base), supporting `Surface_<Face>_Base` and `Surface_<Face>_Texture` smart objects/layers, plus one-click setup and unpack to groups.
