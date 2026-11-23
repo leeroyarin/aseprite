@@ -489,6 +489,12 @@ private:
   // Aseprite 2.0: sprite-space clip rectangle (empty = no clip)
   gfx::Rect m_clipSpriteBounds;
   bool m_fittingClip = false;
+  // True until the user zooms by hand: only then may a viewport resize
+  // re-fit the zoom to the clip rectangle.
+  bool m_clipAutoFit = true;
+  // Viewport size at the last fit; a resize event with the same size
+  // (e.g. from View::updateView) must not re-fit.
+  gfx::Size m_clipFitViewportSize;
 
   // Last known mouse position received by this editor when the
   // mouse button was pressed. Used for auto-scrolling. To get the

@@ -12,7 +12,10 @@
 #include "app/cmd/add_slice.h"
 #include "app/cmd/add_tag.h"
 #include "app/cmd/flip_image.h"
+#include "app/cmd/remove_slice.h"
+#include "app/cmd/set_layer_name.h"
 #include "app/cmd/set_slice_key.h"
+#include "app/cmd/set_user_data_property.h"
 #include "app/commands/command.h"
 #include "app/commands/commands.h"
 #include "app/console.h"
@@ -25,12 +28,16 @@
 #include "app/color_utils.h"
 #include "app/pref/preferences.h"
 #include "app/site.h"
+#include "app/doc_undo.h"
+#include "app/doc_undo_observer.h"
 #include "app/tools/active_tool.h"
+#include "app/tools/ink.h"
 #include "app/tools/tool.h"
 #include "app/tools/tool_box.h"
 #include "app/tx.h"
 #include "app/ui/color_button.h"
 #include "app/ui/doc_view.h"
+#include "ui/int_entry.h"
 #include "ui/window.h"
 #include "app/ui/editor/editor.h"
 #include "app/ui/editor/editor_observer.h"
@@ -53,6 +60,7 @@
 #include "doc/image.h"
 #include "doc/layer.h"
 #include "doc/layer_smart_object.h"
+#include "doc/algorithm/flip_image.h"
 #include "doc/primitives.h"
 #include "doc/slice.h"
 #include "doc/sprite.h"
@@ -64,6 +72,7 @@
 #include "os/surface.h"
 #include "os/system.h"
 #include "render/render.h"
+#include "ui/alert.h"
 #include "ui/box.h"
 #include "ui/button.h"
 #include "ui/combobox.h"
@@ -85,6 +94,7 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -92,7 +102,11 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <chrono>
+#include <functional>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <typeinfo>
@@ -517,8 +531,8 @@ struct SixSurfaceData {
 
   void setFaceSize(int face, int fw, int fh)
   {
-    fw = std::clamp(fw, 4, 256);
-    fh = std::clamp(fh, 4, 256);
+    fw = std::clamp(fw, 1, 1024);
+    fh = std::clamp(fh, 1, 1024);
     w[face] = fw;
     h[face] = fh;
     pixels[face].assign(fw * fh, 0);
@@ -530,8 +544,8 @@ struct SixSurfaceData {
 
   void propagateDimensionLink(int srcFace, int newW, int newH)
   {
-    newW = std::clamp(newW, 4, 256);
-    newH = std::clamp(newH, 4, 256);
+    newW = std::clamp(newW, 1, 256);
+    newH = std::clamp(newH, 1, 256);
 
     int X = w[kFaceFront];
     int Y = h[kFaceFront];
@@ -626,10 +640,25 @@ struct SixSurfaceData {
     return face;
   }
 
+  // An empty face shows its opposite face, MIRRORED the way the axis table
+  // (ghostAxesOfFace / the renderer) relates them: Top/Down share X and flip
+  // Z (v); Front/Back flip X (u); Right/Left flip Z (u). These are the same
+  // flips the linked-column copies use. (Before 2026-11-16 this sampled the
+  // opposite face at the same (u, v), i.e. unmirrored.) Sizes may differ, so
+  // the position is carried over as a fraction of the face.
   uint32_t sampleSymmetric(int face, int u, int v) const
   {
     const int sf = symmetricFace(face);
-    return sample(sf, u, v);
+    if (sf == face)
+      return sample(face, u, v);
+    const int fw = std::max(1, w[face]), fh = std::max(1, h[face]);
+    double fu = (std::clamp(u, 0, fw - 1) + 0.5) / fw;
+    double fv = (std::clamp(v, 0, fh - 1) + 0.5) / fh;
+    if (face / 2 == 0)
+      fv = 1.0 - fv; // Top <-> Down
+    else
+      fu = 1.0 - fu; // Front <-> Back, Right <-> Left
+    return sample(sf, int(fu * w[sf]), int(fv * h[sf]));
   }
 
   bool isBaseSolid(int face, int u, int v) const
@@ -651,6 +680,13 @@ struct SixSurfaceData {
     return doc::rgba_geta(sampleSymmetric(face, u, v)) > 16;
   }
 };
+
+// Largest voxel grid per axis. The Base box is measured in voxels, so for
+// faces bigger than this the box is capped here and every face lookup
+// scales its (u, v) by the box size (never by the face size), which keeps
+// shape and texture aligned for faces bigger than this. 128 keeps the
+// user's 64x128 faces at one voxel per pixel (128^3 = 2M voxels, ~10 ms).
+static constexpr int kMaxVoxelDim = 128;
 
 struct SculptedVoxelVolume {
   int vx = 24;
@@ -701,9 +737,9 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
                                               int pivX, int pivY, int pivZ)
 {
   SculptedVoxelVolume vol;
-  const int dimX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown], 8 });
-  const int dimY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight], 8 });
-  const int dimZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown], 8 });
+  const int dimX = std::min(kMaxVoxelDim, std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown], 8 }));
+  const int dimY = std::min(kMaxVoxelDim, std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight], 8 }));
+  const int dimZ = std::min(kMaxVoxelDim, std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown], 8 }));
 
   // Depth sculpting (2026-11-07, William: the depth map must carve real
   // mesh, not just bend normals). When a Surface_DEPTH layer exists, the
@@ -732,9 +768,9 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
     extZ = std::max(maxExt(kFaceFront, dimZ / 2), maxExt(kFaceBack, dimZ / 2));
   }
 
-  vol.vx = std::clamp(dimX + 2 * extX, 8, 64);
-  vol.vy = std::clamp(dimY + 2 * extY, 8, 64);
-  vol.vz = std::clamp(dimZ + 2 * extZ, 8, 64);
+  vol.vx = std::clamp(dimX + 2 * extX, 8, kMaxVoxelDim);
+  vol.vy = std::clamp(dimY + 2 * extY, 8, kMaxVoxelDim);
+  vol.vz = std::clamp(dimZ + 2 * extZ, 8, kMaxVoxelDim);
   const int padX = (vol.vx - dimX) / 2;
   const int padY = (vol.vy - dimY) / 2;
   const int padZ = (vol.vz - dimZ) / 2;
@@ -918,6 +954,79 @@ static SculptedVoxelVolume buildSculptedVolume(const SixSurfaceData& data,
   return vol;
 }
 
+// Voxel volume cache (2026-11-18). Building a sculpted volume is most of a
+// render (measured: 13 ms for a 64^3 object, ~20 ms with a depth sheet,
+// against ~2 ms of ray marching), and it only depends on the silhouettes,
+// the depth sheet and the pivot, never on the camera. Rotating the preview,
+// or painting one object of several, now reuses every unchanged volume.
+// Keyed by a hash of exactly the inputs buildSculptedVolume reads; a few
+// entries (one per object plus spares), least recently used dropped first.
+static uint64_t sculptedVolumeKey(const SixSurfaceData& d, int pivX, int pivY, int pivZ)
+{
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&h](uint64_t v) {
+    h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+  };
+  auto mixBytes = [&h](const uint8_t* p, size_t n) {
+    uint64_t acc = 0;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+      uint64_t w;
+      std::memcpy(&w, p + i, 8);
+      acc = (acc ^ w) * 0x100000001b3ull + 0x9e3779b97f4a7c15ull;
+    }
+    for (; i < n; ++i)
+      acc = (acc ^ p[i]) * 0x100000001b3ull;
+    h ^= acc + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+  };
+  mix(uint64_t(pivX));
+  mix(uint64_t(pivY));
+  mix(uint64_t(pivZ));
+  mix(d.hasCustomDepthLayer ? 1 : 0);
+  for (int c = 0; c < 3; ++c)
+    mix(d.colLinked[c] ? 1 : 0);
+  for (int f = 0; f < kFaceCount; ++f) {
+    mix(uint64_t(d.w[f]));
+    mix(uint64_t(d.h[f]));
+    mix(d.hasBaseLayer[f] ? 1 : 0);
+    // Solidity reads the alpha of pixels (or baseAlpha with a Base layer).
+    mixBytes(reinterpret_cast<const uint8_t*>(d.pixels[f].data()), d.pixels[f].size() * 4);
+    mixBytes(d.baseAlpha[f].data(), d.baseAlpha[f].size());
+    if (d.hasCustomDepthLayer) {
+      mixBytes(d.depthPixels[f].data(), d.depthPixels[f].size());
+      mixBytes(d.depthAlpha[f].data(), d.depthAlpha[f].size());
+    }
+  }
+  return h;
+}
+
+static std::shared_ptr<const SculptedVoxelVolume> cachedSculptedVolume(const SixSurfaceData& data,
+                                                                       int pivX,
+                                                                       int pivY,
+                                                                       int pivZ)
+{
+  struct Entry {
+    uint64_t key;
+    std::shared_ptr<const SculptedVoxelVolume> vol;
+  };
+  static std::vector<Entry> cache; // most recently used last
+  constexpr size_t kMaxEntries = 8;
+  const uint64_t key = sculptedVolumeKey(data, pivX, pivY, pivZ);
+  for (size_t i = 0; i < cache.size(); ++i) {
+    if (cache[i].key == key) {
+      Entry e = cache[i];
+      cache.erase(cache.begin() + i);
+      cache.push_back(e);
+      return e.vol;
+    }
+  }
+  auto vol = std::make_shared<const SculptedVoxelVolume>(buildSculptedVolume(data, pivX, pivY, pivZ));
+  if (cache.size() >= kMaxEntries)
+    cache.erase(cache.begin());
+  cache.push_back({ key, vol });
+  return vol;
+}
+
 static int matchFaceIndex(const std::string& name)
 {
   if (name.empty()) return -1;
@@ -940,10 +1049,205 @@ static int matchFaceIndex(const std::string& name)
   return -1;
 }
 
+// ---------------------------------------------------------------------------
+// Objects (2026-11-17, Arin: "separate objects like head and body, each in
+// its own layer, Blender-like"). The six views of ONE object constrain each
+// other (the model is the intersection of their silhouettes), so a head drawn
+// in the same cells as the body is cut by the body's Top view. An object is a
+// separate set of six views with its own size and its own place in the model.
+//
+//  - Object 1 ("root") is what every document already has: Surface_Base /
+//    _Texture / _DEPTH at the top level and the slices TOP..LEFT. It is never
+//    moved or renamed, so a single-object document behaves exactly as before.
+//  - Every other object is a top-level layer group "Object: <name>" whose
+//    direct children are its own Surface_Base / _Texture / _DEPTH sheets, and
+//    whose user-data property "easymetric" holds its metadata (slice key,
+//    model offset, rank, creation order). Its six cells are slices named
+//    "<key>:TOP" .. "<key>:LEFT" in its own band of the canvas (bands are
+//    stacked downwards under the root's cells). Every cel stays full-canvas at
+//    (0, 0), like the root sheets.
+//  - The face-size / face-rect / layer helpers consult the CURRENT OBJECT
+//    (g_objectScope) instead of growing an object parameter: the studio sets
+//    it to its focused object, headless actions set it from `object=`
+//    (default root) with EasymetricObjectScope.
+// ---------------------------------------------------------------------------
+constexpr const char* kObjectGroupPrefix = "Object: ";
+constexpr const char* kObjectProp = "easymetric";
+
+struct ObjectMeta {
+  std::string key;          // slice prefix; fixed at creation, unique
+  int o[3] = { 0, 0, 0 };   // model offset of the box's min corner (X right, Y up, Z to front)
+  int rank = -1;            // -1 = auto (smaller box in front)
+  int order = 0;            // creation order (ties)
+};
+
+static const std::string* objectMetaText(const doc::Layer* lyr)
+{
+  if (!lyr || !lyr->isGroup())
+    return nullptr;
+  const auto& maps = lyr->userData().propertiesMaps();
+  auto it = maps.find(std::string());
+  if (it == maps.end())
+    return nullptr;
+  auto jt = it->second.find(kObjectProp);
+  if (jt == it->second.end())
+    return nullptr;
+  return std::get_if<std::string>(static_cast<const doc::UserData::VariantBase*>(&jt->second));
+}
+
+static bool isObjectGroup(const doc::Layer* lyr)
+{
+  return objectMetaText(lyr) != nullptr;
+}
+
+static bool readObjectMeta(const doc::Layer* lyr, ObjectMeta& m)
+{
+  const std::string* s = objectMetaText(lyr);
+  if (!s)
+    return false;
+  m = ObjectMeta();
+  // "key=Head;o=0,16,0;rank=-1;order=1"
+  size_t pos = 0;
+  while (pos <= s->size()) {
+    size_t end = s->find(';', pos);
+    if (end == std::string::npos)
+      end = s->size();
+    const std::string item = s->substr(pos, end - pos);
+    const size_t eq = item.find('=');
+    if (eq != std::string::npos) {
+      const std::string k = item.substr(0, eq), v = item.substr(eq + 1);
+      if (k == "key")
+        m.key = v;
+      else if (k == "o")
+        std::sscanf(v.c_str(), "%d,%d,%d", &m.o[0], &m.o[1], &m.o[2]);
+      else if (k == "rank")
+        m.rank = std::atoi(v.c_str());
+      else if (k == "order")
+        m.order = std::atoi(v.c_str());
+    }
+    pos = end + 1;
+  }
+  return !m.key.empty();
+}
+
+static std::string objectMetaString(const ObjectMeta& m)
+{
+  return fmt::format("key={};o={},{},{};rank={};order={}", m.key, m.o[0], m.o[1], m.o[2], m.rank,
+                     m.order);
+}
+
+static bool insideObjectGroup(const doc::Layer* lyr)
+{
+  for (const doc::Layer* p = lyr ? lyr->parent() : nullptr; p; p = p->parent())
+    if (isObjectGroup(p))
+      return true;
+  return false;
+}
+
+struct ObjectGroupRef {
+  doc::LayerGroup* group = nullptr;
+  ObjectMeta meta;
+};
+
+// Top-level object groups, in creation order.
+static std::vector<ObjectGroupRef> objectGroups(doc::Sprite* spr)
+{
+  std::vector<ObjectGroupRef> out;
+  if (!spr)
+    return out;
+  for (doc::Layer* lyr : spr->root()->layers()) {
+    ObjectGroupRef r;
+    if (readObjectMeta(lyr, r.meta)) {
+      r.group = static_cast<doc::LayerGroup*>(lyr);
+      out.push_back(r);
+    }
+  }
+  std::stable_sort(out.begin(), out.end(), [](const ObjectGroupRef& a, const ObjectGroupRef& b) {
+    return a.meta.order < b.meta.order;
+  });
+  return out;
+}
+
+static bool hasObjectGroups(doc::Sprite* spr)
+{
+  if (!spr)
+    return false;
+  for (doc::Layer* lyr : spr->root()->layers())
+    if (isObjectGroup(lyr))
+      return true;
+  return false;
+}
+
+static doc::LayerGroup* findObjectGroup(doc::Sprite* spr, const std::string& key)
+{
+  if (!spr || key.empty())
+    return nullptr;
+  for (doc::Layer* lyr : spr->root()->layers()) {
+    ObjectMeta m;
+    if (readObjectMeta(lyr, m) && m.key == key)
+      return static_cast<doc::LayerGroup*>(lyr);
+  }
+  return nullptr;
+}
+
+// The object the helpers below work on: {sprite, key}; key "" = root.
+static doc::ObjectId g_objectScopeSprite = doc::NullId;
+static std::string g_objectScopeKey;
+
+class EasymetricObjectScope {
+public:
+  EasymetricObjectScope(doc::Sprite* spr, const std::string& key)
+    : m_spr(g_objectScopeSprite)
+    , m_key(g_objectScopeKey)
+  {
+    g_objectScopeSprite = spr ? spr->id() : doc::NullId;
+    g_objectScopeKey = key;
+  }
+  ~EasymetricObjectScope()
+  {
+    g_objectScopeSprite = m_spr;
+    g_objectScopeKey = m_key;
+  }
+
+private:
+  doc::ObjectId m_spr;
+  std::string m_key;
+};
+
+// Key of the current object for `spr` ("" = root). A key whose group no
+// longer exists (undo, deleted) falls back to the root.
+static std::string scopeKeyFor(doc::Sprite* spr)
+{
+  if (!spr || g_objectScopeKey.empty() || spr->id() != g_objectScopeSprite)
+    return std::string();
+  return findObjectGroup(spr, g_objectScopeKey) ? g_objectScopeKey : std::string();
+}
+
+static doc::LayerGroup* scopedObjectGroup(doc::Sprite* spr)
+{
+  if (!spr || g_objectScopeKey.empty() || spr->id() != g_objectScopeSprite)
+    return nullptr;
+  return findObjectGroup(spr, g_objectScopeKey);
+}
+
+static std::string objectSliceName(const std::string& key, int face)
+{
+  return key + ":" + kFaceSpecs[face].sliceName;
+}
+
 static doc::Slice* findSliceForFace(doc::Sprite* spr, int face)
 {
   if (!spr || face < 0 || face >= kFaceCount)
     return nullptr;
+  const std::string key = scopeKeyFor(spr);
+  if (!key.empty()) {
+    const std::string want = objectSliceName(key, face);
+    for (auto* slice : spr->slices())
+      if (slice && slice->name() == want)
+        return slice;
+    return nullptr;
+  }
+  // Root: keyed object slices ("Head:TOP") never match matchFaceIndex.
   for (auto* slice : spr->slices()) {
     if (slice && matchFaceIndex(slice->name()) == face) {
       return slice;
@@ -956,8 +1260,16 @@ static doc::LayerImage* findLayerByName(doc::Sprite* spr, const std::string& nam
 {
   if (!spr)
     return nullptr;
+  if (doc::LayerGroup* grp = scopedObjectGroup(spr)) {
+    for (doc::Layer* lyr : grp->layers())
+      if (lyr->isImage() && lyr->name() == name)
+        return static_cast<doc::LayerImage*>(lyr);
+    // An object's sheets are only ever its own: never fall back to the root's.
+    if (name.rfind("Surface_", 0) == 0 || name == "Base" || name == "base")
+      return nullptr;
+  }
   for (doc::Layer* lyr : spr->allLayers()) {
-    if (lyr->isImage() && lyr->name() == name)
+    if (lyr->isImage() && lyr->name() == name && !insideObjectGroup(lyr))
       return static_cast<doc::LayerImage*>(lyr);
   }
   return nullptr;
@@ -970,6 +1282,9 @@ static doc::LayerImage* findOrCreateLayer(app::Doc* doc,
 {
   if (auto* existing = findLayerByName(spr, name))
     return existing;
+  if (doc::LayerGroup* grp = scopedObjectGroup(spr))
+    if (name.rfind("Surface_", 0) == 0)
+      return api.newLayer(grp, name);
   return api.newLayer(spr->root(), name);
 }
 
@@ -1083,7 +1398,7 @@ static SharedSurfaceLayers findSharedLayers(doc::Sprite* spr)
   shared.textureLayer = findLayerByName(spr, "Surface_Texture");
   shared.depthLayer = findLayerByName(spr, "Surface_DEPTH");
 
-  if (!shared.baseLayer && !shared.textureLayer) {
+  if (!shared.baseLayer && !shared.textureLayer && !scopedObjectGroup(spr)) {
     shared.baseLayer = findLayerByName(spr, "Base");
     if (!shared.baseLayer)
       shared.baseLayer = findLayerByName(spr, "base");
@@ -1092,7 +1407,7 @@ static SharedSurfaceLayers findSharedLayers(doc::Sprite* spr)
       doc::LayerImage* soleImg = nullptr;
       int imgCount = 0;
       for (doc::Layer* lyr : spr->allLayers()) {
-        if (lyr->isImage()) {
+        if (lyr->isImage() && !insideObjectGroup(lyr)) {
           soleImg = static_cast<doc::LayerImage*>(lyr);
           imgCount++;
         }
@@ -1161,6 +1476,18 @@ static gfx::Rect sharedUVRectExact(int face, const int colW[3], const int rowH[2
   return gfx::Rect(x, y, faceW, faceH);
 }
 
+// Top of the current object's band: the root's is 0; an object's is where
+// its TOP cell sits (column 0, row 0 of its band).
+static int objectBandY(doc::Sprite* spr)
+{
+  if (scopeKeyFor(spr).empty())
+    return 0;
+  if (doc::Slice* sl = findSliceForFace(spr, kFaceTop))
+    if (const auto* key = sl->getByFrame(0))
+      return key->bounds().y;
+  return 0;
+}
+
 // UV rect for a face in the current document, from its slice size
 // and the exact layout (not from the sprite size). This also
 // repairs documents whose slices were left at (0, 0) by the old
@@ -1174,10 +1501,13 @@ static gfx::Rect sharedFaceRect(doc::Sprite* spr, int face)
   sharedFaceSizes(spr, w, h);
   int colW[3], rowH[2];
   sharedLayout(w, h, colW, rowH);
-  return sharedUVRectExact(face, colW, rowH, w[face], h[face]);
+  gfx::Rect rc = sharedUVRectExact(face, colW, rowH, w[face], h[face]);
+  rc.y += objectBandY(spr);
+  return rc;
 }
 
 // Exact sheet size for the current face sizes (0, 0 if no sprite).
+// For an object this is its own band's size, not the canvas.
 static gfx::Size sharedSheetSize(doc::Sprite* spr)
 {
   if (!spr) return gfx::Size(0, 0);
@@ -1186,6 +1516,169 @@ static gfx::Size sharedSheetSize(doc::Sprite* spr)
   int colW[3], rowH[2];
   sharedLayout(w, h, colW, rowH);
   return gfx::Size(colW[0] + colW[1] + colW[2], rowH[0] + rowH[1]);
+}
+
+// The canvas size every object's band fits in exactly. Without object
+// groups this is sharedSheetSize of the root (unchanged behaviour).
+static gfx::Size atlasSize(doc::Sprite* spr)
+{
+  if (!spr) return gfx::Size(0, 0);
+  gfx::Size s;
+  {
+    EasymetricObjectScope root(spr, std::string());
+    s = sharedSheetSize(spr);
+  }
+  for (const ObjectGroupRef& g : objectGroups(spr)) {
+    EasymetricObjectScope sc(spr, g.meta.key);
+    const gfx::Size band = sharedSheetSize(spr);
+    s.w = std::max(s.w, band.w);
+    s.h = std::max(s.h, objectBandY(spr) + band.h);
+  }
+  return s;
+}
+
+// The root object's own settings live on the sprite (it has no group):
+// "rank=N;hidden=0|1".
+constexpr const char* kRootObjectProp = "easymetric_root";
+
+static void readRootObjectProps(doc::Sprite* spr, int& rank, bool& hidden)
+{
+  rank = -1;
+  hidden = false;
+  if (!spr)
+    return;
+  const auto& maps = spr->userData().propertiesMaps();
+  auto it = maps.find(std::string());
+  if (it == maps.end())
+    return;
+  auto jt = it->second.find(kRootObjectProp);
+  if (jt == it->second.end())
+    return;
+  if (const std::string* s =
+        std::get_if<std::string>(static_cast<const doc::UserData::VariantBase*>(&jt->second))) {
+    int r = -1, h = 0;
+    if (std::sscanf(s->c_str(), "rank=%d;hidden=%d", &r, &h) >= 1) {
+      rank = r;
+      hidden = (h != 0);
+    }
+  }
+}
+
+struct ObjectInfo {
+  std::string key;  // "" = the root object
+  std::string name; // "Object 1" for the root
+  doc::LayerGroup* group = nullptr;
+  ObjectMeta meta;
+  bool visible = true;
+  int box[3] = { 0, 0, 0 }; // X width, Y height, Z depth in pixels (= the renderer's box)
+  int priority = 0;         // higher wins where two objects' surfaces coincide
+  int64_t size = 0;         // painted volume (frame 0) for the automatic priority
+};
+
+static bool paintedIndexBox(doc::Sprite* spr, doc::frame_t fr, int lo[3], int hi[3]);
+
+// Box of the current object: the renderer's halfX/Y/Z * 2.
+static void currentObjectBox(doc::Sprite* spr, int box[3])
+{
+  int w[kFaceCount], h[kFaceCount];
+  sharedFaceSizes(spr, w, h);
+  box[0] = std::max({ w[kFaceFront], w[kFaceBack], w[kFaceTop], w[kFaceDown] });
+  box[1] = std::max({ h[kFaceFront], h[kFaceBack], h[kFaceLeft], h[kFaceRight] });
+  box[2] = std::max({ w[kFaceLeft], w[kFaceRight], h[kFaceTop], h[kFaceDown] });
+}
+
+static std::string objectDisplayName(const doc::Layer* group)
+{
+  const std::string& n = group->name();
+  const std::string prefix = kObjectGroupPrefix;
+  return n.rfind(prefix, 0) == 0 ? n.substr(prefix.size()) : n;
+}
+
+// Every object, the root first. Priority (Arin, 2026-11-17: "priority,
+// auto by default"): a manual rank (>= 0) beats every automatic one and
+// higher ranks win; automatic objects: the smaller box is in front; equal
+// boxes: the later created one is in front.
+static std::vector<ObjectInfo> resolveObjects(doc::Sprite* spr)
+{
+  std::vector<ObjectInfo> out;
+  if (!spr)
+    return out;
+  {
+    EasymetricObjectScope sc(spr, std::string());
+    ObjectInfo r;
+    r.name = "Object 1";
+    bool hidden = false;
+    readRootObjectProps(spr, r.meta.rank, hidden);
+    r.visible = !hidden;
+    currentObjectBox(spr, r.box);
+    out.push_back(r);
+  }
+  for (const ObjectGroupRef& g : objectGroups(spr)) {
+    EasymetricObjectScope sc(spr, g.meta.key);
+    ObjectInfo o;
+    o.key = g.meta.key;
+    o.name = objectDisplayName(g.group);
+    o.group = g.group;
+    o.meta = g.meta;
+    o.visible = g.group->isVisible();
+    currentObjectBox(spr, o.box);
+    out.push_back(o);
+  }
+  // "Smaller in front" (Arin, 2026-11-17). Since every object has the model
+  // size (2026-11-18), "smaller" is the box around what is painted.
+  for (ObjectInfo& o : out) {
+    EasymetricObjectScope sc(spr, o.key);
+    int lo[3], hi[3];
+    o.size = paintedIndexBox(spr, 0, lo, hi)
+               ? int64_t(hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2])
+               : int64_t(o.box[0]) * o.box[1] * o.box[2];
+  }
+  std::vector<size_t> idx(out.size());
+  for (size_t i = 0; i < idx.size(); ++i)
+    idx[i] = i;
+  auto volume = [&](size_t i) { return out[i].size; };
+  std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+    const ObjectInfo& A = out[a];
+    const ObjectInfo& B = out[b];
+    const bool ma = A.meta.rank >= 0, mb = B.meta.rank >= 0;
+    if (ma != mb)
+      return !ma; // automatic below manual
+    if (ma && A.meta.rank != B.meta.rank)
+      return A.meta.rank < B.meta.rank;
+    if (volume(a) != volume(b))
+      return volume(a) > volume(b); // bigger = lower priority
+    return A.meta.order < B.meta.order;
+  });
+  for (size_t p = 0; p < idx.size(); ++p)
+    out[idx[p]].priority = int(p);
+  return out;
+}
+
+// World centre (renderer frame: X right, Y DOWN, Z to the front) of an
+// object's box. The root's box is centred at the origin; an object's offset
+// is its box's min corner relative to the root's (X right, Y UP, Z front).
+static void objectWorldCentre(const ObjectInfo& root, const ObjectInfo& o, float c[3])
+{
+  c[0] = -root.box[0] * 0.5f + float(o.meta.o[0]) + o.box[0] * 0.5f;
+  c[1] = root.box[1] * 0.5f - float(o.meta.o[1]) - o.box[1] * 0.5f;
+  c[2] = -root.box[2] * 0.5f + float(o.meta.o[2]) + o.box[2] * 0.5f;
+}
+
+// "Head", "Object: Head", a key, or "Object 1" / "root" / "" -> key ("" =
+// root). Returns false when no such object exists.
+static bool resolveObjectKey(doc::Sprite* spr, const std::string& nameOrKey, std::string& key)
+{
+  key.clear();
+  if (nameOrKey.empty() || nameOrKey == "Object 1" || nameOrKey == "root")
+    return true;
+  for (const ObjectGroupRef& g : objectGroups(spr)) {
+    if (g.meta.key == nameOrKey || g.group->name() == nameOrKey ||
+        objectDisplayName(g.group) == nameOrKey) {
+      key = g.meta.key;
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,6 +1782,173 @@ static int ghostAxesOfFace(int face, GhostAxis out[2])
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Resizing a face's pixels consistently in model space (2026-11-18).
+// "Index space" of the model box: X grows to the right, Y grows DOWN (row 0 =
+// the top), Z grows towards the front; a non-flipped face axis runs along it,
+// a flipped one against it (ghostAxesOfFace). Arin's report: a resize that
+// copied each view into the top-left of its bigger cell left half of the side
+// views empty (a slab instead of a cube), and a top-left anchor is a
+// different 3D corner in Back/Right than in Front/Left.
+// ---------------------------------------------------------------------------
+enum class ResizeMode { Keep, Stretch };
+
+static int floorHalf(int v)
+{
+  return v >= 0 ? v / 2 : -((-v + 1) / 2);
+}
+
+// Where old face pixel (0, 0) lands in the new face rect, when the old box's
+// index-space min corner sits at org[axis] inside the new box. The axis a
+// face does not show is ignored. org == nullptr: centred on both axes.
+static void faceShiftForOrigin(int face,
+                               int oldW,
+                               int oldH,
+                               int newW,
+                               int newH,
+                               const int* org,
+                               int& du,
+                               int& dv)
+{
+  GhostAxis ax[2];
+  ghostAxesOfFace(face, ax);
+  du = dv = 0;
+  for (const GhostAxis& a : ax) {
+    const int oldLen = a.coord == 0 ? oldW : oldH;
+    const int newLen = a.coord == 0 ? newW : newH;
+    const int o = org ? org[a.axis] : floorHalf(newLen - oldLen);
+    (a.coord == 0 ? du : dv) = a.flip ? newLen - o - oldLen : o;
+  }
+}
+
+// Copies one face from srcRc (src image coordinates) into dstRc of dst.
+// Keep: unscaled, placed by faceShiftForOrigin (centred when org is null;
+// whatever falls outside dstRc is cropped). Stretch: nearest-neighbour,
+// sampled at pixel centres in index space, so a face and its mirror face
+// pick the same source pixels.
+static void copyFacePixels(doc::Image* dst,
+                           const gfx::Rect& dstRc,
+                           const doc::Image* src,
+                           const gfx::Rect& srcRc,
+                           int face,
+                           ResizeMode mode,
+                           const int* org = nullptr)
+{
+  if (!dst || !src || dstRc.isEmpty() || srcRc.isEmpty())
+    return;
+  if (mode == ResizeMode::Stretch) {
+    GhostAxis ax[2];
+    ghostAxesOfFace(face, ax);
+    bool flipU = false, flipV = false;
+    for (const GhostAxis& a : ax)
+      (a.coord == 0 ? flipU : flipV) = a.flip;
+    auto mapIdx = [](int i, int n, int o, bool flip) {
+      const int m = flip ? n - 1 - i : i;
+      const int sm = int((int64_t(2 * m + 1) * o) / (int64_t(2) * n));
+      return flip ? o - 1 - sm : sm;
+    };
+    for (int v = 0; v < dstRc.h; ++v) {
+      const int sy = srcRc.y + mapIdx(v, dstRc.h, srcRc.h, flipV);
+      if (sy < 0 || sy >= src->height())
+        continue;
+      for (int u = 0; u < dstRc.w; ++u) {
+        const int sx = srcRc.x + mapIdx(u, dstRc.w, srcRc.w, flipU);
+        if (sx < 0 || sx >= src->width())
+          continue;
+        doc::put_pixel(dst, dstRc.x + u, dstRc.y + v, doc::get_pixel(src, sx, sy));
+      }
+    }
+    return;
+  }
+  int du = 0, dv = 0;
+  faceShiftForOrigin(face, srcRc.w, srcRc.h, dstRc.w, dstRc.h, org, du, dv);
+  for (int v = 0; v < srcRc.h; ++v) {
+    const int ty = dv + v;
+    const int sy = srcRc.y + v;
+    if (ty < 0 || ty >= dstRc.h || sy < 0 || sy >= src->height())
+      continue;
+    for (int u = 0; u < srcRc.w; ++u) {
+      const int tx = du + u;
+      const int sx = srcRc.x + u;
+      if (tx < 0 || tx >= dstRc.w || sx < 0 || sx >= src->width())
+        continue;
+      doc::put_pixel(dst, dstRc.x + tx, dstRc.y + ty, doc::get_pixel(src, sx, sy));
+    }
+  }
+}
+
+// Index-space bounds [lo, hi) of what is painted (Base alpha > 0) in the
+// current object's cells on frame `fr`, merged over all six views. Returns
+// false (lo/hi untouched) when nothing is painted.
+static bool paintedIndexBox(doc::Sprite* spr, doc::frame_t fr, int lo[3], int hi[3])
+{
+  const SharedSurfaceLayers sh = findSharedLayers(spr);
+  const doc::Cel* cel = sh.baseLayer ? sh.baseLayer->cel(fr) : nullptr;
+  const doc::Image* img = cel ? cel->image() : nullptr;
+  if (!img)
+    return false;
+  int l[3] = { INT_MAX, INT_MAX, INT_MAX }, h[3] = { INT_MIN, INT_MIN, INT_MIN };
+  bool any = false;
+  for (int f = 0; f < kFaceCount; ++f) {
+    const gfx::Rect rc = sharedFaceRect(spr, f);
+    int u0 = INT_MAX, u1 = INT_MIN, v0 = INT_MAX, v1 = INT_MIN;
+    for (int v = 0; v < rc.h; ++v) {
+      const int y = rc.y + v - cel->y();
+      if (y < 0 || y >= img->height())
+        continue;
+      for (int u = 0; u < rc.w; ++u) {
+        const int x = rc.x + u - cel->x();
+        if (x < 0 || x >= img->width())
+          continue;
+        const doc::color_t c = doc::get_pixel(img, x, y);
+        const bool solid = img->pixelFormat() == doc::IMAGE_RGB ? doc::rgba_geta(c) > 0
+                           : img->pixelFormat() == doc::IMAGE_GRAYSCALE
+                             ? doc::graya_geta(c) > 0
+                             : c != img->maskColor();
+        if (!solid)
+          continue;
+        u0 = std::min(u0, u);
+        u1 = std::max(u1, u + 1);
+        v0 = std::min(v0, v);
+        v1 = std::max(v1, v + 1);
+      }
+    }
+    if (u0 > u1)
+      continue;
+    any = true;
+    GhostAxis ax[2];
+    ghostAxesOfFace(f, ax);
+    for (const GhostAxis& a : ax) {
+      const int len = a.coord == 0 ? rc.w : rc.h;
+      int a0 = a.coord == 0 ? u0 : v0, a1 = a.coord == 0 ? u1 : v1;
+      if (a.flip) {
+        const int t = len - a1;
+        a1 = len - a0;
+        a0 = t;
+      }
+      l[a.axis] = std::min(l[a.axis], a0);
+      h[a.axis] = std::max(h[a.axis], a1);
+    }
+  }
+  if (!any)
+    return false;
+  for (int a = 0; a < 3; ++a) {
+    if (l[a] > h[a]) { // an axis no painted view shows: the whole box
+      int w[kFaceCount], hh[kFaceCount];
+      sharedFaceSizes(spr, w, hh);
+      int box[3];
+      box[0] = w[kFaceFront];
+      box[1] = hh[kFaceFront];
+      box[2] = w[kFaceRight];
+      l[a] = 0;
+      h[a] = box[a];
+    }
+    lo[a] = l[a];
+    hi[a] = h[a];
+  }
+  return true;
+}
+
 static int ghostOppositeFace(int face)
 {
   switch (face) {
@@ -1327,41 +1987,109 @@ struct GhostData {
 
 // Content = alpha > 16 on the Base sheet (the silhouette the preview carves
 // from), else the Texture sheet when there is no Base.
-static GhostData computeGhost(Doc* doc, doc::frame_t fr)
+// `fr[f]` is the frame each face's panel shows (panels can have their own
+// frame). `colLinked[c]`: the lower face of a linked column is only a copy of
+// the upper one (the preview and the doc sync do not mirror it), so it is
+// neither a source nor a destination of hints. `edgesU/V[f]` are cell
+// boundaries (0 .. size) along that face's u / v axis when its panel grid is
+// on; empty = every pixel is its own cell (pixel-exact hints). In cell mode a
+// whole destination cell is flagged when it has no content at all.
+// Which columns / rows of each face hold content (alpha > 16 on Base, else
+// Texture), in face pixels. Shared by the ghost hints and auto-align so both
+// see exactly the same occupancy. Returns false when there is no sheet.
+struct FaceOccupancy {
+  int w[kFaceCount] = {};
+  int h[kFaceCount] = {};
+  std::vector<uint8_t> colHas[kFaceCount];
+  std::vector<uint8_t> rowHas[kFaceCount];
+};
+
+static bool computeFaceOccupancy(Doc* doc, const doc::frame_t fr[kFaceCount], FaceOccupancy& o)
 {
-  GhostData g;
   doc::Sprite* spr = doc ? doc->sprite() : nullptr;
   if (!spr)
-    return g;
+    return false;
   SharedSurfaceLayers shared = findSharedLayers(spr);
   doc::LayerImage* lyr = shared.baseLayer ? shared.baseLayer : shared.textureLayer;
-  doc::Cel* cel = lyr ? lyr->cel(fr) : nullptr;
-  if (!cel || !cel->image())
-    return g;
-  const doc::Image* img = cel->image();
+  if (!lyr)
+    return false;
 
-  std::vector<uint8_t> occ[kFaceCount];
-  std::vector<uint8_t> colHas[kFaceCount], rowHas[kFaceCount];
+  // Opaque test that works in every colour mode (a plain rgba_geta read made
+  // Indexed and Grayscale sprites look empty).
+  auto isOpaque = [spr](const doc::Image* img, int x, int y) {
+    const doc::color_t c = img->getPixel(x, y);
+    switch (img->pixelFormat()) {
+      case doc::IMAGE_RGB:       return doc::rgba_geta(c) > 16;
+      case doc::IMAGE_GRAYSCALE: return doc::graya_geta(c) > 16;
+      case doc::IMAGE_INDEXED:   return c != spr->transparentColor();
+      default:                   return false;
+    }
+  };
+
   for (int f = 0; f < kFaceCount; ++f) {
     const gfx::Rect rc = sharedFaceRect(spr, f);
-    g.w[f] = rc.w;
-    g.h[f] = rc.h;
-    occ[f].assign(size_t(std::max(0, rc.w)) * size_t(std::max(0, rc.h)), 0);
-    colHas[f].assign(size_t(std::max(0, rc.w)), 0);
-    rowHas[f].assign(size_t(std::max(0, rc.h)), 0);
+    o.w[f] = rc.w;
+    o.h[f] = rc.h;
+    o.colHas[f].assign(size_t(std::max(0, rc.w)), 0);
+    o.rowHas[f].assign(size_t(std::max(0, rc.h)), 0);
+    doc::Cel* cel = lyr->cel(fr[f]);
+    if (!cel || !cel->image())
+      continue;
+    const doc::Image* img = cel->image();
     for (int v = 0; v < rc.h; ++v) {
       for (int u = 0; u < rc.w; ++u) {
         const int ix = rc.x + u - cel->x();
         const int iy = rc.y + v - cel->y();
         if (ix < 0 || iy < 0 || ix >= img->width() || iy >= img->height())
           continue;
-        if (doc::rgba_geta(img->getPixel(ix, iy)) > 16) {
-          occ[f][size_t(v) * size_t(rc.w) + size_t(u)] = 1;
-          colHas[f][size_t(u)] = 1;
-          rowHas[f][size_t(v)] = 1;
+        if (isOpaque(img, ix, iy)) {
+          o.colHas[f][size_t(u)] = 1;
+          o.rowHas[f][size_t(v)] = 1;
         }
       }
     }
+  }
+  return true;
+}
+
+static GhostData computeGhost(Doc* doc,
+                              const doc::frame_t fr[kFaceCount],
+                              const bool colLinked[3],
+                              const std::vector<int> edgesU[kFaceCount],
+                              const std::vector<int> edgesV[kFaceCount])
+{
+  GhostData g;
+  FaceOccupancy occ;
+  if (!computeFaceOccupancy(doc, fr, occ))
+    return g;
+
+  auto hidden = [&](int f) { return (f & 1) && colLinked[f >> 1]; };
+
+  using Range = std::pair<int, int>;
+  auto cellsOf = [](const std::vector<int>& edges, int size) {
+    std::vector<Range> out;
+    if (edges.size() < 3) {
+      for (int i = 0; i < size; ++i)
+        out.emplace_back(i, i + 1);
+      return out;
+    }
+    for (size_t i = 0; i + 1 < edges.size(); ++i) {
+      const int a = std::clamp(edges[i], 0, size);
+      const int b = std::clamp(edges[i + 1], 0, size);
+      if (b > a)
+        out.emplace_back(a, b);
+    }
+    return out;
+  };
+
+  std::vector<Range> cellU[kFaceCount], cellV[kFaceCount];
+  const std::vector<uint8_t>* colHas = occ.colHas;
+  const std::vector<uint8_t>* rowHas = occ.rowHas;
+  for (int f = 0; f < kFaceCount; ++f) {
+    g.w[f] = occ.w[f];
+    g.h[f] = occ.h[f];
+    cellU[f] = cellsOf(edgesU[f], g.w[f]);
+    cellV[f] = cellsOf(edgesV[f], g.h[f]);
   }
 
   for (int d = 0; d < kFaceCount; ++d)
@@ -1370,53 +2098,324 @@ static GhostData computeGhost(Doc* doc, doc::frame_t fr)
       g.row[d][s].assign(size_t(std::max(0, g.h[d])), 0);
     }
 
+  // True when any pixel inside `r` of `has` is set.
+  auto rangeHas = [](const std::vector<uint8_t>& has, const Range& r) {
+    for (int i = r.first; i < r.second && i < int(has.size()); ++i)
+      if (has[size_t(i)])
+        return true;
+    return false;
+  };
+  auto cellIndexAt = [](const std::vector<Range>& cells, int idx) {
+    for (size_t i = 0; i < cells.size(); ++i)
+      if (idx >= cells[i].first && idx < cells[i].second)
+        return int(i);
+    return -1;
+  };
+
   for (int s = 0; s < kFaceCount; ++s) {
-    if (g.w[s] <= 0 || g.h[s] <= 0)
+    if (hidden(s) || g.w[s] <= 0 || g.h[s] <= 0)
       continue;
     GhostAxis sAxes[2];
     ghostAxesOfFace(s, sAxes);
-    for (int v = 0; v < g.h[s]; ++v) {
-      for (int u = 0; u < g.w[s]; ++u) {
-        if (!occ[s][size_t(v) * size_t(g.w[s]) + size_t(u)])
-          continue;
-        const double fu = (u + 0.5) / g.w[s];
-        const double fv = (v + 0.5) / g.h[s];
-        for (int k = 0; k < 2; ++k) {
-          const GhostAxis& sa = sAxes[k];
-          double a = (sa.coord == 0) ? fu : fv;
-          if (sa.flip)
-            a = 1.0 - a;
-          for (int d = 0; d < kFaceCount; ++d) {
-            if (d == s || d == ghostOppositeFace(s) || g.w[d] <= 0 || g.h[d] <= 0)
+    for (int k = 0; k < 2; ++k) {
+      const GhostAxis& sa = sAxes[k];
+      const int sSize = (sa.coord == 0) ? g.w[s] : g.h[s];
+      const std::vector<Range>& sCells = (sa.coord == 0) ? cellU[s] : cellV[s];
+      const std::vector<uint8_t>& sHas = (sa.coord == 0) ? colHas[s] : rowHas[s];
+      for (const Range& sc : sCells) {
+        if (!rangeHas(sHas, sc))
+          continue; // nothing drawn in this cell of the source: it demands nothing
+        double a = (0.5 * (sc.first + sc.second)) / double(sSize);
+        if (sa.flip)
+          a = 1.0 - a;
+        for (int d = 0; d < kFaceCount; ++d) {
+          if (d == s || d == ghostOppositeFace(s) || hidden(d) || g.w[d] <= 0 || g.h[d] <= 0)
+            continue;
+          GhostAxis dAxes[2];
+          ghostAxesOfFace(d, dAxes);
+          for (int m = 0; m < 2; ++m) {
+            const GhostAxis& da = dAxes[m];
+            if (da.axis != sa.axis)
               continue;
-            GhostAxis dAxes[2];
-            ghostAxesOfFace(d, dAxes);
-            for (int m = 0; m < 2; ++m) {
-              const GhostAxis& da = dAxes[m];
-              if (da.axis != sa.axis)
-                continue;
-              const double pos = da.flip ? 1.0 - a : a;
-              if (da.coord == 0) {
-                const int idx = std::clamp(int(pos * g.w[d]), 0, g.w[d] - 1);
-                if (!colHas[d][size_t(idx)]) {
-                  g.col[d][s][size_t(idx)] = 1;
-                  g.any = true;
-                }
-              }
-              else {
-                const int idx = std::clamp(int(pos * g.h[d]), 0, g.h[d] - 1);
-                if (!rowHas[d][size_t(idx)]) {
-                  g.row[d][s][size_t(idx)] = 1;
-                  g.any = true;
-                }
-              }
-            }
+            const double pos = da.flip ? 1.0 - a : a;
+            const bool alongU = (da.coord == 0);
+            const int dSize = alongU ? g.w[d] : g.h[d];
+            const std::vector<Range>& dCells = alongU ? cellU[d] : cellV[d];
+            const std::vector<uint8_t>& dHas = alongU ? colHas[d] : rowHas[d];
+            const int idx = std::clamp(int(pos * dSize), 0, dSize - 1);
+            const int ci = cellIndexAt(dCells, idx);
+            if (ci < 0 || rangeHas(dHas, dCells[size_t(ci)]))
+              continue;
+            auto& mark = alongU ? g.col[d][s] : g.row[d][s];
+            for (int i = dCells[size_t(ci)].first; i < dCells[size_t(ci)].second; ++i)
+              mark[size_t(i)] = 1;
+            g.any = true;
           }
         }
       }
     }
   }
   return g;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-align (2026-11-16, Arin: the editor owns alignment). After a stroke in
+// a view, the view's occupied extent on each of its two model axes is
+// compared with the reference extent: Front for X (width) and Y (height), Top
+// for Z (depth). Occupancy is the ghost hints' (computeFaceOccupancy) and the
+// view -> model axes are the ghost table (ghostAxesOfFace), which matches the
+// renderer, so there is no second mapping here.
+//   same length, different start  -> offset: shift the view (<= limit px)
+//   different length              -> shape change: move nothing, readout
+//   drawn view is the reference    -> move nothing, readout of the others
+// The shift is applied by applyFaceShift as its own undoable transaction.
+// ---------------------------------------------------------------------------
+struct AlignPlan {
+  int face = -1;
+  int du = 0; // view-pixel shift along u (columns), + = right
+  int dv = 0; // view-pixel shift along v (rows), + = down
+  std::vector<std::string> shifted; // e.g. "+2 px depth"
+  std::vector<std::string> notes;   // readouts, nothing moved
+};
+
+static const char* alignAxisName(int axis)
+{
+  return axis == 0 ? "width" : axis == 1 ? "height" : "depth";
+}
+
+static int alignReferenceFace(int axis)
+{
+  return axis == 2 ? int(kFaceTop) : int(kFaceFront);
+}
+
+// Occupied extent of face f along model axis `axis`, in model pixels (flip
+// applied). False if the face has nothing there or does not show that axis.
+static bool alignExtent(const FaceOccupancy& o, int f, int axis, int& first, int& len, int& size)
+{
+  GhostAxis ax[2];
+  ghostAxesOfFace(f, ax);
+  for (const GhostAxis& a : ax) {
+    if (a.axis != axis)
+      continue;
+    const std::vector<uint8_t>& has = (a.coord == 0) ? o.colHas[f] : o.rowHas[f];
+    size = int(has.size());
+    int lo = -1, hi = -1;
+    for (int i = 0; i < size; ++i)
+      if (has[size_t(i)]) {
+        if (lo < 0)
+          lo = i;
+        hi = i;
+      }
+    if (lo < 0)
+      return false;
+    first = a.flip ? size - 1 - hi : lo;
+    len = hi - lo + 1;
+    return true;
+  }
+  return false;
+}
+
+// Direction of model axis `axis` in face f's pixels: +1 when the model
+// coordinate grows with u / v, -1 when the face shows it flipped.
+static int alignViewSign(int f, int axis)
+{
+  GhostAxis ax[2];
+  ghostAxesOfFace(f, ax);
+  for (const GhostAxis& a : ax)
+    if (a.axis == axis)
+      return a.flip ? -1 : 1;
+  return 1;
+}
+
+static AlignPlan planFaceAlign(Doc* doc,
+                               const doc::frame_t fr[kFaceCount],
+                               const bool colLinked[3],
+                               int face,
+                               int limit)
+{
+  AlignPlan plan;
+  plan.face = face;
+  FaceOccupancy o;
+  if (face < 0 || face >= kFaceCount || !computeFaceOccupancy(doc, fr, o))
+    return plan;
+  auto hidden = [&](int f) { return (f & 1) && colLinked[f >> 1]; };
+  if (hidden(face))
+    return plan; // a linked lower face is only a mirror of its partner
+
+  GhostAxis ax[2];
+  ghostAxesOfFace(face, ax);
+  for (const GhostAxis& a : ax) {
+    const int ref = alignReferenceFace(a.axis);
+    const char* axisName = alignAxisName(a.axis);
+    int rFirst = 0, rLen = 0, rSize = 0;
+    const bool refHas = alignExtent(o, ref, a.axis, rFirst, rLen, rSize);
+
+    if (face == ref) {
+      // Drawn in the reference: never move the others, report them.
+      if (!refHas)
+        continue;
+      for (int g = 0; g < kFaceCount; ++g) {
+        int gFirst = 0, gLen = 0, gSize = 0;
+        if (g == face || hidden(g) || !alignExtent(o, g, a.axis, gFirst, gLen, gSize))
+          continue;
+        if (gLen != rLen)
+          plan.notes.push_back(fmt::format("{}: {} {} px, {} says {} px",
+                                           kFaceSpecs[g].displayName, axisName, gLen,
+                                           kFaceSpecs[ref].displayName, rLen));
+        else if (gSize == rSize && gFirst != rFirst)
+          plan.notes.push_back(fmt::format("{}: {} offset {:+d} px from {}",
+                                           kFaceSpecs[g].displayName, axisName,
+                                           (gFirst - rFirst) * alignViewSign(g, a.axis),
+                                           kFaceSpecs[ref].displayName));
+      }
+      continue;
+    }
+
+    int vFirst = 0, vLen = 0, vSize = 0;
+    if (!refHas || !alignExtent(o, face, a.axis, vFirst, vLen, vSize))
+      continue;
+    if (vLen != rLen) {
+      plan.notes.push_back(fmt::format("{}: {} {} px, {} says {} px",
+                                       kFaceSpecs[face].displayName, axisName, vLen,
+                                       kFaceSpecs[ref].displayName, rLen));
+      continue;
+    }
+    if (vSize != rSize) {
+      plan.notes.push_back(fmt::format("{}: {} not aligned, the face is {} px and {} is {} px",
+                                       kFaceSpecs[face].displayName, axisName, vSize,
+                                       kFaceSpecs[ref].displayName, rSize));
+      continue;
+    }
+    const int delta = rFirst - vFirst; // in model pixels
+    if (delta == 0)
+      continue;
+    // Shifts and offsets are reported in the view's own pixels (+ = right
+    // or down in that panel), which is what the user sees move.
+    const int px = a.flip ? -delta : delta;
+    if (std::abs(delta) > limit) {
+      plan.notes.push_back(fmt::format("{}: {} offset {:+d} px from {} (over the {} px "
+                                       "auto-align limit, left as drawn)",
+                                       kFaceSpecs[face].displayName, axisName, -px,
+                                       kFaceSpecs[ref].displayName, limit));
+      continue;
+    }
+    if (a.coord == 0)
+      plan.du += px;
+    else
+      plan.dv += px;
+    plan.shifted.push_back(fmt::format("{:+d} px {}", px, axisName));
+  }
+  return plan;
+}
+
+// Shifts face `face` by (du, dv) view pixels on every surface sheet (Base,
+// Texture, Depth) of frame `fr`. When its column is linked, the partner face
+// is rewritten as the mirrored copy (the flips syncOpposingCels and
+// extractSixSurfaces use). One transaction = one undo step.
+static bool applyFaceShift(Doc* doc,
+                           doc::frame_t fr,
+                           int face,
+                           int du,
+                           int dv,
+                           const bool colLinked[3],
+                           const std::string& label)
+{
+  doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+  if (!spr || (du == 0 && dv == 0) || face < 0 || face >= kFaceCount)
+    return false;
+  SharedSurfaceLayers shared = findSharedLayers(spr);
+  if (!shared.baseLayer && !shared.textureLayer)
+    return false;
+  const gfx::Rect rc = sharedFaceRect(spr, face);
+  const int col = face / 2;
+  const bool mirror = !(face & 1) && colLinked[col];
+  const gfx::Rect prc = mirror ? sharedFaceRect(spr, face + 1) : gfx::Rect();
+  const bool flipV = (col == 0);
+
+  Tx tx(doc, label, ModifyDocument);
+  DocApi api = doc->getApi(tx);
+  auto shiftLayer = [&](doc::LayerImage* lyr, bool replicateEdges) {
+    if (!lyr)
+      return;
+    doc::Cel* cel = lyr->cel(fr);
+    if (!cel || !cel->image())
+      return;
+    int ox = cel->x(), oy = cel->y();
+    const gfx::Rect need = mirror ? rc.createUnion(prc) : rc;
+    doc::ImageRef img;
+    if (cel->bounds().contains(need)) {
+      img.reset(doc::Image::createCopy(cel->image()));
+    }
+    else {
+      img.reset(doc::Image::create(cel->image()->pixelFormat(), spr->width(), spr->height()));
+      doc::clear_image(img.get(), img->maskColor());
+      doc::copy_image(img.get(), cel->image(), ox, oy);
+      ox = oy = 0;
+    }
+    const doc::color_t empty = img->maskColor();
+    std::unique_ptr<doc::Image> src(doc::Image::createCopy(img.get()));
+    auto at = [&](int u, int v) -> doc::color_t {
+      if (replicateEdges) {
+        u = std::clamp(u, 0, rc.w - 1);
+        v = std::clamp(v, 0, rc.h - 1);
+      }
+      else if (u < 0 || v < 0 || u >= rc.w || v >= rc.h)
+        return empty;
+      const int x = rc.x + u - ox, y = rc.y + v - oy;
+      if (x < 0 || y < 0 || x >= src->width() || y >= src->height())
+        return empty;
+      return doc::get_pixel(src.get(), x, y);
+    };
+    for (int v = 0; v < rc.h; ++v)
+      for (int u = 0; u < rc.w; ++u)
+        doc::put_pixel(img.get(), rc.x + u - ox, rc.y + v - oy, at(u - du, v - dv));
+    if (mirror) {
+      const int cw = std::min(rc.w, prc.w), ch = std::min(rc.h, prc.h);
+      for (int v = 0; v < ch; ++v)
+        for (int u = 0; u < cw; ++u) {
+          const int su = flipV ? u : cw - 1 - u;
+          const int sv = flipV ? ch - 1 - v : v;
+          doc::put_pixel(img.get(), prc.x + u - ox, prc.y + v - oy,
+                         doc::get_pixel(img.get(), rc.x + su - ox, rc.y + sv - oy));
+        }
+    }
+    api.replaceImage(spr, cel->imageRef(), img);
+    if (ox != cel->x() || oy != cel->y())
+      api.setCelPosition(spr, cel, ox, oy);
+  };
+  shiftLayer(shared.baseLayer, false);
+  shiftLayer(shared.textureLayer, false);
+  shiftLayer(shared.depthLayer, true);
+  tx.commit();
+  return true;
+}
+
+static std::string alignPlanSummary(const AlignPlan& p)
+{
+  std::string msg;
+  if (!p.shifted.empty()) {
+    msg = fmt::format("{} view aligned", kFaceSpecs[p.face].displayName);
+    for (size_t i = 0; i < p.shifted.size(); ++i)
+      msg += (i == 0 ? " " : ", ") + p.shifted[i];
+  }
+  for (const std::string& n : p.notes)
+    msg += (msg.empty() ? "" : " | ") + n;
+  return msg;
+}
+
+static json11::Json alignPlanJson(const AlignPlan& p, bool applied)
+{
+  json11::Json::array shifted(p.shifted.begin(), p.shifted.end());
+  json11::Json::array notes(p.notes.begin(), p.notes.end());
+  return json11::Json::object{
+    { "face", p.face >= 0 ? kFaceSpecs[p.face].sliceName : "" },
+    { "du", p.du },
+    { "dv", p.dv },
+    { "applied", applied },
+    { "shifted", shifted },
+    { "notes", notes },
+    { "message", alignPlanSummary(p) },
+  };
 }
 
 // Document-level state: works headless (no UI needed).
@@ -1455,7 +2454,12 @@ static json11::Json::object docStateObject(Doc* doc, doc::Layer* activeLayer, do
 
   SharedSurfaceLayers shared = findSharedLayers(spr);
   json11::Json::object faces;
-  const GhostData ghost = computeGhost(doc, fr);
+  doc::frame_t ghostFrames[kFaceCount];
+  for (int f = 0; f < kFaceCount; ++f)
+    ghostFrames[f] = fr;
+  const bool ghostNoLinks[3] = { false, false, false };
+  const std::vector<int> ghostNoEdges[kFaceCount];
+  const GhostData ghost = computeGhost(doc, ghostFrames, ghostNoLinks, ghostNoEdges, ghostNoEdges);
   const struct { const char* key; doc::LayerImage* lyr; } sheets[3] = {
     { "base", shared.baseLayer }, { "texture", shared.textureLayer }, { "depth", shared.depthLayer }
   };
@@ -1482,6 +2486,47 @@ static json11::Json::object docStateObject(Doc* doc, doc::Layer* activeLayer, do
   o["faces"] = faces;
   o["hasSurfaces"] = (shared.baseLayer != nullptr);
   o["hasDepthLayer"] = (shared.depthLayer != nullptr);
+
+  // Objects (2026-11-17): every object, the root first, with its cells and
+  // per-face Base statistics (the "faces" above are the current object's).
+  json11::Json::array objs;
+  for (const ObjectInfo& info : resolveObjects(spr)) {
+    EasymetricObjectScope sc(spr, info.key);
+    SharedSurfaceLayers ol = findSharedLayers(spr);
+    json11::Json::object jo;
+    jo["name"] = info.name;
+    jo["key"] = info.key;
+    jo["group"] = info.group ? info.group->name() : std::string();
+    jo["visible"] = info.visible;
+    jo["offset"] = json11::Json::array{ info.meta.o[0], info.meta.o[1], info.meta.o[2] };
+    jo["rank"] = info.meta.rank;
+    jo["priority"] = info.priority;
+    jo["box"] = json11::Json::array{ info.box[0], info.box[1], info.box[2] };
+    jo["bandY"] = objectBandY(spr);
+    jo["hasDepthLayer"] = (ol.depthLayer != nullptr);
+    json11::Json::object of;
+    for (int f = 0; f < kFaceCount; ++f) {
+      const gfx::Rect rc = sharedFaceRect(spr, f);
+      json11::Json::object fo{ { "uv", rectJson(rc) } };
+      if (ol.baseLayer && ol.baseLayer->cel(fr))
+        fo["base"] = rectStatsJson(rectStatsOfCel(ol.baseLayer->cel(fr), rc));
+      if (ol.textureLayer && ol.textureLayer->cel(fr))
+        fo["texture"] = rectStatsJson(rectStatsOfCel(ol.textureLayer->cel(fr), rc));
+      if (ol.depthLayer && ol.depthLayer->cel(fr))
+        fo["depth"] = rectStatsJson(rectStatsOfCel(ol.depthLayer->cel(fr), rc));
+      of[kFaceSpecs[f].sliceName] = fo;
+    }
+    jo["faces"] = of;
+    objs.push_back(jo);
+  }
+  o["objects"] = objs;
+  {
+    // The size every object shares (2026-11-18): Object 1's box.
+    EasymetricObjectScope root(spr, std::string());
+    int w[kFaceCount], h[kFaceCount];
+    sharedFaceSizes(spr, w, h);
+    o["modelSize"] = json11::Json::array{ w[kFaceFront], h[kFaceFront], w[kFaceRight] };
+  }
   return o;
 }
 
@@ -1555,11 +2600,231 @@ static bool flipFaceOnDoc(Doc* doc, int face, bool horizontal, doc::frame_t fr)
 // cropped at its bottom-right, exactly like a canvas resize.
 // Used both for a face resize and for reconciling a manual
 // canvas resize (see pollAndRender in the studio view).
-static void rebuildSharedSheets(Doc* doc, const int newW[kFaceCount],
-                                const int newH[kFaceCount])
+// With object groups present (Objects, 2026-11-17): re-lay out EVERY
+// object's band. The object `targetKey` gets the new face sizes, the others
+// keep theirs; bands are stacked downwards (root first, then objects in
+// creation order), the canvas becomes exactly the atlas, every object's
+// sheets are rebuilt for every frame (pixels copied from their old cells,
+// never scaled) and every object's slices move to their new cells. One Tx,
+// so it joins an outer transaction (New Object = one undo step).
+// Shared size (Arin, 2026-11-18): every object has the SAME face sizes (the
+// model size), so newW/newH apply to every object. `mode` says what happens
+// to the drawn pixels (ResizeMode). `orgs` (unifyObjectsOnDoc) places each
+// object's old box at an explicit index-space origin inside the new one.
+using ObjectOrigins = std::map<std::string, std::array<int, 3>>;
+
+static void rebuildAtlas(Doc* doc,
+                         const int newW[kFaceCount],
+                         const int newH[kFaceCount],
+                         ResizeMode mode = ResizeMode::Keep,
+                         const ObjectOrigins* orgs = nullptr,
+                         const char* label = "Resize Easymetric Objects")
+{
+  if (!doc || !doc->sprite())
+    return;
+  doc::Sprite* spr = doc->sprite();
+
+  struct Item {
+    std::string key;
+    SharedSurfaceLayers layers;
+    gfx::Rect oldRect[kFaceCount];
+    int w[kFaceCount], h[kFaceCount];
+    int colW[3], rowH[2];
+    int bandY = 0;
+  };
+  std::vector<Item> items;
+  std::vector<std::string> keys = { std::string() };
+  for (const ObjectGroupRef& g : objectGroups(spr))
+    keys.push_back(g.meta.key);
+  for (const std::string& key : keys) {
+    EasymetricObjectScope sc(spr, key);
+    Item it;
+    it.key = key;
+    it.layers = findSharedLayers(spr);
+    sharedFaceSizes(spr, it.w, it.h);
+    for (int f = 0; f < kFaceCount; ++f) {
+      it.oldRect[f] = sharedFaceRect(spr, f);
+      if (doc::Slice* sl = findSliceForFace(spr, f))
+        if (const auto* k = sl->getByFrame(0))
+          if (!k->bounds().isEmpty())
+            it.oldRect[f] = k->bounds();
+    }
+    for (int f = 0; f < kFaceCount; ++f) {
+      it.w[f] = std::clamp(newW[f], 1, 1024);
+      it.h[f] = std::clamp(newH[f], 1, 1024);
+    }
+    sharedLayout(it.w, it.h, it.colW, it.rowH);
+    items.push_back(it);
+  }
+  int atlasW = 1, atlasH = 0;
+  for (Item& it : items) {
+    it.bandY = atlasH;
+    atlasW = std::max(atlasW, it.colW[0] + it.colW[1] + it.colW[2]);
+    atlasH += it.rowH[0] + it.rowH[1];
+  }
+  atlasH = std::max(1, atlasH);
+
+  try {
+    Tx tx(doc, label, ModifyDocument);
+    DocApi api = doc->getApi(tx);
+    for (const Item& it : items) {
+      gfx::Rect newRect[kFaceCount];
+      for (int f = 0; f < kFaceCount; ++f) {
+        newRect[f] = sharedUVRectExact(f, it.colW, it.rowH, it.w[f], it.h[f]);
+        newRect[f].y += it.bandY;
+      }
+      const int* org = nullptr;
+      if (orgs) {
+        auto o = orgs->find(it.key);
+        if (o != orgs->end())
+          org = o->second.data();
+      }
+      for (doc::LayerImage* lyr :
+           { it.layers.baseLayer, it.layers.textureLayer, it.layers.depthLayer }) {
+        if (!lyr)
+          continue;
+        for (doc::frame_t fr = doc::frame_t(0); fr <= spr->lastFrame(); ++fr) {
+          doc::Cel* cel = lyr->cel(fr);
+          if (!cel || !cel->image())
+            continue;
+          const doc::Image* src = cel->image();
+          doc::ImageRef dst(doc::Image::create(src->pixelFormat(), atlasW, atlasH));
+          dst->clear(0);
+          for (int f = 0; f < kFaceCount; ++f) {
+            gfx::Rect srcRc = it.oldRect[f];
+            srcRc.offset(-cel->x(), -cel->y());
+            copyFacePixels(dst.get(), newRect[f], src, srcRc, f, mode, org);
+          }
+          api.replaceImage(spr, cel->imageRef(), dst);
+          api.setCelPosition(spr, cel, 0, 0);
+        }
+      }
+    }
+    api.setSpriteSize(spr, atlasW, atlasH);
+    for (const Item& it : items) {
+      EasymetricObjectScope sc(spr, it.key);
+      for (int f = 0; f < kFaceCount; ++f) {
+        gfx::Rect uv = sharedUVRectExact(f, it.colW, it.rowH, it.w[f], it.h[f]);
+        uv.y += it.bandY;
+        doc::Slice* sl = findSliceForFace(spr, f);
+        if (!sl) {
+          sl = new doc::Slice;
+          sl->setName(it.key.empty() ? std::string(kFaceSpecs[f].sliceName)
+                                     : objectSliceName(it.key, f));
+          sl->userData().setColor(
+            doc::rgba(kFaceSpecs[f].r, kFaceSpecs[f].g, kFaceSpecs[f].b, 255));
+          sl->insert(0, doc::SliceKey(uv));
+          tx(new cmd::AddSlice(spr, sl));
+        }
+        else {
+          tx(new cmd::SetSliceKey(sl, 0, doc::SliceKey(uv)));
+        }
+      }
+    }
+    tx.commit();
+    doc->notifyGeneralUpdate();
+  }
+  catch (const std::exception& e) {
+    easymetricReportError("rebuildAtlas", e.what());
+  }
+}
+
+// True when some object still has its own size or an offset (files made
+// before the shared model size, 2026-11-17).
+static bool needsUnify(doc::Sprite* spr)
+{
+  if (!spr || !hasObjectGroups(spr))
+    return false;
+  int rw[kFaceCount], rh[kFaceCount];
+  {
+    EasymetricObjectScope root(spr, std::string());
+    sharedFaceSizes(spr, rw, rh);
+  }
+  for (const ObjectGroupRef& g : objectGroups(spr)) {
+    if (g.meta.o[0] || g.meta.o[1] || g.meta.o[2])
+      return true;
+    EasymetricObjectScope sc(spr, g.meta.key);
+    int w[kFaceCount], h[kFaceCount];
+    sharedFaceSizes(spr, w, h);
+    for (int f = 0; f < kFaceCount; ++f)
+      if (w[f] != rw[f] || h[f] != rh[f])
+        return true;
+  }
+  return false;
+}
+
+// Migrates such a file to one shared model size: the space becomes the
+// union of every object's box (at its offset), each object's six views are
+// copied unscaled to their old place in it, and every offset becomes 0. The
+// 3D model is unchanged. One undo step. Returns the new box (X, Y, Z), or
+// all zeros when nothing had to change.
+static std::array<int, 3> unifyObjectsOnDoc(Doc* doc)
+{
+  std::array<int, 3> out = { 0, 0, 0 };
+  doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+  if (!needsUnify(spr))
+    return out;
+  const std::vector<ObjectInfo> infos = resolveObjects(spr);
+  int lo[3] = { 0, 0, 0 }, hi[3] = { infos[0].box[0], infos[0].box[1], infos[0].box[2] };
+  for (const ObjectInfo& i : infos) {
+    if (i.key.empty())
+      continue;
+    for (int a = 0; a < 3; ++a) {
+      lo[a] = std::min(lo[a], i.meta.o[a]);
+      hi[a] = std::max(hi[a], i.meta.o[a] + i.box[a]);
+    }
+  }
+  int S[3];
+  for (int a = 0; a < 3; ++a)
+    S[a] = std::clamp(hi[a] - lo[a], 1, 256);
+  ObjectOrigins orgs;
+  for (const ObjectInfo& i : infos) {
+    const int* o = i.meta.o; // the root's is 0, 0, 0
+    // Offsets are Y UP; index space is Y DOWN (row 0 = the top).
+    orgs[i.key] = { o[0] - lo[0], hi[1] - (o[1] + i.box[1]), o[2] - lo[2] };
+  }
+  int w[kFaceCount], h[kFaceCount];
+  for (int f = 0; f < kFaceCount; ++f) { // = boxFaceSizes(S), defined further down
+    GhostAxis ax[2];
+    ghostAxesOfFace(f, ax);
+    w[f] = S[ax[0].axis];
+    h[f] = S[ax[1].axis];
+  }
+  try {
+    Tx tx(doc, "Unify Easymetric Object Sizes", ModifyDocument);
+    rebuildAtlas(doc, w, h, ResizeMode::Keep, &orgs, "Unify Easymetric Object Sizes");
+    for (const ObjectGroupRef& g : objectGroups(spr)) {
+      ObjectMeta meta = g.meta;
+      meta.o[0] = meta.o[1] = meta.o[2] = 0;
+      tx(new cmd::SetUserDataProperty(g.group, std::string(), kObjectProp,
+                                      doc::UserData::Variant(objectMetaString(meta))));
+    }
+    tx.commit();
+    doc->notifyGeneralUpdate();
+  }
+  catch (const std::exception& e) {
+    easymetricReportError("unifyObjects", e.what());
+    return out;
+  }
+  out = { S[0], S[1], S[2] };
+  return out;
+}
+
+static void rebuildSharedSheets(Doc* doc,
+                                const int newW[kFaceCount],
+                                const int newH[kFaceCount],
+                                ResizeMode mode = ResizeMode::Keep)
 {
   if (!doc || !doc->sprite()) return;
   doc::Sprite* spr = doc->sprite();
+  if (hasObjectGroups(spr)) {
+    if (needsUnify(spr)) {
+      // Sizes asked for before the migration still apply afterwards.
+      unifyObjectsOnDoc(doc);
+    }
+    rebuildAtlas(doc, newW, newH, mode);
+    return;
+  }
   SharedSurfaceLayers shared = findSharedLayers(spr);
   if (!shared.baseLayer && !shared.textureLayer) return;
 
@@ -1594,18 +2859,10 @@ static void rebuildSharedSheets(Doc* doc, const int newW[kFaceCount],
         for (int f = 0; f < kFaceCount; ++f) {
           const gfx::Rect newUv = sharedUVRectExact(f, newColW, newRowH,
                                                     newW[f], newH[f]);
-          const int copyW = std::min(oldRect[f].w, newUv.w);
-          const int copyH = std::min(oldRect[f].h, newUv.h);
-          for (int v = 0; v < copyH; ++v) {
-            const int srcY = oldRect[f].y + v;
-            if (srcY < 0 || srcY >= cel->image()->height()) continue;
-            for (int u = 0; u < copyW; ++u) {
-              const int srcX = oldRect[f].x + u;
-              if (srcX < 0 || srcX >= cel->image()->width()) continue;
-              doc::put_pixel(resized.get(), newUv.x + u, newUv.y + v,
-                             doc::get_pixel(cel->image(), srcX, srcY));
-            }
-          }
+          // Centred (Keep) or scaled (Stretch) in model space, not anchored
+          // at the cell's top-left (2026-11-18). Same cel-offset handling
+          // as before: the old code read oldRect in image coordinates.
+          copyFacePixels(resized.get(), newUv, cel->image(), oldRect[f], f, mode);
         }
         api.replaceImage(spr, cel->imageRef(), resized);
         api.setCelPosition(spr, cel, 0, 0);
@@ -1673,7 +2930,7 @@ static void setupSharedSurfaceLayers(Doc* doc, bool seedStarterIfBlank,
         !existing.textureLayer) {
       existing.baseLayer->setName("Surface_Base");
     }
-    const gfx::Size exact = sharedSheetSize(spr);
+    const gfx::Size exact = atlasSize(spr);
     if (exact.w > 0 && (spr->width() != exact.w || spr->height() != exact.h)) {
       int w[kFaceCount], h[kFaceCount];
       sharedFaceSizes(spr, w, h);
@@ -1930,12 +3187,12 @@ static void propagateLinkedDimensions(Doc* doc, SixSurfaceData& data, int srcFac
         targetH[f] = data.h[f];
       }
       if (srcFace >= 0 && srcFace < kFaceCount) {
-        targetW[srcFace] = std::clamp(newW, 4, 256);
-        targetH[srcFace] = std::clamp(newH, 4, 256);
+        targetW[srcFace] = std::clamp(newW, 1, 256);
+        targetH[srcFace] = std::clamp(newH, 1, 256);
       }
       int oldW[kFaceCount], oldH[kFaceCount];
       sharedFaceSizes(spr, oldW, oldH);
-      const gfx::Size exact = sharedSheetSize(spr);
+      const gfx::Size exact = atlasSize(spr);
       bool changed = false;
       for (int f = 0; f < kFaceCount; ++f)
         if (targetW[f] != oldW[f] || targetH[f] != oldH[f]) changed = true;
@@ -2948,7 +4205,9 @@ static bool extractSixSurfaces(
   doc::Sprite* spr = doc->sprite();
   const int sw = spr->width();
   const int sh = spr->height();
-  out.init(std::max(sw, sh));
+  // Every face is re-sized below; a canvas-sized init only wasted memory
+  // (S x S per face), which matters once objects stack bands downwards.
+  out.init(8);
 
   doc::ImageRef depthSrcImg;
   if (useFaceDepth) {
@@ -2988,10 +4247,11 @@ static bool extractSixSurfaces(
       // origin moves to the face's UV cell.
       faceRect = sharedFaceRect(spr, f);
     }
-    const int fw = faceRect.w;
-    const int fh = faceRect.h;
     out.bounds[f] = faceRect;
-    out.setFaceSize(f, fw, fh);
+    out.setFaceSize(f, faceRect.w, faceRect.h);
+    // The buffers are sized by the (clamped) face size: index with it.
+    const int fw = out.w[f];
+    const int fh = out.h[f];
     out.hasSlices = true;
 
     doc::LayerImage* baseLyr = shared.baseLayer;
@@ -3175,6 +4435,20 @@ static bool extractSixSurfaces(
           out.depthAlpha[f][v * fw + u] = doc::rgba_geta(dc);
         }
       }
+      // A face whose depth area has nothing painted at all is FLAT, not a
+      // through-hole (2026-11-17): an empty Surface_DEPTH sheet used to make
+      // the whole model vanish, because transparent depth = hole. Holes are
+      // still made by erasing depth where other depth pixels exist.
+      bool anyDepth = false;
+      for (uint8_t a : out.depthAlpha[f])
+        if (a > 16) {
+          anyDepth = true;
+          break;
+        }
+      if (!anyDepth) {
+        std::fill(out.depthPixels[f].begin(), out.depthPixels[f].end(), uint8_t(128));
+        std::fill(out.depthAlpha[f].begin(), out.depthAlpha[f].end(), uint8_t(255));
+      }
     }
 
     // Only populate starter pixels if the sprite has NO established shared layers
@@ -3188,17 +4462,33 @@ static bool extractSixSurfaces(
     }
   }
 
-  // Unify linked opposing face pairs (Top/Down, Front/Back, Right/Left)
+  // Unify linked opposing face pairs (Top/Down, Front/Back, Right/Left).
+  // The copy is MIRRORED (2026-11-16): the renderer and the ghost hints
+  // sample Down with Z = 1 - v, Back with X = 1 - u and Left with Z = u
+  // (Right: 1 - u), so a linked face must be the flipped source or the two
+  // silhouettes disagree by twice the shape's off-centre offset, which
+  // showed up as slits / holes in the preview with Cutouts on.
   if (colLinked) {
     for (int c = 0; c < 3; ++c) {
       out.colLinked[c] = (*colLinked)[c];
       if ((*colLinked)[c]) {
         const int topFace = c * 2;
         const int btmFace = c * 2 + 1;
-        out.pixels[btmFace] = out.pixels[topFace];
-        out.depthPixels[btmFace] = out.depthPixels[topFace];
-        out.depthAlpha[btmFace] = out.depthAlpha[topFace];
-        out.baseAlpha[btmFace] = out.baseAlpha[topFace];
+        const bool flipV = (c == 0);
+        const int fw = out.w[topFace], fh = out.h[topFace];
+        auto mirrored = [&](const auto& src) {
+          auto dst = src;
+          if (int(src.size()) == fw * fh)
+            for (int v = 0; v < fh; ++v)
+              for (int u = 0; u < fw; ++u)
+                dst[size_t(v) * fw + u] =
+                  src[size_t(flipV ? fh - 1 - v : v) * fw + (flipV ? u : fw - 1 - u)];
+          return dst;
+        };
+        out.pixels[btmFace] = mirrored(out.pixels[topFace]);
+        out.depthPixels[btmFace] = mirrored(out.depthPixels[topFace]);
+        out.depthAlpha[btmFace] = mirrored(out.depthAlpha[topFace]);
+        out.baseAlpha[btmFace] = mirrored(out.baseAlpha[topFace]);
         out.hasBaseLayer[btmFace] = out.hasBaseLayer[topFace];
         out.w[btmFace] = out.w[topFace];
         out.h[btmFace] = out.h[topFace];
@@ -3263,43 +4553,132 @@ struct Render3DResult {
   int outH = 0;
   float cxScreen = 0.0f;
   float cyScreen = 0.0f;
+  // Screen pixels where a ray hit a voxel whose surface texel is
+  // transparent, i.e. what Cutouts carves away (counted even when the
+  // pixel is dropped). 0 = no slits in the surface.
+  int cutoutPx = 0;
+  // Composite previews: screen pixels won by each object (input order).
+  std::vector<int> objHitPx;
+  // Time spent building voxel volumes (the rest of a render is ray marching).
+  double volumeMs = 0.0;
 };
 
-static Render3DResult compute3DPreviewImages(
-  const SixSurfaceData& data,
+// One object of a composite preview (Objects, 2026-11-17). Each object is
+// rendered with its own voxel volume, placed at its world centre; all share
+// one camera. Where two objects' surfaces coincide (within half a pixel) the
+// higher priority wins; elsewhere the nearer surface wins, as in any union.
+struct PreviewObject {
+  const SixSurfaceData* data = nullptr;
+  float cx = 0.0f, cy = 0.0f, cz = 0.0f; // world centre of its Base box (Y down)
+  int priority = 0;
+  bool grids = true; // draw the per-panel grids on this object
+};
+
+static Render3DResult compute3DPreviewMulti(
+  const std::vector<PreviewObject>& objects,
   int yawDeg,
   int pitchDeg,
   int pivX,
   int pivY,
   int pivZ,
-  int renderStyle = 0,
-  bool addOutline = true,
-  bool allowCutouts = true,
-  // Per-panel grids (G2): null means no grids (baked Iso layers
-  // and every pre-G2 caller). Non-null overlays the grid of the
-  // hit face on the Diffuse map only.
-  const std::array<PanelGridSettings, kFaceCount>* grids = nullptr)
+  int renderStyle,
+  bool addOutline,
+  bool allowCutouts,
+  const std::array<PanelGridSettings, kFaceCount>* grids,
+  bool tintCutouts)
 {
   Render3DResult res;
-  const float halfX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown] }) * 0.5f;
-  const float halfY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight] }) * 0.5f;
-  const float halfZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown] }) * 0.5f;
 
-  SculptedVoxelVolume vol = buildSculptedVolume(data, pivX, pivY, pivZ);
+  struct Obj {
+    const SixSurfaceData* data = nullptr;
+    float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+    int priority = 0;
+    bool grids = false;
+    float halfX = 0.0f, halfY = 0.0f, halfZ = 0.0f;
+    float halfXr = 0.0f, halfYr = 0.0f, halfZr = 0.0f;
+    float stepSize = 1.0f;
+    std::shared_ptr<const SculptedVoxelVolume> vol;
+  };
+  std::vector<Obj> objs;
+  objs.reserve(objects.size());
+  for (const PreviewObject& p : objects) {
+    if (!p.data)
+      continue;
+    const SixSurfaceData& data = *p.data;
+    Obj o;
+    o.data = p.data;
+    o.cx = p.cx;
+    o.cy = p.cy;
+    o.cz = p.cz;
+    o.priority = p.priority;
+    o.grids = p.grids;
+    o.halfX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown] }) * 0.5f;
+    o.halfY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight] }) * 0.5f;
+    o.halfZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown] }) * 0.5f;
 
-  // Render half-extents (2026-11-07, depth sculpting): when depth
-  // sculpting grew the volume, the ray clip box grows with it so the
-  // Base box keeps its world size and Plus bumps stick out beyond it
-  // instead of squeezing the whole model. The voxel mapping below
-  // uses these; the face-UV mapping keeps halfX/halfY/halfZ because
-  // a face's lateral extent never changes. When nothing is sculpted
-  // vol dims equal the base dims and these are exactly halfX/Y/Z.
-  const int dimX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown], 8 });
-  const int dimY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight], 8 });
-  const int dimZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown], 8 });
-  const float halfXr = (vol.vx > dimX) ? halfX * float(vol.vx) / float(dimX) : halfX;
-  const float halfYr = (vol.vy > dimY) ? halfY * float(vol.vy) / float(dimY) : halfY;
-  const float halfZr = (vol.vz > dimZ) ? halfZ * float(vol.vz) / float(dimZ) : halfZ;
+    {
+      const auto tv = std::chrono::steady_clock::now();
+      o.vol = cachedSculptedVolume(data, pivX, pivY, pivZ);
+      res.volumeMs += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - tv)
+                        .count();
+    }
+
+    // Render half-extents (2026-11-07, depth sculpting): when depth
+    // sculpting grew the volume, the ray clip box grows with it so the
+    // Base box keeps its world size and Plus bumps stick out beyond it
+    // instead of squeezing the whole model. The voxel mapping below
+    // uses these; the face-UV mapping keeps halfX/halfY/halfZ because
+    // a face's lateral extent never changes. When nothing is sculpted
+    // vol dims equal the base dims and these are exactly halfX/Y/Z.
+    const int dimX = std::min(kMaxVoxelDim, std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown], 8 }));
+    const int dimY = std::min(kMaxVoxelDim, std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight], 8 }));
+    const int dimZ = std::min(kMaxVoxelDim, std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown], 8 }));
+    const SculptedVoxelVolume& ov = *o.vol;
+    o.halfXr = (ov.vx > dimX) ? o.halfX * float(ov.vx) / float(dimX) : o.halfX;
+    o.halfYr = (ov.vy > dimY) ? o.halfY * float(ov.vy) / float(dimY) : o.halfY;
+    o.halfZr = (ov.vz > dimZ) ? o.halfZ * float(ov.vz) / float(dimZ) : o.halfZ;
+    o.stepSize = std::min({ (2.0f * o.halfXr) / float(ov.vx),
+                            (2.0f * o.halfYr) / float(ov.vy),
+                            (2.0f * o.halfZr) / float(ov.vz) }) * 0.45f;
+    objs.push_back(std::move(o));
+  }
+  res.objHitPx.assign(objs.size(), 0);
+
+  // Camera framing over the union of all objects. For one object at the
+  // origin these are exactly its own half-extents and a zero centre, so the
+  // single-object render is unchanged bit for bit.
+  float bMin[3] = { 0, 0, 0 }, bMax[3] = { 0, 0, 0 }; // Base boxes
+  float rMin[3] = { 0, 0, 0 }, rMax[3] = { 0, 0, 0 }; // render (sculpt-grown) boxes
+  for (size_t i = 0; i < objs.size(); ++i) {
+    const Obj& o = objs[i];
+    const float c[3] = { o.cx, o.cy, o.cz };
+    const float hb[3] = { o.halfX, o.halfY, o.halfZ };
+    const float hr[3] = { o.halfXr, o.halfYr, o.halfZr };
+    for (int a = 0; a < 3; ++a) {
+      const float b0 = c[a] - hb[a], b1 = c[a] + hb[a];
+      const float r0 = c[a] - hr[a], r1 = c[a] + hr[a];
+      bMin[a] = (i == 0) ? b0 : std::min(bMin[a], b0);
+      bMax[a] = (i == 0) ? b1 : std::max(bMax[a], b1);
+      rMin[a] = (i == 0) ? r0 : std::min(rMin[a], r0);
+      rMax[a] = (i == 0) ? r1 : std::max(rMax[a], r1);
+    }
+  }
+  if (objs.empty()) {
+    for (int a = 0; a < 3; ++a) {
+      bMin[a] = rMin[a] = -12.0f;
+      bMax[a] = rMax[a] = 12.0f;
+    }
+  }
+  const float halfX = (bMax[0] - bMin[0]) * 0.5f;
+  const float halfY = (bMax[1] - bMin[1]) * 0.5f;
+  const float halfZ = (bMax[2] - bMin[2]) * 0.5f;
+  const float halfXr = (rMax[0] - rMin[0]) * 0.5f;
+  const float halfYr = (rMax[1] - rMin[1]) * 0.5f;
+  const float halfZr = (rMax[2] - rMin[2]) * 0.5f;
+  const float camCX = (rMax[0] + rMin[0]) * 0.5f;
+  const float camCY = (rMax[1] + rMin[1]) * 0.5f;
+  const float camCZ = (rMax[2] + rMin[2]) * 0.5f;
   const int maxDim = std::max({ int(halfXr * 2.0f), int(halfYr * 2.0f), int(halfZr * 2.0f), 24 });
   const int outW = maxDim * 2 + 16;
   const int outH = maxDim * 2 + 16;
@@ -3331,6 +4710,9 @@ static Render3DResult compute3DPreviewImages(
   const float pivOffX = ((pivX - 50) * 0.01f) * (halfX * 2.0f);
   const float pivOffY = ((pivY - 50) * 0.01f) * (halfY * 2.0f);
   const float pivOffZ = ((pivZ - 50) * 0.01f) * (halfZ * 2.0f);
+  const float camOffX = pivOffX + camCX;
+  const float camOffY = pivOffY + camCY;
+  const float camOffZ = pivOffZ + camCZ;
 
   const float cxScreen = outW * 0.5f;
   const float cyScreen = outH * 0.5f;
@@ -3345,16 +4727,24 @@ static Render3DResult compute3DPreviewImages(
   res.deptImg->clear(0);
 
   std::vector<int> faceMap(outW * outH, -1);
+  std::vector<int> objMap(outW * outH, -1);
+  std::vector<float> zBuf(objs.size() > 1 ? size_t(outW) * outH : 0, 0.0f);
+  std::vector<int> zPrio(zBuf.size(), 0);
   const float maxDepthRange = float(maxDim) * 1.732f;
   const float Lx = -0.45f, Ly = -0.60f, Lz = 0.66f;
 
   // Per-panel grid line positions (G2), computed once per render
   // — never per pixel. A face whose grid is off, or whose numbers
   // do not fit it, keeps empty line lists and draws no lines.
+  // Only the object marked `grids` (the focused one) gets them.
   std::vector<float> gridXLines[kFaceCount];
   std::vector<float> gridYLines[kFaceCount];
   bool gridOnFace[kFaceCount] = {};
-  if (grids) {
+  const SixSurfaceData* gridData = nullptr;
+  for (const Obj& o : objs)
+    if (o.grids && !gridData)
+      gridData = o.data;
+  if (grids && gridData) {
     for (int f = 0; f < kFaceCount; ++f) {
       gridOnFace[f] = (*grids)[f].on;
       if (!gridOnFace[f])
@@ -3362,8 +4752,8 @@ static Render3DResult compute3DPreviewImages(
       // X lines are vertical (Vertical settings); Y lines are
       // horizontal (Horizontal settings). William, 2026-11-07:
       // Horizontal gives horizontal lines.
-      gridLinePositions(data.w[f], (*grids)[f].countV, (*grids)[f].spacingV, gridXLines[f]);
-      gridLinePositions(data.h[f], (*grids)[f].countH, (*grids)[f].spacingH, gridYLines[f]);
+      gridLinePositions(gridData->w[f], (*grids)[f].countV, (*grids)[f].spacingV, gridXLines[f]);
+      gridLinePositions(gridData->h[f], (*grids)[f].countH, (*grids)[f].spacingH, gridYLines[f]);
     }
   }
 
@@ -3382,9 +4772,21 @@ static Render3DResult compute3DPreviewImages(
 
     for (int px = 0; px < outW; ++px) {
       const float camX = (px - cxScreen);
-      const float ox = (camX * rxX + camY * ryX + pivOffX) - camDist * vdX;
-      const float oy = (camX * rxY + camY * ryY + pivOffY) - camDist * vdY;
-      const float oz = (camX * rzX + camY * ryZ + pivOffZ) - camDist * vdZ;
+      const float wox = (camX * rxX + camY * ryX + camOffX) - camDist * vdX;
+      const float woy = (camX * rxY + camY * ryY + camOffY) - camDist * vdY;
+      const float woz = (camX * rzX + camY * ryZ + camOffZ) - camDist * vdZ;
+      const size_t pidx = size_t(py) * outW + px;
+
+      for (size_t oi = 0; oi < objs.size(); ++oi) {
+      const Obj& O = objs[oi];
+      const SixSurfaceData& data = *O.data;
+      const SculptedVoxelVolume& vol = *O.vol;
+      const float oHalfX = O.halfX, oHalfY = O.halfY, oHalfZ = O.halfZ;
+      const float oHalfXr = O.halfXr, oHalfYr = O.halfYr, oHalfZr = O.halfZr;
+      // Ray origin in the object's own frame (its Base box centred at 0).
+      const float ox = wox - O.cx;
+      const float oy = woy - O.cy;
+      const float oz = woz - O.cz;
 
       float t0 = -1e9f, t1 = 1e9f;
       auto clipAxis = [&](float orig, float dir, float bMin, float bMax) -> bool {
@@ -3400,16 +4802,14 @@ static Render3DResult compute3DPreviewImages(
         return (orig >= bMin && orig <= bMax);
       };
 
-      if (!clipAxis(ox, vdX, -halfXr, halfXr) ||
-          !clipAxis(oy, vdY, -halfYr, halfYr) ||
-          !clipAxis(oz, vdZ, -halfZr, halfZr) ||
+      if (!clipAxis(ox, vdX, -oHalfXr, oHalfXr) ||
+          !clipAxis(oy, vdY, -oHalfYr, oHalfYr) ||
+          !clipAxis(oz, vdZ, -oHalfZr, oHalfZr) ||
           t1 < nearPlane || t0 > farPlane || t0 > t1) {
         continue;
       }
 
-      const float stepSize = std::min({ (2.0f * halfXr) / float(vol.vx),
-                                        (2.0f * halfYr) / float(vol.vy),
-                                        (2.0f * halfZr) / float(vol.vz) }) * 0.45f;
+      const float stepSize = O.stepSize;
       float tStart = std::max(nearPlane, t0);
       float tEnd = std::min(farPlane, t1);
       float tHit = -1.0f;
@@ -3420,18 +4820,18 @@ static Render3DResult compute3DPreviewImages(
         const float pyW = oy + t * vdY;
         const float pzW = oz + t * vdZ;
 
-        int vx = int((pxW + halfXr) / (2.0f * halfXr) * float(vol.vx));
-        int vy = int((pyW + halfYr) / (2.0f * halfYr) * float(vol.vy));
-        int vz = int((pzW + halfZr) / (2.0f * halfZr) * float(vol.vz));
+        int vx = int((pxW + oHalfXr) / (2.0f * oHalfXr) * float(vol.vx));
+        int vy = int((pyW + oHalfYr) / (2.0f * oHalfYr) * float(vol.vy));
+        int vz = int((pzW + oHalfZr) / (2.0f * oHalfZr) * float(vol.vz));
 
         if (vol.isSolid(vx, vy, vz)) {
           float ta = t - stepSize;
           float tb = t;
           for (int b = 0; b < 3; ++b) {
             float tm = (ta + tb) * 0.5f;
-            int mx = int((ox + tm * vdX + halfXr) / (2.0f * halfXr) * float(vol.vx));
-            int my = int((oy + tm * vdY + halfYr) / (2.0f * halfYr) * float(vol.vy));
-            int mz = int((oz + tm * vdZ + halfZr) / (2.0f * halfZr) * float(vol.vz));
+            int mx = int((ox + tm * vdX + oHalfXr) / (2.0f * oHalfXr) * float(vol.vx));
+            int my = int((oy + tm * vdY + oHalfYr) / (2.0f * oHalfYr) * float(vol.vy));
+            int mz = int((oz + tm * vdZ + oHalfZr) / (2.0f * oHalfZr) * float(vol.vz));
             if (vol.isSolid(mx, my, mz)) {
               tb = tm;
               vx = mx; vy = my; vz = mz;
@@ -3448,6 +4848,16 @@ static Render3DResult compute3DPreviewImages(
 
       if (tHit < 0.0f) continue;
 
+      // Composite depth test (several objects only): the nearer surface
+      // wins; within half a pixel the higher priority wins.
+      if (!zBuf.empty() && objMap[pidx] >= 0) {
+        constexpr float kTie = 0.5f;
+        if (tHit > zBuf[pidx] + kTie)
+          continue;
+        if (tHit >= zBuf[pidx] - kTie && O.priority <= zPrio[pidx])
+          continue;
+      }
+
       float gX = float(vol.isSolid(hitVx - 1, hitVy, hitVz)) - float(vol.isSolid(hitVx + 1, hitVy, hitVz));
       float gY = float(vol.isSolid(hitVx, hitVy - 1, hitVz)) - float(vol.isSolid(hitVx, hitVy + 1, hitVz));
       float gZ = float(vol.isSolid(hitVx, hitVy, hitVz - 1)) - float(vol.isSolid(hitVx, hitVy, hitVz + 1));
@@ -3456,9 +4866,9 @@ static Render3DResult compute3DPreviewImages(
         gX /= len; gY /= len; gZ /= len;
       }
       else {
-        gX = (ox + tHit * vdX) / halfX;
-        gY = (oy + tHit * vdY) / halfY;
-        gZ = (oz + tHit * vdZ) / halfZ;
+        gX = (ox + tHit * vdX) / oHalfX;
+        gY = (oy + tHit * vdY) / oHalfY;
+        gZ = (oz + tHit * vdZ) / oHalfZ;
         len = std::sqrt(gX * gX + gY * gY + gZ * gZ);
         if (len > 1e-4f) { gX /= len; gY /= len; gZ /= len; }
         else { gX = 0.0f; gY = 0.0f; gZ = 1.0f; }
@@ -3484,35 +4894,47 @@ static Render3DResult compute3DPreviewImages(
       int u = 0, v = 0;
       switch (face) {
         case kFaceFront:
-          u = std::clamp(int((hx + halfX) / (2.0f * halfX) * fw), 0, fw - 1);
-          v = std::clamp(int((hy + halfY) / (2.0f * halfY) * fh), 0, fh - 1);
+          u = std::clamp(int((hx + oHalfX) / (2.0f * oHalfX) * fw), 0, fw - 1);
+          v = std::clamp(int((hy + oHalfY) / (2.0f * oHalfY) * fh), 0, fh - 1);
           break;
         case kFaceBack:
-          u = std::clamp(int((halfX - hx) / (2.0f * halfX) * fw), 0, fw - 1);
-          v = std::clamp(int((hy + halfY) / (2.0f * halfY) * fh), 0, fh - 1);
+          u = std::clamp(int((oHalfX - hx) / (2.0f * oHalfX) * fw), 0, fw - 1);
+          v = std::clamp(int((hy + oHalfY) / (2.0f * oHalfY) * fh), 0, fh - 1);
           break;
         case kFaceLeft:
-          u = std::clamp(int((hz + halfZ) / (2.0f * halfZ) * fw), 0, fw - 1);
-          v = std::clamp(int((hy + halfY) / (2.0f * halfY) * fh), 0, fh - 1);
+          u = std::clamp(int((hz + oHalfZ) / (2.0f * oHalfZ) * fw), 0, fw - 1);
+          v = std::clamp(int((hy + oHalfY) / (2.0f * oHalfY) * fh), 0, fh - 1);
           break;
         case kFaceRight:
-          u = std::clamp(int((halfZ - hz) / (2.0f * halfZ) * fw), 0, fw - 1);
-          v = std::clamp(int((hy + halfY) / (2.0f * halfY) * fh), 0, fh - 1);
+          u = std::clamp(int((oHalfZ - hz) / (2.0f * oHalfZ) * fw), 0, fw - 1);
+          v = std::clamp(int((hy + oHalfY) / (2.0f * oHalfY) * fh), 0, fh - 1);
           break;
         case kFaceTop:
-          u = std::clamp(int((hx + halfX) / (2.0f * halfX) * fw), 0, fw - 1);
-          v = std::clamp(int((hz + halfZ) / (2.0f * halfZ) * fh), 0, fh - 1);
+          u = std::clamp(int((hx + oHalfX) / (2.0f * oHalfX) * fw), 0, fw - 1);
+          v = std::clamp(int((hz + oHalfZ) / (2.0f * oHalfZ) * fh), 0, fh - 1);
           break;
         case kFaceDown:
-          u = std::clamp(int((hx + halfX) / (2.0f * halfX) * fw), 0, fw - 1);
-          v = std::clamp(int((halfZ - hz) / (2.0f * halfZ) * fh), 0, fh - 1);
+          u = std::clamp(int((hx + oHalfX) / (2.0f * oHalfX) * fw), 0, fw - 1);
+          v = std::clamp(int((oHalfZ - hz) / (2.0f * oHalfZ) * fh), 0, fh - 1);
           break;
       }
 
       const uint32_t texCol = data.sampleSymmetric(face, u, v);
       const uint8_t a = doc::rgba_geta(texCol);
       if (a <= 16 && renderStyle != kRenderColoredFaces) {
-        if (allowCutouts) continue;
+        if (allowCutouts) {
+          ++res.cutoutPx;
+          if (!tintCutouts)
+            continue;
+          diffRow[px] = doc::rgba(255, 0, 255, 255);
+          faceMap[pidx] = face;
+          objMap[pidx] = int(oi);
+          if (!zBuf.empty()) {
+            zBuf[pidx] = tHit;
+            zPrio[pidx] = O.priority;
+          }
+          continue;
+        }
       }
 
       const float dC = data.sampleDepthNorm(face, u, v);
@@ -3600,7 +5022,7 @@ static Render3DResult compute3DPreviewImages(
       // override is not shaded, so the line stays visible on any
       // face colour. The later addOutline pass may tint a grid
       // pixel where two faces meet on screen; rare, harmless.
-      if (gridOnFace[face]) {
+      if (O.grids && gridOnFace[face]) {
         bool onGrid = false;
         for (float line : gridXLines[face]) {
           if (gridPixelOnLine(u, line)) {
@@ -3619,9 +5041,18 @@ static Render3DResult compute3DPreviewImages(
         if (onGrid)
           diffRow[px] = doc::rgba(240, 240, 240, 255);
       }
-      faceMap[py * outW + px] = face;
+      faceMap[pidx] = face;
+      objMap[pidx] = int(oi);
+      if (!zBuf.empty()) {
+        zBuf[pidx] = tHit;
+        zPrio[pidx] = O.priority;
+      }
+      } // objects
     }
   }
+  for (int o : objMap)
+    if (o >= 0)
+      ++res.objHitPx[size_t(o)];
 
   if (addOutline) {
     const uint32_t outlineCol = doc::rgba(15, 23, 42, 255);
@@ -3663,12 +5094,94 @@ static Render3DResult compute3DPreviewImages(
   return res;
 }
 
+// One object at the origin: the classic single-object preview.
+static Render3DResult compute3DPreviewImages(
+  const SixSurfaceData& data,
+  int yawDeg,
+  int pitchDeg,
+  int pivX,
+  int pivY,
+  int pivZ,
+  int renderStyle = 0,
+  bool addOutline = true,
+  bool allowCutouts = true,
+  // Per-panel grids (G2): null means no grids (baked Iso layers
+  // and every pre-G2 caller). Non-null overlays the grid of the
+  // hit face on the Diffuse map only.
+  const std::array<PanelGridSettings, kFaceCount>* grids = nullptr,
+  // Show the voxels Cutouts removes in magenta instead of dropping them.
+  bool tintCutouts = false)
+{
+  PreviewObject one;
+  one.data = &data;
+  return compute3DPreviewMulti({ one }, yawDeg, pitchDeg, pivX, pivY, pivZ, renderStyle,
+                               addOutline, allowCutouts, grids, tintCutouts);
+}
+
+// Six-surface data of every visible object with something painted, placed
+// for a composite preview. `focusKey` gets the per-panel grids; `linked`
+// returns the linked-column flags per object key.
+struct CompositeInput {
+  std::vector<std::unique_ptr<SixSurfaceData>> data;
+  std::vector<PreviewObject> objects;
+  std::vector<std::string> keys; // per entry of `objects`
+};
+
+static void buildCompositeInput(
+  Doc* doc,
+  doc::frame_t frame,
+  bool useDepth,
+  DocView* docView,
+  const std::string& focusKey,
+  const std::function<const std::array<bool, 3>*(const std::string&)>& linkedFor,
+  CompositeInput& in)
+{
+  doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+  if (!spr)
+    return;
+  const std::vector<ObjectInfo> infos = resolveObjects(spr);
+  for (const ObjectInfo& info : infos) {
+    if (!info.visible)
+      continue;
+    EasymetricObjectScope sc(spr, info.key);
+    auto d = std::make_unique<SixSurfaceData>();
+    extractSixSurfaces(doc, frame, *d, useDepth, docView, linkedFor ? linkedFor(info.key) : nullptr);
+    bool any = false;
+    for (int f = 0; f < kFaceCount && !any; ++f)
+      any = d->hasPixels(f);
+    if (!any)
+      continue; // an empty object would render as a solid box
+    PreviewObject p;
+    p.data = d.get();
+    float c[3];
+    objectWorldCentre(infos[0], info, c);
+    p.cx = c[0];
+    p.cy = c[1];
+    p.cz = c[2];
+    p.priority = info.priority;
+    p.grids = (info.key == focusKey);
+    in.objects.push_back(p);
+    in.keys.push_back(info.key);
+    in.data.push_back(std::move(d));
+  }
+}
+
 static void bake3DToDoc(Doc* doc, int yawDeg = 45, int pitchDeg = 30)
 {
   if (!doc || !doc->sprite()) return;
-  SixSurfaceData data;
-  extractSixSurfaces(doc, doc::frame_t(0), data, true);
-  Render3DResult res = compute3DPreviewImages(data, yawDeg, pitchDeg, 50, 50, 50, 0, true, true);
+  Render3DResult res;
+  if (hasObjectGroups(doc->sprite())) {
+    // Objects: every visible object in one render.
+    CompositeInput in;
+    buildCompositeInput(doc, doc::frame_t(0), true, nullptr, std::string(), nullptr, in);
+    res = compute3DPreviewMulti(in.objects, yawDeg, pitchDeg, 50, 50, 50, 0, true, true, nullptr,
+                                false);
+  }
+  else {
+    SixSurfaceData data;
+    extractSixSurfaces(doc, doc::frame_t(0), data, true);
+    res = compute3DPreviewImages(data, yawDeg, pitchDeg, 50, 50, 50, 0, true, true);
+  }
   if (!res.diffImg || !res.normImg || !res.deptImg)
     return;
 
@@ -3716,6 +5229,782 @@ static void bake3DToDoc(Doc* doc, int yawDeg = 45, int pitchDeg = 30)
 // colour-change behaviour.
 // Forward declaration: the grid decorator (nested in
 // EasymetricWheelZoomState below) holds a pointer to the view.
+// ---------------------------------------------------------------------------
+// Start from a block (2026-11-16, Arin, Phase 2): enter the block's width,
+// height and depth once; the editor sizes the six cells and fills each view
+// with a correctly sized, correctly placed block, so mismatched margins like
+// 20 px / 22 px cannot exist in a generated layout.
+//
+// The block is placed ONCE in model space: its origin on each axis is
+// (cell - block) / 2, rounded down. Every view is then derived from that
+// through ghostAxesOfFace (the same table the ghost hints and auto-align use,
+// which mirrors the renderer), so an odd leftover pixel goes to the same side
+// of the model in every view (a flipped view shows it on its other side).
+// ---------------------------------------------------------------------------
+struct BlockLayout {
+  int block[3] = { 0, 0, 0 }; // block size per model axis (X width, Y height, Z depth)
+  int cell[3] = { 0, 0, 0 };  // cell size per model axis
+  int origin[3] = { 0, 0, 0 }; // block origin per model axis, in the cell
+};
+
+static BlockLayout planBlockLayout(int bx, int by, int bz, int cx, int cy, int cz)
+{
+  BlockLayout b;
+  const int B[3] = { std::clamp(bx, 1, 256), std::clamp(by, 1, 256), std::clamp(bz, 1, 256) };
+  const int C[3] = { cx, cy, cz };
+  for (int a = 0; a < 3; ++a) {
+    b.block[a] = B[a];
+    b.cell[a] = std::clamp(std::max(C[a], B[a]), std::max(1, B[a]), 256);
+    b.block[a] = std::min(b.block[a], b.cell[a]);
+    b.origin[a] = (b.cell[a] - b.block[a]) / 2; // the single rounding
+  }
+  return b;
+}
+
+// The block's pixel range inside face f, along the face's u (coord 0) or v
+// (coord 1): [first, first + len).
+static void blockRangeInFace(const BlockLayout& b, int face, int coord, int& first, int& len)
+{
+  GhostAxis ax[2];
+  ghostAxesOfFace(face, ax);
+  for (const GhostAxis& a : ax) {
+    if (a.coord != coord)
+      continue;
+    len = b.block[a.axis];
+    first = a.flip ? b.cell[a.axis] - b.origin[a.axis] - len : b.origin[a.axis];
+    return;
+  }
+  first = 0;
+  len = 0;
+}
+
+// Resizes the six cells to the layout and replaces every view's content with
+// the block (Base and Texture sheets of frame `fr`, filled on Base with
+// `color`; Depth reset to flat grey). Two undo steps: the sheet resize, then
+// the fill. Returns false (and sets `err`) when there is no sheet to work on.
+static bool applyBlockLayout(Doc* doc,
+                             doc::frame_t fr,
+                             const BlockLayout& b,
+                             doc::color_t color,
+                             std::string& err)
+{
+  doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+  if (!spr) {
+    err = "no sprite";
+    return false;
+  }
+  if (!findSharedLayers(spr).baseLayer && !findSharedLayers(spr).textureLayer)
+    setupSixSurfacesOnDoc(doc, false);
+  SharedSurfaceLayers shared = findSharedLayers(spr);
+  if (!shared.baseLayer) {
+    err = "no Surface_Base layer";
+    return false;
+  }
+
+  // Cells: Top/Down X x Z, Front/Back X x Y, Right/Left Z x Y.
+  int tw[kFaceCount], th[kFaceCount];
+  for (int f = 0; f < kFaceCount; ++f) {
+    GhostAxis ax[2];
+    ghostAxesOfFace(f, ax);
+    tw[f] = b.cell[ax[0].axis]; // ax[0] is always the u axis
+    th[f] = b.cell[ax[1].axis];
+  }
+  int ow[kFaceCount], oh[kFaceCount];
+  sharedFaceSizes(spr, ow, oh);
+  bool resize = false;
+  for (int f = 0; f < kFaceCount; ++f)
+    if (ow[f] != tw[f] || oh[f] != th[f])
+      resize = true;
+  const gfx::Size exact = atlasSize(spr);
+  if (spr->width() != exact.w || spr->height() != exact.h)
+    resize = true;
+  if (resize)
+    rebuildSharedSheets(doc, tw, th);
+
+  // Fill. Every cel is grown to the whole sprite so each face rect is covered.
+  try {
+    Tx tx(doc, "Start From Block", ModifyDocument);
+    DocApi api = doc->getApi(tx);
+    // depthFlat: the face rects become flat grey 128 (no displacement), so an
+    // old depth map cannot carve or extrude the new block (2026-11-17).
+    auto paint = [&](doc::LayerImage* lyr, bool withBlock, bool depthFlat = false) {
+      if (!lyr)
+        return;
+      doc::Cel* cel = lyr->cel(fr);
+      doc::ImageRef img(doc::Image::create(doc::IMAGE_RGB, spr->width(), spr->height()));
+      doc::clear_image(img.get(), img->maskColor());
+      if (cel && cel->image() && cel->image()->pixelFormat() == doc::IMAGE_RGB)
+        doc::copy_image(img.get(), cel->image(), cel->x(), cel->y());
+      for (int f = 0; f < kFaceCount; ++f) {
+        const gfx::Rect rc = sharedFaceRect(spr, f);
+        const doc::color_t clearTo = depthFlat ? doc::rgba(128, 128, 128, 255) : img->maskColor();
+        for (int v = 0; v < rc.h; ++v)
+          for (int u = 0; u < rc.w; ++u)
+            doc::put_pixel(img.get(), rc.x + u, rc.y + v, clearTo);
+        if (!withBlock)
+          continue;
+        int u0 = 0, ul = 0, v0 = 0, vl = 0;
+        blockRangeInFace(b, f, 0, u0, ul);
+        blockRangeInFace(b, f, 1, v0, vl);
+        for (int v = v0; v < v0 + vl; ++v)
+          for (int u = u0; u < u0 + ul; ++u)
+            doc::put_pixel(img.get(), rc.x + u, rc.y + v, color);
+      }
+      if (cel) {
+        api.replaceImage(spr, cel->imageRef(), img);
+        if (cel->x() != 0 || cel->y() != 0)
+          api.setCelPosition(spr, cel, 0, 0);
+      }
+      else {
+        api.addCel(lyr, fr, img);
+      }
+    };
+    paint(shared.baseLayer, true);
+    paint(shared.textureLayer, false);
+    paint(shared.depthLayer, false, true);
+    tx.commit();
+    doc->notifyGeneralUpdate();
+  }
+  catch (const std::exception& e) {
+    err = e.what();
+    return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Object operations (2026-11-17). All undoable, each ONE undo step.
+// ---------------------------------------------------------------------------
+
+// Face sizes of a W x H x D box: Top/Down X x Z, Front/Back X x Y,
+// Right/Left Z x Y (ghostAxesOfFace: ax[0] is always the u axis).
+static void boxFaceSizes(const int box[3], int w[kFaceCount], int h[kFaceCount])
+{
+  for (int f = 0; f < kFaceCount; ++f) {
+    GhostAxis ax[2];
+    ghostAxesOfFace(f, ax);
+    w[f] = std::max(1, box[ax[0].axis]);
+    h[f] = std::max(1, box[ax[1].axis]);
+  }
+}
+
+// Resizes the model, i.e. every object's six cells, to box (X, Y, Z).
+// Keep: drawings unscaled, centred; Stretch: scaled to the new size. One
+// undo step; nothing happens when the size does not change.
+static void modelBox(doc::Sprite* spr, int box[3]);
+static bool resizeModelOnDoc(Doc* doc, const int box[3], ResizeMode mode)
+{
+  doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+  if (!spr)
+    return false;
+  int cur[3];
+  modelBox(spr, cur);
+  if (cur[0] == box[0] && cur[1] == box[1] && cur[2] == box[2] && !needsUnify(spr) &&
+      atlasSize(spr) == gfx::Size(spr->width(), spr->height()))
+    return false;
+  int w[kFaceCount], h[kFaceCount];
+  boxFaceSizes(box, w, h);
+  EasymetricObjectScope root(spr, std::string());
+  try {
+    Tx tx(doc, "Resize Easymetric Model", ModifyDocument); // migration + resize = one step
+    rebuildSharedSheets(doc, w, h, mode);
+    tx.commit();
+  }
+  catch (const std::exception& e) {
+    easymetricReportError("modelSize", e.what());
+    return false;
+  }
+  return true;
+}
+
+// The model size (X, Y, Z) every object shares: Object 1's box.
+static void modelBox(doc::Sprite* spr, int box[3])
+{
+  EasymetricObjectScope root(spr, std::string());
+  int w[kFaceCount], h[kFaceCount];
+  sharedFaceSizes(spr, w, h);
+  box[0] = w[kFaceFront];
+  box[1] = h[kFaceFront];
+  box[2] = w[kFaceRight];
+}
+
+// Index-space origin (X right, Y DOWN, Z front) of a block of size `block`
+// put next to what object `refKey` has painted on frame `fr` ("above",
+// "below", "right", "left", "front", "back", "center"), centred on the other
+// axes, then clamped into the model box. Nothing painted: the whole box is
+// the reference. Returns false when the block had to be pushed or cut to fit.
+static bool placeBlock(doc::Sprite* spr,
+                       const std::string& refKey,
+                       doc::frame_t fr,
+                       int block[3],
+                       const std::string& where,
+                       int org[3])
+{
+  int S[3];
+  modelBox(spr, S);
+  int lo[3] = { 0, 0, 0 }, hi[3] = { S[0], S[1], S[2] };
+  {
+    EasymetricObjectScope sc(spr, refKey);
+    paintedIndexBox(spr, fr, lo, hi);
+  }
+  for (int a = 0; a < 3; ++a)
+    org[a] = lo[a] + floorHalf(hi[a] - lo[a] - block[a]);
+  if (where == "above" || where == "top")
+    org[1] = lo[1] - block[1];
+  else if (where == "below" || where == "bottom")
+    org[1] = hi[1];
+  else if (where == "right")
+    org[0] = hi[0];
+  else if (where == "left")
+    org[0] = lo[0] - block[0];
+  else if (where == "front")
+    org[2] = hi[2];
+  else if (where == "back")
+    org[2] = lo[2] - block[2];
+  bool fits = true;
+  for (int a = 0; a < 3; ++a) {
+    if (block[a] > S[a]) {
+      block[a] = S[a];
+      fits = false;
+    }
+    const int c = std::clamp(org[a], 0, S[a] - block[a]);
+    if (c != org[a])
+      fits = false;
+    org[a] = c;
+  }
+  return fits;
+}
+
+static std::string uniqueObjectKey(doc::Sprite* spr, const std::string& name)
+{
+  std::string base;
+  for (char c : name)
+    if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')
+      base.push_back(c);
+  if (base.empty())
+    base = "Object";
+  std::string key = base;
+  for (int n = 2; findObjectGroup(spr, key) || key == "root"; ++n)
+    key = base + std::to_string(n);
+  return key;
+}
+
+// Every object has the model size (2026-11-18); `block` is an optional
+// starting block INSIDE that space, at index-space origin `blockOrg` (see
+// placeBlock), painted on frame `frame` only.
+struct NewObjectSpec {
+  std::string name = "Object";
+  bool fillBlock = false;
+  int block[3] = { 8, 8, 8 };
+  int blockOrg[3] = { 0, 0, 0 };
+  doc::frame_t frame = 0;
+  doc::color_t color = doc::rgba(34, 32, 52, 255);
+};
+
+// Adds an object group with its own Base/Texture/Depth sheets and six
+// cells (the model size) in a new band under the existing ones; optionally
+// paints a starting block (flat depth). Returns the new key ("" on failure).
+static std::string newObjectOnDoc(Doc* doc, const NewObjectSpec& spec, std::string& err)
+{
+  doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+  if (!spr) {
+    err = "no sprite";
+    return std::string();
+  }
+  {
+    EasymetricObjectScope root(spr, std::string());
+    if (!findSharedLayers(spr).baseLayer)
+      setupSixSurfacesOnDoc(doc, false);
+    if (!findSharedLayers(spr).baseLayer) {
+      err = "the document has no Surface_Base (Object 1) to add objects to";
+      return std::string();
+    }
+  }
+  const std::string key = uniqueObjectKey(spr, spec.name);
+  ObjectMeta meta;
+  meta.key = key;
+  meta.order = 1;
+  for (const ObjectGroupRef& g : objectGroups(spr))
+    meta.order = std::max(meta.order, g.meta.order + 1);
+
+  try {
+    Tx tx(doc, "New Easymetric Object", ModifyDocument);
+    DocApi api = doc->getApi(tx);
+    unifyObjectsOnDoc(doc); // a pre-2026-11-18 file: one size first
+    int S[3];
+    modelBox(spr, S);
+    int fw[kFaceCount], fh[kFaceCount];
+    boxFaceSizes(S, fw, fh);
+    doc::LayerGroup* grp = api.newGroup(spr->root(), kObjectGroupPrefix + spec.name);
+    tx(new cmd::SetUserDataProperty(grp, std::string(), kObjectProp,
+                                    doc::UserData::Variant(objectMetaString(meta))));
+    // Same stack as the root: Depth under Base, Texture on top.
+    for (const char* name : { "Surface_DEPTH", "Surface_Base", "Surface_Texture" }) {
+      doc::LayerImage* lyr = api.newLayer(grp, name);
+      for (doc::frame_t fr = 0; fr <= spr->lastFrame(); ++fr) {
+        doc::ImageRef img(doc::Image::create(doc::IMAGE_RGB, spr->width(), spr->height()));
+        img->clear(0);
+        api.addCel(lyr, fr, img);
+      }
+    }
+    // Placeholder cells under the current canvas; rebuildAtlas then lays
+    // out every band and sizes the canvas.
+    for (int f = 0; f < kFaceCount; ++f) {
+      auto* sl = new doc::Slice;
+      sl->setName(objectSliceName(key, f));
+      sl->userData().setColor(doc::rgba(kFaceSpecs[f].r, kFaceSpecs[f].g, kFaceSpecs[f].b, 255));
+      sl->insert(0, doc::SliceKey(gfx::Rect(0, spr->height(), fw[f], fh[f])));
+      tx(new cmd::AddSlice(spr, sl));
+    }
+    rebuildAtlas(doc, fw, fh);
+    if (spec.fillBlock) {
+      EasymetricObjectScope sc(spr, key);
+      BlockLayout b;
+      for (int a = 0; a < 3; ++a) {
+        b.cell[a] = S[a];
+        b.block[a] = std::clamp(spec.block[a], 1, S[a]);
+        b.origin[a] = std::clamp(spec.blockOrg[a], 0, S[a] - b.block[a]);
+      }
+      const doc::frame_t fr = std::clamp(spec.frame, doc::frame_t(0), spr->lastFrame());
+      if (!applyBlockLayout(doc, fr, b, spec.color, err))
+        throw std::runtime_error(err);
+    }
+    tx.commit();
+    doc->notifyGeneralUpdate();
+  }
+  catch (const std::exception& e) {
+    err = e.what();
+    easymetricReportError("newObject", err);
+    return std::string();
+  }
+  return key;
+}
+
+// Offset / rank / visibility / name of an object. For the root only rank
+// and visibility exist (stored on the sprite). One undo step.
+static bool setObjectOnDoc(Doc* doc,
+                           const std::string& key,
+                           const int* offset,
+                           const int* rank,
+                           const bool* visible,
+                           const std::string* name)
+{
+  doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+  if (!spr)
+    return false;
+  try {
+    Tx tx(doc, "Edit Easymetric Object", ModifyDocument);
+    if (key.empty()) {
+      int r = -1;
+      bool hidden = false;
+      readRootObjectProps(spr, r, hidden);
+      if (rank)
+        r = *rank;
+      if (visible)
+        hidden = !*visible;
+      tx(new cmd::SetUserDataProperty(spr, std::string(), kRootObjectProp,
+                                      doc::UserData::Variant(
+                                        fmt::format("rank={};hidden={}", r, hidden ? 1 : 0))));
+    }
+    else {
+      doc::LayerGroup* grp = findObjectGroup(spr, key);
+      ObjectMeta meta;
+      if (!grp || !readObjectMeta(grp, meta))
+        return false;
+      if (offset)
+        for (int a = 0; a < 3; ++a)
+          meta.o[a] = offset[a];
+      if (rank)
+        meta.rank = *rank;
+      tx(new cmd::SetUserDataProperty(grp, std::string(), kObjectProp,
+                                      doc::UserData::Variant(objectMetaString(meta))));
+      if (name && !name->empty())
+        tx(new cmd::SetLayerName(grp, kObjectGroupPrefix + *name));
+      if (visible)
+        grp->setVisible(*visible); // like the timeline eye: not an undo step
+    }
+    tx.commit();
+    doc->notifyGeneralUpdate();
+  }
+  catch (const std::exception& e) {
+    easymetricReportError("setObject", e.what());
+    return false;
+  }
+  return true;
+}
+
+// Removes an object (group, sheets and cells) and closes the gap in the
+// atlas. The root cannot be deleted. One undo step.
+static bool deleteObjectOnDoc(Doc* doc, const std::string& key)
+{
+  doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+  doc::LayerGroup* grp = spr ? findObjectGroup(spr, key) : nullptr;
+  if (!grp)
+    return false;
+  try {
+    Tx tx(doc, "Delete Easymetric Object", ModifyDocument);
+    DocApi api = doc->getApi(tx);
+    unifyObjectsOnDoc(doc); // a pre-2026-11-18 file: one size first
+    std::vector<doc::Slice*> slices;
+    for (int f = 0; f < kFaceCount; ++f)
+      for (auto* sl : spr->slices())
+        if (sl && sl->name() == objectSliceName(key, f))
+          slices.push_back(sl);
+    for (doc::Slice* sl : slices)
+      tx(new cmd::RemoveSlice(spr, sl));
+    api.removeLayer(grp);
+    int w[kFaceCount], h[kFaceCount];
+    {
+      EasymetricObjectScope root(spr, std::string());
+      sharedFaceSizes(spr, w, h);
+    }
+    if (hasObjectGroups(spr))
+      rebuildAtlas(doc, w, h);
+    else {
+      EasymetricObjectScope root(spr, std::string());
+      rebuildSharedSheets(doc, w, h);
+    }
+    tx.commit();
+    doc->notifyGeneralUpdate();
+  }
+  catch (const std::exception& e) {
+    easymetricReportError("deleteObject", e.what());
+    return false;
+  }
+  return true;
+}
+
+
+// One object's sculpted volume as OBJ quads (one per exposed voxel face),
+// moved by (ox, oy, oz) in OBJ space (Y up). Texture coordinates point into
+// the object's own cells of the flattened sprite (the exported atlas).
+static void writeObjMesh(std::ostream& obj,
+                         doc::Sprite* spr,
+                         const SixSurfaceData& data,
+                         const SculptedVoxelVolume& vol,
+                         float ox,
+                         float oy,
+                         float oz,
+                         int& vIdx,
+                         int& vtIdx,
+                         int& vnIdx)
+{
+  const float sprW = std::max(1.0f, float(spr->width()));
+  const float sprH = std::max(1.0f, float(spr->height()));
+  // Per-face rect in the exported texture atlas (the flattened
+  // sprite). Previously every face was given UVs over the whole
+  // 0..1 atlas, so each face showed the entire atlas at once and
+  // transparent regions of other faces read as holes. Each face
+  // must instead sample only its own rect.
+  gfx::Rect faceRect[kFaceCount];
+  for (int f = 0; f < kFaceCount; ++f)
+    faceRect[f] = sharedFaceRect(spr, f);
+  const float halfX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown] }) * 0.5f;
+  const float halfY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight] }) * 0.5f;
+  const float halfZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown] }) * 0.5f;
+
+  // Depth sculpting (2026-11-07): when the volume grew past the Base
+  // box, the Base box sits centred in it (pad voxels per side).
+  // World and UV coords are measured from the Base box so it keeps
+  // its size and Plus bumps stick out beyond it in the exported
+  // mesh. Otherwise (pad 0) these are exactly the old formulas.
+  const int dimX = std::min(kMaxVoxelDim, std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown], 8 }));
+  const int dimY = std::min(kMaxVoxelDim, std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight], 8 }));
+  const int dimZ = std::min(kMaxVoxelDim, std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown], 8 }));
+  const int padX = std::max(0, (vol.vx - dimX) / 2);
+  const int padY = std::max(0, (vol.vy - dimY) / 2);
+  const int padZ = std::max(0, (vol.vz - dimZ) / 2);
+  const int spanX = (padX > 0 ? dimX : vol.vx);
+  const int spanY = (padY > 0 ? dimY : vol.vy);
+  const int spanZ = (padZ > 0 ? dimZ : vol.vz);
+  const float cellSizeX = (2.0f * halfX) / float(spanX);
+  const float cellSizeY = (2.0f * halfY) / float(spanY);
+  const float cellSizeZ = (2.0f * halfZ) / float(spanZ);
+
+
+  // uOld/vOld are the old 0..1 coordinates across the voxel
+  // volume (orientation preserved exactly); they are remapped
+  // into this face's rect in the atlas. vOld is bottom-up, so
+  // (1 - vOld) is the distance down from the top of the face.
+  auto emitQuad = [&](int face,
+                      float x0, float y0, float z0,
+                      float x1, float y1, float z1,
+                      float x2, float y2, float z2,
+                      float x3, float y3, float z3,
+                      float nx, float ny, float nz,
+                      float uOld0, float vOld0, float uOld1, float vOld1) {
+    const gfx::Rect& fr = faceRect[face];
+    const float u0 = (fr.x + uOld0 * float(data.w[face])) / sprW;
+    const float u1 = (fr.x + uOld1 * float(data.w[face])) / sprW;
+    const float v0 = 1.0f - (fr.y + (1.0f - vOld0) * float(data.h[face])) / sprH;
+    const float v1 = 1.0f - (fr.y + (1.0f - vOld1) * float(data.h[face])) / sprH;
+    obj << "v " << (x0 + ox) << " " << (y0 + oy) << " " << (z0 + oz) << "\n"
+        << "v " << (x1 + ox) << " " << (y1 + oy) << " " << (z1 + oz) << "\n"
+        << "v " << (x2 + ox) << " " << (y2 + oy) << " " << (z2 + oz) << "\n"
+        << "v " << (x3 + ox) << " " << (y3 + oy) << " " << (z3 + oz) << "\n";
+    obj << "vt " << u0 << " " << v0 << "\n"
+        << "vt " << u1 << " " << v0 << "\n"
+        << "vt " << u1 << " " << v1 << "\n"
+        << "vt " << u0 << " " << v1 << "\n";
+    obj << "vn " << nx << " " << ny << " " << nz << "\n";
+    obj << "f "
+        << (vIdx + 0) << "/" << (vtIdx + 0) << "/" << vnIdx << " "
+        << (vIdx + 1) << "/" << (vtIdx + 1) << "/" << vnIdx << " "
+        << (vIdx + 2) << "/" << (vtIdx + 2) << "/" << vnIdx << " "
+        << (vIdx + 3) << "/" << (vtIdx + 3) << "/" << vnIdx << "\n";
+    vIdx += 4;
+    vtIdx += 4;
+    vnIdx += 1;
+  };
+
+  for (int vy = 0; vy < vol.vy; ++vy) {
+    const float yMax = halfY - float(vy - padY) * cellSizeY;
+    const float yMin = halfY - float(vy + 1 - padY) * cellSizeY;
+
+    for (int vz = 0; vz < vol.vz; ++vz) {
+      const float zMin = -halfZ + float(vz - padZ) * cellSizeZ;
+      const float zMax = -halfZ + float(vz + 1 - padZ) * cellSizeZ;
+
+      for (int vx = 0; vx < vol.vx; ++vx) {
+        if (!vol.isSolid(vx, vy, vz)) continue;
+
+        const float xMin = -halfX + float(vx - padX) * cellSizeX;
+        const float xMax = -halfX + float(vx + 1 - padX) * cellSizeX;
+
+        // 1. Front face (+Z)
+        if (vz + 1 >= vol.vz || !vol.isSolid(vx, vy, vz + 1)) {
+          // UVs are clamped to [0,1]: a Plus bump sticks out past
+          // the Base box, and its side faces would otherwise get
+          // out-of-range UVs (texture repeat instead of the face
+          // edge). Un-sculpted values are already in range, so
+          // this is a no-op for them.
+          const float u0 = std::clamp(float(vx - padX) / float(spanX), 0.0f, 1.0f);
+          const float u1 = std::clamp(float(vx + 1 - padX) / float(spanX), 0.0f, 1.0f);
+          const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
+          const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
+          emitQuad(kFaceFront, xMin, yMin, zMax,
+                   xMax, yMin, zMax,
+                   xMax, yMax, zMax,
+                   xMin, yMax, zMax,
+                   0.0f, 0.0f, 1.0f,
+                   u0, v0, u1, v1);
+        }
+
+        // 2. Back face (-Z)
+        if (vz - 1 < 0 || !vol.isSolid(vx, vy, vz - 1)) {
+          const float u0 = std::clamp(float(spanX - 1 - (vx - padX)) / float(spanX), 0.0f, 1.0f);
+          const float u1 = std::clamp(float(spanX - (vx - padX)) / float(spanX), 0.0f, 1.0f);
+          const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
+          const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
+          emitQuad(kFaceBack, xMax, yMin, zMin,
+                   xMin, yMin, zMin,
+                   xMin, yMax, zMin,
+                   xMax, yMax, zMin,
+                   0.0f, 0.0f, -1.0f,
+                   u0, v0, u1, v1);
+        }
+
+        // 3. Top face (+Y)
+        if (vy - 1 < 0 || !vol.isSolid(vx, vy - 1, vz)) {
+          const float u0 = std::clamp(float(vx - padX) / float(spanX), 0.0f, 1.0f);
+          const float u1 = std::clamp(float(vx + 1 - padX) / float(spanX), 0.0f, 1.0f);
+          const float v0 = std::clamp(1.0f - float(vz + 1 - padZ) / float(spanZ), 0.0f, 1.0f);
+          const float v1 = std::clamp(1.0f - float(vz - padZ) / float(spanZ), 0.0f, 1.0f);
+          emitQuad(kFaceTop, xMin, yMax, zMax,
+                   xMax, yMax, zMax,
+                   xMax, yMax, zMin,
+                   xMin, yMax, zMin,
+                   0.0f, 1.0f, 0.0f,
+                   u0, v0, u1, v1);
+        }
+
+        // 4. Bottom face (-Y)
+        if (vy + 1 >= vol.vy || !vol.isSolid(vx, vy + 1, vz)) {
+          const float u0 = std::clamp(float(vx - padX) / float(spanX), 0.0f, 1.0f);
+          const float u1 = std::clamp(float(vx + 1 - padX) / float(spanX), 0.0f, 1.0f);
+          const float v0 = std::clamp(1.0f - float(spanZ - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
+          const float v1 = std::clamp(1.0f - float(spanZ - 1 - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
+          emitQuad(kFaceDown, xMin, yMin, zMin,
+                   xMax, yMin, zMin,
+                   xMax, yMin, zMax,
+                   xMin, yMin, zMax,
+                   0.0f, -1.0f, 0.0f,
+                   u0, v0, u1, v1);
+        }
+
+        // 5. Right face (+X)
+        if (vx + 1 >= vol.vx || !vol.isSolid(vx + 1, vy, vz)) {
+          const float u0 = std::clamp(float(spanZ - 1 - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
+          const float u1 = std::clamp(float(spanZ - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
+          const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
+          const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
+          emitQuad(kFaceRight, xMax, yMin, zMax,
+                   xMax, yMin, zMin,
+                   xMax, yMax, zMin,
+                   xMax, yMax, zMax,
+                   1.0f, 0.0f, 0.0f,
+                   u0, v0, u1, v1);
+        }
+
+        // 6. Left face (-X)
+        if (vx - 1 < 0 || !vol.isSolid(vx - 1, vy, vz)) {
+          const float u0 = std::clamp(float(vz - padZ) / float(spanZ), 0.0f, 1.0f);
+          const float u1 = std::clamp(float(vz + 1 - padZ) / float(spanZ), 0.0f, 1.0f);
+          const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
+          const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
+          emitQuad(kFaceLeft, xMin, yMin, zMin,
+                   xMin, yMin, zMax,
+                   xMin, yMax, zMax,
+                   xMin, yMax, zMin,
+                   -1.0f, 0.0f, 0.0f,
+                   u0, v0, u1, v1);
+        }
+      }
+    }
+  }
+}
+
+// Wavefront OBJ + MTL (+ the flattened sprite as the texture when `ctx` can
+// save files). With object groups every visible object with pixels is its
+// own "o <name>", at its place in the model (Objects, 2026-11-18); a single
+// object is written exactly as before ("o EasymetricSculptedModel").
+static bool exportEasymetricObj(
+  Context* ctx,
+  Doc* doc,
+  doc::frame_t fr,
+  const std::string& objPathIn,
+  int pivX,
+  int pivY,
+  int pivZ,
+  bool useDepth,
+  const std::function<const std::array<bool, 3>*(const std::string&)>& linkedFor)
+{
+  doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+  if (!spr)
+    return false;
+  const std::string objPath = base::replace_extension(objPathIn, "obj");
+  const std::string mtlPath = base::replace_extension(objPath, "mtl");
+  const std::string texPath = base::replace_extension(objPath, "png");
+  const std::string mtlFileName = base::get_file_name(mtlPath);
+  const std::string texFileName = base::get_file_name(texPath);
+
+  if (ctx) {
+    doc::FramesSequence seq;
+    seq.insert(fr);
+    std::unique_ptr<FileOp> fop(FileOp::createSaveDocumentOperation(
+      ctx, FileOpROI(doc, spr->bounds(), "", "", seq, false), texPath, "", false));
+    if (fop && !fop->hasError()) {
+      fop->operate();
+      fop->done();
+    }
+  }
+  {
+    std::ofstream mtl(mtlPath);
+    if (mtl.is_open()) {
+      mtl << "# Aseprite 2.0 Easymetric Material\n"
+          << "newmtl EasymetricMat\n"
+          << "Ka 1.000 1.000 1.000\n"
+          << "Kd 1.000 1.000 1.000\n"
+          << "Ks 0.000 0.000 0.000\n"
+          << "d 1.0\n"
+          << "illum 1\n"
+          << "map_Kd " << texFileName << "\n";
+    }
+  }
+  std::ofstream obj(objPath);
+  if (!obj.is_open())
+    return false;
+  obj << "# Aseprite 2.0 Easymetric Sculpted 3D Model\n"
+      << "mtllib " << mtlFileName << "\n"
+      << "usemtl EasymetricMat\n";
+  int vIdx = 1, vtIdx = 1, vnIdx = 1;
+  if (!hasObjectGroups(spr)) {
+    SixSurfaceData data;
+    extractSixSurfaces(doc, fr, data, useDepth, nullptr,
+                       linkedFor ? linkedFor(scopeKeyFor(spr)) : nullptr);
+    const SculptedVoxelVolume vol = buildSculptedVolume(data, pivX, pivY, pivZ);
+    obj << "o EasymetricSculptedModel\n";
+    writeObjMesh(obj, spr, data, vol, 0.0f, 0.0f, 0.0f, vIdx, vtIdx, vnIdx);
+    return true;
+  }
+  CompositeInput in;
+  buildCompositeInput(doc, fr, useDepth, nullptr, std::string(), linkedFor, in);
+  const std::vector<ObjectInfo> infos = resolveObjects(spr);
+  for (size_t i = 0; i < in.objects.size(); ++i) {
+    EasymetricObjectScope sc(spr, in.keys[i]);
+    std::string name = "Object 1";
+    for (const ObjectInfo& info : infos)
+      if (info.key == in.keys[i])
+        name = info.name;
+    std::replace(name.begin(), name.end(), ' ', '_');
+    const SixSurfaceData& data = *in.objects[i].data;
+    const SculptedVoxelVolume vol = buildSculptedVolume(data, pivX, pivY, pivZ);
+    obj << "o " << name << "\n";
+    // The preview's world is Y down; OBJ is Y up.
+    writeObjMesh(obj, spr, data, vol, in.objects[i].cx, -in.objects[i].cy, in.objects[i].cz, vIdx,
+                 vtIdx, vnIdx);
+  }
+  return true;
+}
+
+// A whole-number field for sizes (2026-11-17). ui::Slider clamps on every
+// keystroke (typing "3" in a 4..256 slider becomes 4 and the next digit is
+// appended to it), so sizes are typed into an IntEntry instead, which only
+// clamps when it loses focus. A plain click (no drag) right after the field
+// gets focus selects the whole value, so typing replaces it instead of being
+// appended to it (the "64" + "24" = "6424" seen in the recordings).
+class NumberField : public ui::IntEntry {
+public:
+  NumberField(int min, int max, int value) : ui::IntEntry(min, max)
+  {
+    useSlider(false);
+    setValue(value);
+  }
+
+  // Enter / numpad Enter while typing: the value is committed (clamped) and
+  // this fires. The key is consumed, so it never reaches the Enter = Play
+  // Animation shortcut (Arin pressed Enter to confirm a size, 2026-11-18,
+  // and the animation started instead).
+  obs::signal<void()> Enter;
+
+protected:
+  bool onProcessMessage(ui::Message* msg) override
+  {
+    switch (msg->type()) {
+      case ui::kKeyDownMessage:
+        if (hasFocus()) {
+          const ui::KeyScancode sc = static_cast<ui::KeyMessage*>(msg)->scancode();
+          if (sc == ui::kKeyEnter || sc == ui::kKeyEnterPad) {
+            setValue(std::clamp(getValue(), m_min, m_max));
+            selectAllText();
+            Enter();
+            return true;
+          }
+        }
+        break;
+      case ui::kFocusEnterMessage: m_selectOnRelease = true; break;
+      case ui::kMouseDownMessage:
+        m_downPos = static_cast<ui::MouseMessage*>(msg)->position();
+        break;
+      case ui::kMouseUpMessage: {
+        const bool result = ui::IntEntry::onProcessMessage(msg);
+        const gfx::Point d = static_cast<ui::MouseMessage*>(msg)->position() - m_downPos;
+        const int slop = 6 * ui::guiscale();
+        if (m_selectOnRelease && std::abs(d.x) <= slop && std::abs(d.y) <= slop)
+          selectAllText();
+        m_selectOnRelease = false;
+        return result;
+      }
+      default: break;
+    }
+    return ui::IntEntry::onProcessMessage(msg);
+  }
+
+private:
+  bool m_selectOnRelease = false;
+  gfx::Point m_downPos;
+};
+
 class EasymetricMultiPaneView;
 
 class EasymetricWheelZoomState : public StandbyState {
@@ -3792,11 +6081,11 @@ public:
     // same call, so panel editing confinement is unchanged.
     // This touches only Easymetric panel editors, not the
     // upstream Editor::onResize/fitClip behaviour.
-    const gfx::Rect savedClip = editor->clipSpriteBounds();
-    editor->setClipSpriteBounds(gfx::Rect());
+    // 2026-11-16: the clip-clearing workaround that used to be here is
+    // gone. Editor::onResize no longer re-fits on resize events whose
+    // viewport size is unchanged, and a manual zoom disables auto-fit.
     editor->setZoomAndCenterInMouse(zoom, msg->position(),
                                     Editor::ZoomBehavior::MOUSE);
-    editor->setClipSpriteBounds(savedClip);
     return true;
   }
 
@@ -3950,7 +6239,7 @@ static bool generateDepthFromBaseOnDoc(app::Doc* doc, doc::frame_t fr)
     // broke sculpt test DS1 on build5. The layer stays visible and
     // editable; only its stack position changes.)
     if (shared.baseLayer)
-      api.restackLayerBefore(depthLayer, spr->root(), shared.baseLayer);
+      api.restackLayerBefore(depthLayer, shared.baseLayer->parent(), shared.baseLayer);
 
     doc::ImageRef depthImg(doc::Image::create(doc::IMAGE_RGB, spr->width(), spr->height()));
     depthImg->clear(0);
@@ -4276,8 +6565,19 @@ static bool sculptDepthDabOnDoc(app::Doc* doc, doc::frame_t fr, int face,
   }
 }
 
-class EasymetricMultiPaneView : public ui::Widget, public EditorObserver {
+class EasymetricMultiPaneView : public ui::Widget,
+                                public EditorObserver,
+                                public DocUndoObserver {
 public:
+  // Face index shown by this panel editor, or -1 (used by the session recorder).
+  int faceOfEditor(const Editor* ed) const
+  {
+    for (int f = 0; f < kFaceCount; ++f)
+      if (ed && m_editors[f] == ed)
+        return f;
+    return -1;
+  }
+
   EasymetricMultiPaneView(DocView* docView)
     : ui::Widget(ui::kGenericWidget)
     , m_docView(docView)
@@ -4296,6 +6596,11 @@ public:
     // handled, so it never scrolls the UI either; Shift+wheel
     // still pans it.
     m_savedZoomWithWheel = Preferences::instance().editor.zoomWithWheel();
+    // Auto-align: watch committed transactions to catch the end of a stroke.
+    if (Doc* undoDoc = docView ? docView->document() : nullptr) {
+      m_undoObserved = undoDoc->undoHistory();
+      m_undoObserved->add_observer(this);
+    }
     if (!m_savedZoomWithWheel) {
       Preferences::instance().editor.zoomWithWheel(true);
       m_restoreZoomWithWheel = true;
@@ -4643,6 +6948,12 @@ public:
     if (m_exited)
       return;
     m_exited = true;
+    // Objects: helpers outside the studio work on the root object again.
+    g_objectScopeKey.clear();
+    if (m_undoObserved) {
+      m_undoObserved->remove_observer(this);
+      m_undoObserved = nullptr;
+    }
     restoreDebugOverlays();
     leaveDepthTools();
     std::remove(easymetricHubMarkerPath().c_str());
@@ -4681,6 +6992,22 @@ public:
   {
     json11::Json::object s;
     s["open"] = true;
+    // The studio reports its own focused object, whatever scope the
+    // caller (the headless "state" action) set.
+    doc::Sprite* scopeSpr =
+      (m_docView && m_docView->document()) ? m_docView->document()->sprite() : nullptr;
+    EasymetricObjectScope focusScope(scopeSpr, m_focusKey);
+    s["focusedObject"] = m_focusKey;
+    {
+      json11::Json::array hits;
+      for (size_t i = 0; i < m_lastObjHitKeys.size() && i < m_lastObjHitPx.size(); ++i)
+        hits.push_back(json11::Json::object{ { "key", m_lastObjHitKeys[i] },
+                                             { "px", m_lastObjHitPx[i] } });
+      s["previewObjects"] = hits;
+    }
+    s["showOtherObjects"] = m_showOthers;
+    s["colLinked"] = json11::Json::array{ m_colLinked[0], m_colLinked[1], m_colLinked[2] };
+    s["otherObjectsPx"] = m_lastOverlayPx;
     s["toolMode"] = m_depthTool == DepthTool::None ? "draw" : "depth";
     s["depthTool"] = m_depthTool == DepthTool::Brush ? "brush"
                      : m_depthTool == DepthTool::Pencil ? "pencil"
@@ -4688,6 +7015,13 @@ public:
     s["depthStrokeActive"] = m_depthStrokeActive;
     s["previewFloating"] = m_previewFloating;
     s["ghostOn"] = m_ghostOn;
+    s["autoAlign"] = Preferences::instance().easymetric.autoAlign();
+    s["autoAlignLimit"] = Preferences::instance().easymetric.autoAlignLimit();
+    s["showCutouts"] = Preferences::instance().easymetric.showCutouts();
+    s["lastAlign"] = m_lastAlign;
+    s["previewCutoutPx"] = m_lastCutoutPx;
+    if (m_previewWidget)
+      s["previewRect"] = rectJson(m_previewWidget->bounds());
     if (m_fieldsView)
       s["fieldsViewport"] = rectJson(m_fieldsView->viewportBounds());
     s["activeFace"] = m_lastActiveFace;
@@ -4715,6 +7049,9 @@ public:
         fo["zoom"] = m_editors[f]->zoom().scale();
         fo["layer"] = m_editors[f]->layer() ? m_editors[f]->layer()->name() : std::string();
         fo["idle"] = isPanelEditorIdle(m_editors[f]);
+        fo["frame"] = int(m_editors[f]->frame());
+        fo["playing"] = m_editors[f]->isPlaying();
+        fo["active"] = (m_docView && m_docView->editor() == m_editors[f]);
       }
       if (m_headers[f])
         fo["header"] = rectJson(m_headers[f]->bounds());
@@ -4774,17 +7111,46 @@ public:
         DocApi api = doc->getApi(tx);
         const gfx::Rect srcRect = sharedFaceRect(spr, srcFace);
         const gfx::Rect dstRect = sharedFaceRect(spr, dstFace);
+        // Mirrored copy (see extractSixSurfaces): Down = Top flipped
+        // vertically, Back / Left = Front / Right flipped horizontally.
+        const bool flipV = (srcFace / 2 == 0);
         auto syncRect = [&](doc::LayerImage* lyr) {
           if (!lyr) return;
           for (doc::frame_t fr = doc::frame_t(0); fr <= spr->lastFrame(); ++fr) {
             doc::Cel* cel = lyr->cel(fr);
             if (!cel || !cel->image()) continue;
-            doc::ImageRef copyImg(doc::Image::createCopy(cel->image()));
-            for (int v = 0; v < srcRect.h && v < dstRect.h; ++v)
-              for (int u = 0; u < srcRect.w && u < dstRect.w; ++u)
-                doc::put_pixel(copyImg.get(), dstRect.x + u, dstRect.y + v,
-                               doc::get_pixel(copyImg.get(), srcRect.x + u, srcRect.y + v));
+            // A trimmed cel may not cover the destination face: grow the
+            // image to the whole sprite so every mirrored pixel can land.
+            int ox = cel->x(), oy = cel->y();
+            doc::ImageRef copyImg;
+            if (cel->bounds().contains(dstRect)) {
+              copyImg.reset(doc::Image::createCopy(cel->image()));
+            }
+            else {
+              copyImg.reset(doc::Image::create(cel->image()->pixelFormat(), spr->width(),
+                                               spr->height()));
+              doc::clear_image(copyImg.get(), copyImg->maskColor());
+              doc::copy_image(copyImg.get(), cel->image(), ox, oy);
+              ox = oy = 0;
+            }
+            const int cw = std::min(srcRect.w, dstRect.w);
+            const int ch = std::min(srcRect.h, dstRect.h);
+            for (int v = 0; v < ch; ++v)
+              for (int u = 0; u < cw; ++u) {
+                const int su = flipV ? u : cw - 1 - u;
+                const int sv = flipV ? ch - 1 - v : v;
+                const int sx = srcRect.x + su - ox;
+                const int sy = srcRect.y + sv - oy;
+                // Outside the (possibly trimmed) cel image = transparent.
+                const doc::color_t c = (sx >= 0 && sy >= 0 && sx < copyImg->width() &&
+                                        sy < copyImg->height()) ?
+                                         doc::get_pixel(copyImg.get(), sx, sy) :
+                                         copyImg->maskColor();
+                doc::put_pixel(copyImg.get(), dstRect.x + u - ox, dstRect.y + v - oy, c);
+              }
             api.replaceImage(spr, cel->imageRef(), copyImg);
+            if (ox != cel->x() || oy != cel->y())
+              api.setCelPosition(spr, cel, ox, oy);
           }
         };
         syncRect(shared.baseLayer);
@@ -4820,6 +7186,9 @@ public:
           doc::Cel* dstCel = dL->cel(fr);
           if (srcCel && srcCel->image()) {
             doc::ImageRef copyImg(doc::Image::createCopy(srcCel->image()));
+            doc::algorithm::flip_image(copyImg.get(), copyImg->bounds(),
+                                       (srcFace / 2 == 0) ? doc::algorithm::FlipVertical
+                                                          : doc::algorithm::FlipHorizontal);
             if (dstCel) {
               api.replaceImage(spr, dstCel->imageRef(), copyImg);
               api.setCelPosition(spr, dstCel, srcCel->x(), srcCel->y());
@@ -4938,7 +7307,11 @@ public:
       return;
     const doc::frame_t newFrame = editor->frame();
     Editor* activeEd = m_docView->editor();
-    if (editor == activeEd) {
+    // A panel that is PLAYING is also a reference (Arin, 2026-11-18: only
+    // the Top panel animated). Playback keeps driving the panel it started
+    // in even when another panel became the active one, and the linked
+    // panels used to follow the active panel only.
+    if (editor == activeEd || editor->isPlaying()) {
       // User intent (or playback on the active editor): this frame
       // is the new reference. An unlinked active panel adopts it as
       // its new pinned frame; every LINKED panel follows it.
@@ -5419,7 +7792,7 @@ public:
         // hide it instead (a hidden layer's pixels cannot be edited).
         if (shared.depthLayer && shared.baseLayer) {
           DocApi api = doc->getApi(*m_depthTx);
-          api.restackLayerBefore(shared.depthLayer, spr->root(), shared.baseLayer);
+          api.restackLayerBefore(shared.depthLayer, shared.baseLayer->parent(), shared.baseLayer);
         }
         doc::Cel* depthCel = shared.depthLayer->cel(fr);
         doc::Cel* baseCel = shared.baseLayer->cel(fr);
@@ -6126,6 +8499,79 @@ private:
     m_fieldsBox->setBorder(gfx::Border(4 * s));
     m_fieldsBox->setChildSpacing(3 * s);
 
+    // Row 0: Objects (2026-11-17). Which object the panels edit, a guided
+    // New object dialog, the focused object's place (X right, Y up, Z to
+    // the front, from Object 1's corner) and its front rank, and whether
+    // the other objects are shown faded in the panels.
+    {
+      auto* row = new ui::HBox;
+      row->setChildSpacing(4 * s);
+      m_objectCombo = new ui::ComboBox;
+      m_objectCombo->setExpansive(true);
+      auto* newBtn = new ui::Button("New object...");
+      row->addChild(new ui::Label("Object:"));
+      row->addChild(m_objectCombo);
+      m_fieldsBox->addChild(row);
+      // Short rows: the Fields pane can be under 200 px wide.
+      auto* newRow = new ui::HBox;
+      newRow->setChildSpacing(4 * s);
+      m_showOthersCheck = new ui::CheckBox("Show others");
+      m_showOthersCheck->setSelected(m_showOthers);
+      // Delete object (Arin, 2026-11-18): removes the focused object (not
+      // Object 1) after a confirmation; focus falls back to the object
+      // before it in the list. Undo brings it back.
+      m_deleteObjBtn = new ui::Button("Delete object");
+      m_deleteObjBtn->setEnabled(false);
+      newRow->addChild(newBtn);
+      newRow->addChild(m_deleteObjBtn);
+      m_fieldsBox->addChild(newRow);
+      m_deleteObjBtn->Click.connect([this] { deleteFocusedObject(); });
+      m_objectCombo->Change.connect([this] {
+        if (m_updatingObjectUi)
+          return;
+        const int i = m_objectCombo->getSelectedItemIndex();
+        if (i >= 0 && i < int(m_objectComboKeys.size()))
+          focusObject(m_objectComboKeys[size_t(i)]);
+      });
+      newBtn->Click.connect([this] { openNewObjectDialog(); });
+
+      // (The "At X / Y / Z + Move" row was removed 2026-11-18: every object
+      // shares the model size and space, so an object's place is simply
+      // where it is drawn.)
+
+      auto* rankRow = new ui::HBox;
+      rankRow->setChildSpacing(4 * s);
+      m_objRankCombo = new ui::ComboBox;
+      m_objRankCombo->addItem("Auto");
+      for (int r = 0; r <= 9; ++r)
+        m_objRankCombo->addItem(fmt::format("Rank {}", r));
+      m_objRankCombo->setSelectedItemIndex(0);
+      m_objRankCombo->setExpansive(true);
+      rankRow->addChild(new ui::Label("In front:"));
+      rankRow->addChild(m_objRankCombo);
+      m_fieldsBox->addChild(rankRow);
+      // Own row: next to Delete object or the rank combo it was cut off in a
+      // narrow Fields pane (2026-11-18).
+      m_fieldsBox->addChild(m_showOthersCheck);
+      m_objRankCombo->Change.connect([this] {
+        if (m_updatingObjectUi)
+          return;
+        Doc* doc = m_docView->document();
+        if (!doc)
+          return;
+        const int rank = m_objRankCombo->getSelectedItemIndex() - 1;
+        setObjectOnDoc(doc, m_focusKey, nullptr, &rank, nullptr, nullptr);
+        m_lastHash = 0;
+        pollAndRender(true);
+      });
+      m_showOthersCheck->Click.connect([this] {
+        m_showOthers = m_showOthersCheck->isSelected();
+        m_lastHash = 0;
+        pollAndRender(true);
+        invalidateAllPanels();
+      });
+    }
+
     // Row 1: Rotation on Y-axis + Cam Angle
     auto* rotRow = new ui::HBox;
     rotRow->setChildSpacing(4 * s);
@@ -6195,40 +8641,48 @@ private:
     mapRow->addChild(m_renderTypeCombo);
     m_fieldsBox->addChild(mapRow);
 
-    // Row 5: Stroke Outline + Cutouts + Lock Borders + Symmetry X/Y
+    // Row 5: Stroke Outline + Cutouts.
+    // (2026-11-17, Arin: removed from Fields because they duplicate other
+    // controls or have no effect in the studio: Sym X / Sym Y / Center Sym
+    // (= the SX / SY panel header buttons; centring is automatic), Lock
+    // Borders (slices are not drawn in panels), Link Dims (only reacted to
+    // slice edits made outside the studio), Ghost hints (= the Preview
+    // header Ghost button) and Pop out Column (= the Preview header button).
+    // Their member pointers stay null; every user checks for null.)
     auto* symRow = new ui::HBox;
     symRow->setChildSpacing(4 * s);
     m_strokeCheck = new ui::CheckBox("Stroke Outline");
     m_cutoutCheck = new ui::CheckBox("Cutouts");
-    m_lockBordersCheck = new ui::CheckBox("Lock Borders");
-    m_symXCheck = new ui::CheckBox("Sym X");
-    m_symYCheck = new ui::CheckBox("Sym Y");
-    auto* centerSymBtn = new ui::Button("Center Sym");
     m_strokeCheck->setSelected(true);
     m_cutoutCheck->setSelected(true);
-
-    m_linkDimensionsCheck = new ui::CheckBox("Link Dims");
-    m_linkDimensionsCheck->setSelected(true);
-
     symRow->addChild(m_strokeCheck);
     symRow->addChild(m_cutoutCheck);
-    symRow->addChild(m_lockBordersCheck);
-    symRow->addChild(m_linkDimensionsCheck);
-    m_ghostCheck = new ui::CheckBox("Ghost hints");
-    m_ghostCheck->setSelected(m_ghostOn);
-    m_ghostCheck->Click.connect([this] { setGhostOn(m_ghostCheck->isSelected()); });
-    symRow->addChild(m_symXCheck);
-    symRow->addChild(m_symYCheck);
-    symRow->addChild(centerSymBtn);
     m_fieldsBox->addChild(symRow);
 
-    // Ghost hints get their own short row: the sym row is already wider than
-    // the Fields pane.
-    auto* ghostRow = new ui::HBox;
-    ghostRow->setChildSpacing(4 * s);
-    ghostRow->addChild(m_ghostCheck);
-    ghostRow->addChild(new ui::Label("(faint bands where another surface lacks content)"));
-    m_fieldsBox->addChild(ghostRow);
+    // Auto-align (persisted in the [easymetric] preferences section).
+    auto* alignRow = new ui::HBox;
+    alignRow->setChildSpacing(4 * s);
+    auto& epref = Preferences::instance().easymetric;
+    m_autoAlignCheck = new ui::CheckBox("Auto-align views");
+    m_autoAlignCheck->setSelected(epref.autoAlign());
+    m_autoAlignCheck->Click.connect(
+      [this] { Preferences::instance().easymetric.autoAlign(m_autoAlignCheck->isSelected()); });
+    m_alignLimitSlider = new ui::Slider(0, 16, std::clamp(epref.autoAlignLimit(), 0, 16));
+    m_alignLimitSlider->setExpansive(true);
+    m_alignLimitSlider->Change.connect([this] {
+      Preferences::instance().easymetric.autoAlignLimit(m_alignLimitSlider->getValue());
+    });
+    m_showCutoutsCheck = new ui::CheckBox("Show cut voxels (magenta)");
+    m_showCutoutsCheck->setSelected(epref.showCutouts());
+    m_showCutoutsCheck->Click.connect([this] {
+      Preferences::instance().easymetric.showCutouts(m_showCutoutsCheck->isSelected());
+      pollAndRender(true);
+    });
+    alignRow->addChild(m_autoAlignCheck);
+    alignRow->addChild(new ui::Label("max px:"));
+    alignRow->addChild(m_alignLimitSlider);
+    alignRow->addChild(m_showCutoutsCheck);
+    m_fieldsBox->addChild(alignRow);
 
     // (Row 5b, the per-face "Size:" combo with Top/Front/Right/... XY/YZ resizing,
     // was removed 2026-11-10 at William's request: the object is resized only
@@ -6260,26 +8714,53 @@ private:
       curY = fh[kFaceFront];
       curZ = fw[kFaceRight];
     }
-    auto* objXSlider = new ui::Slider(4, 256, curX);
-    auto* objYSlider = new ui::Slider(4, 256, curY);
-    auto* objZSlider = new ui::Slider(4, 256, curZ);
-    objXSlider->setExpansive(true);
-    objYSlider->setExpansive(true);
-    objZSlider->setExpansive(true);
-    auto* applyObjBtn = new ui::Button("Apply Object Size");
-    objRow->addChild(new ui::Label("Object W/H/D:"));
+    // Typed whole numbers (1..256), labelled; refreshed by refreshObjectSizeFields().
+    auto* objXSlider = new NumberField(1, 256, curX);
+    auto* objYSlider = new NumberField(1, 256, curY);
+    auto* objZSlider = new NumberField(1, 256, curZ);
+    m_objSizeFields = { objXSlider, objYSlider, objZSlider };
+    auto* applyObjBtn = new ui::Button("Apply Model Size");
+    // Three short rows instead of one very wide one: the buttons used to sit
+    // past the right edge of the Fields pane (2026-11-17). Since 2026-11-18
+    // this is the MODEL size, shared by every object.
+    objRow->addChild(new ui::Label("Model size  W"));
     objRow->addChild(objXSlider);
+    objRow->addChild(new ui::Label("H"));
     objRow->addChild(objYSlider);
+    objRow->addChild(new ui::Label("D"));
     objRow->addChild(objZSlider);
-    objRow->addChild(applyObjBtn);
     m_fieldsBox->addChild(objRow);
+    auto* objRow2 = new ui::HBox;
+    objRow2->setChildSpacing(4 * s);
+    objRow2->addChild(applyObjBtn);
+    m_fieldsBox->addChild(objRow2);
 
+    auto* objRow3 = new ui::HBox;
+    objRow3->setChildSpacing(4 * s);
     auto* easyStartBtn = new ui::Button("Easy Start (1 pixel)");
-    objRow->addChild(easyStartBtn);
+    objRow3->addChild(easyStartBtn);
+    auto* blockBtn = new ui::Button("Start from block...");
+    objRow3->addChild(blockBtn);
+    m_fieldsBox->addChild(objRow3);
+    blockBtn->Click.connect([this] { openBlockDialog(); });
     easyStartBtn->Click.connect([this] {
       Doc* doc = m_docView->document();
       if (!doc || !doc->sprite()) return;
-      setupSixSurfacesOnDoc(doc, true, true);
+      // Inside the studio the shared sheets already exist, so the old
+      // setupSixSurfacesOnDoc(seed) path did nothing (2026-11-17). Easy start
+      // = a 1x1x1 block centred in the current cells, through the same path
+      // as Start from block (replaces the views; undoable).
+      int fw[kFaceCount], fh[kFaceCount];
+      sharedFaceSizes(doc->sprite(), fw, fh);
+      const BlockLayout b =
+        planBlockLayout(1, 1, 1, fw[kFaceFront], fh[kFaceFront], fw[kFaceRight]);
+      const doc::color_t col =
+        color_utils::color_for_image(Preferences::instance().colorBar.fgColor(), doc::IMAGE_RGB);
+      std::string err;
+      const doc::frame_t fr = m_editors[0] ? m_editors[0]->frame() : doc::frame_t(0);
+      if (!applyBlockLayout(doc, fr, b, doc::rgba(doc::rgba_getr(col), doc::rgba_getg(col),
+                                                  doc::rgba_getb(col), 255), err))
+        easymetricReportError("easyStart", err);
       initLayersAndFraming();
       m_lastHash = 0;
       pollAndRender(true);
@@ -6287,35 +8768,45 @@ private:
         sb->showTip(1200, "Easy start: 1 central pixel per face");
     });
 
-    applyObjBtn->Click.connect([this, objXSlider, objYSlider, objZSlider] {
+    // Apply = resize the MODEL (every object). Arin, 2026-11-18: a bigger
+    // size used to leave the old drawing in the top-left of each view (a
+    // slab instead of a cube), so it now asks each time: stretch the
+    // drawings to the new size, or keep them unscaled and centred.
+    auto applyModelSize = [this, objXSlider, objYSlider, objZSlider] {
       Doc* doc = m_docView->document();
       if (!doc || !doc->sprite()) return;
-      const int X = std::clamp(objXSlider->getValue(), 4, 256);
-      const int Y = std::clamp(objYSlider->getValue(), 4, 256);
-      const int Z = std::clamp(objZSlider->getValue(), 4, 256);
-      SixSurfaceData data;
-      extractSixSurfaces(doc, 0, data);
-      data.w[kFaceTop] = X;
-      data.h[kFaceTop] = Z;
-      data.w[kFaceDown] = X;
-      data.h[kFaceDown] = Z;
-      data.w[kFaceFront] = X;
-      data.h[kFaceFront] = Y;
-      data.w[kFaceBack] = X;
-      data.h[kFaceBack] = Y;
-      data.w[kFaceRight] = Z;
-      data.h[kFaceRight] = Y;
-      data.w[kFaceLeft] = Z;
-      data.h[kFaceLeft] = Y;
-      // srcFace = -1: do not override one face, apply the
-      // whole data set above to every face at once.
-      propagateLinkedDimensions(doc, data, -1, 0, 0);
+      const int box[3] = { std::clamp(objXSlider->getValue(), 1, 256),
+                           std::clamp(objYSlider->getValue(), 1, 256),
+                           std::clamp(objZSlider->getValue(), 1, 256) };
+      int cur[3];
+      modelBox(doc->sprite(), cur);
+      if (cur[0] == box[0] && cur[1] == box[1] && cur[2] == box[2])
+        return;
+      stopAllPlayback();
+      const int nObj = int(resolveObjects(doc->sprite()).size());
+      const int choice = ui::Alert::show(fmt::format(
+        "Model size<<Resize {} to {} x {} x {} (was {} x {} x {})?"
+        "<<Stretch: every view's drawing is scaled to the new size."
+        "<<Keep pixels: drawings stay their size, centred; the rest is empty."
+        "||&Stretch drawings||&Keep pixels||&Cancel",
+        nObj > 1 ? fmt::format("all {} objects", nObj) : std::string("the model"), box[0],
+        box[1], box[2], cur[0], cur[1], cur[2]));
+      if (choice != 1 && choice != 2) {
+        refreshObjectSizeFields(true);
+        return;
+      }
+      resizeModelOnDoc(doc, box, choice == 1 ? ResizeMode::Stretch : ResizeMode::Keep);
       initLayersAndFraming();
+      m_refitPanels = 2;
       m_lastHash = 0;
       pollAndRender(true);
       if (auto* sb = StatusBar::instance())
-        sb->showTip(1200, "Applied object size to all faces");
-    });
+        sb->showTip(1500, fmt::format("Model size {} x {} x {} ({})", box[0], box[1], box[2],
+                                      choice == 1 ? "stretched" : "pixels kept"));
+    };
+    applyObjBtn->Click.connect(applyModelSize);
+    for (NumberField* nf : { objXSlider, objYSlider, objZSlider })
+      nf->Enter.connect(applyModelSize);
 
     // Row 6: Per-Face Editable Depth Maps + Live Sync
     auto* depthRow = new ui::HBox;
@@ -6385,15 +8876,8 @@ private:
     // docked back at any time. Closing the floating window
     // docks it back automatically. The same pop-out is also on
     // the Preview header (opposite the label).
-    auto* floatRow = new ui::HBox;
-    floatRow->setChildSpacing(4 * s);
-    m_previewPopoutBtn = new ui::Button("Pop out Column");
-    m_previewPopoutBtn->Click.connect([this] {
-      if (m_previewFloating) dockPreview();
-      else popOutPreview();
-    });
-    floatRow->addChild(m_previewPopoutBtn);
-    m_fieldsBox->addChild(floatRow);
+    // (The Fields "Pop out Column" button was removed 2026-11-17: the
+    // Preview header has the same Pop out / Dock button.)
 
     // Row 7: Action Buttons (Render, Export .OBJ, Exit)
     auto* actRow = new ui::HBox;
@@ -6480,30 +8964,6 @@ private:
     m_tagCombo->Change.connect([this] { onTagSelected(); });
     saveTagBtn->Click.connect([this] { saveCurrentAngleAsTag(); });
 
-    m_lockBordersCheck->Click.connect([this] {
-      const bool locked = m_lockBordersCheck->isSelected();
-      Doc* doc = m_docView->document();
-      if (doc && doc->sprite()) {
-        for (int f = 0; f < kFaceCount; ++f) {
-          if (doc::Slice* sl = findSliceForFace(doc->sprite(), f))
-            sl->userData().setText(locked ? "locked" : "");
-        }
-        for (Editor* ed : m_editors) {
-          if (ed) ed->invalidate();
-        }
-      }
-      if (auto* sb = StatusBar::instance())
-        sb->showTip(1200, locked ? "Surface borders locked" : "Surface borders unlocked");
-    });
-
-    m_linkDimensionsCheck->Click.connect([this] {
-      if (auto* sb = StatusBar::instance()) {
-        sb->showTip(1200, m_linkDimensionsCheck->isSelected() ?
-                    "Linked surface dimensions active" :
-                    "Linked surface dimensions disabled");
-      }
-    });
-
     setupSmartObjectsBtn->Click.connect([this] {
       Doc* doc = m_docView->document();
       if (doc) {
@@ -6526,32 +8986,6 @@ private:
         if (auto* sb = StatusBar::instance())
           sb->showTip(1500, "Converted smart objects to layer groups");
       }
-    });
-
-    // Fields checkboxes act on the ACTIVE panel (see
-    // applyPanelSymmetry): the checkbox Click reads its own new
-    // state and stores it as that panel's state. With no panel
-    // active yet, they act on Top (face 0). The checkboxes always
-    // show the active panel's state.
-    auto applySymmetry = [this] {
-      if (!m_symXCheck || !m_symYCheck)
-        return;
-      initPanelSymmetry();
-      const int face = (m_lastActiveFace >= 0) ? m_lastActiveFace : 0;
-      m_symXFace[face] = m_symXCheck->isSelected();
-      m_symYFace[face] = m_symYCheck->isSelected();
-      if (m_symXButtons[face])
-        m_symXButtons[face]->setOn(m_symXFace[face]);
-      if (m_symYButtons[face])
-        m_symYButtons[face]->setOn(m_symYFace[face]);
-      applyPanelSymmetry(face);
-    };
-
-    m_symXCheck->Click.connect([applySymmetry] { applySymmetry(); });
-    m_symYCheck->Click.connect([applySymmetry] { applySymmetry(); });
-    // "Centre" re-applies the active panel's face-centre axis.
-    centerSymBtn->Click.connect([this] {
-      applyPanelSymmetry((m_lastActiveFace >= 0) ? m_lastActiveFace : 0);
     });
 
     // Show the document's actual symmetry mode in the Fields
@@ -6701,10 +9135,115 @@ private:
     return app::extractSixSurfaces(doc, frame, out, useDepth, m_docView, &m_colLinked);
   }
 
+  // DocUndoObserver: a transaction was committed. If it came from a paint
+  // stroke in a panel (that panel is still mid-stroke when its tool loop
+  // commits), remember the panel; the poll aligns it once the stroke is over,
+  // outside the stroke's transaction, so the nudge is its own undo step.
+  void onAddUndoState(DocUndo*) override
+  {
+    if (m_aligning || m_exited)
+      return;
+    Editor* ed = Editor::activeEditor();
+    int face = -1;
+    for (int f = 0; f < kFaceCount; ++f)
+      if (m_editors[f] && m_editors[f] == ed)
+        face = f;
+    if (face < 0 || isPanelEditorIdle(ed))
+      return;
+    tools::Ink* ink = App::instance()->activeToolManager()->activeInk();
+    if (!ink || !(ink->isPaint() || ink->isEraser()))
+      return;
+    m_pendingAlignFace = face;
+  }
+
+  void runPendingAlign()
+  {
+    const int face = m_pendingAlignFace;
+    if (face < 0 || !m_editors[face] || anyPanelEditorBusy())
+      return; // wait until the stroke is fully over
+    m_pendingAlignFace = -1;
+    auto& epref = Preferences::instance().easymetric;
+    if (!epref.autoAlign())
+      return;
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    if (!doc || !doc->sprite())
+      return;
+    doc::frame_t frames[kFaceCount];
+    for (int f = 0; f < kFaceCount; ++f)
+      frames[f] = m_editors[f] ? m_editors[f]->frame() : doc::frame_t(0);
+    const bool linked[3] = { m_colLinked[0], m_colLinked[1], m_colLinked[2] };
+    const AlignPlan plan =
+      planFaceAlign(doc, frames, linked, face, std::max(0, epref.autoAlignLimit()));
+    bool applied = false;
+    if (plan.du != 0 || plan.dv != 0) {
+      m_aligning = true;
+      try {
+        applied = applyFaceShift(doc, frames[face], face, plan.du, plan.dv, linked,
+                                 fmt::format("Align {} View", kFaceSpecs[face].displayName));
+      }
+      catch (const std::exception& e) {
+        easymetricReportError("autoAlign", e.what());
+      }
+      m_aligning = false;
+      if (applied)
+        doc->notifyGeneralUpdate();
+    }
+    m_lastAlign = alignPlanJson(plan, applied);
+    const std::string msg = alignPlanSummary(plan);
+    if (!msg.empty())
+      if (auto* sb = StatusBar::instance())
+        sb->showTip(plan.notes.empty() ? 2500 : 5000, msg);
+  }
+
+  // Keeps the Fields W/H/D numbers equal to the actual object size (Front
+  // width / Front height / Right width) after any resize, undo or reconcile.
+  // A field the user is typing into is left alone.
+  // Model size since 2026-11-18 (Object 1's box = every object's).
+  // `force`: also when unchanged (Cancel in the Apply question).
+  void refreshObjectSizeFields(bool force = false)
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    if (!doc || !doc->sprite() || !m_objSizeFields[0])
+      return;
+    int v[3];
+    modelBox(doc->sprite(), v);
+    // Only when the real size CHANGED: otherwise a value typed but not yet
+    // applied would be reset as soon as the user moves to the next field.
+    if (!force && v[0] == m_lastObjSize[0] && v[1] == m_lastObjSize[1] &&
+        v[2] == m_lastObjSize[2])
+      return;
+    for (int a = 0; a < 3; ++a) {
+      m_lastObjSize[a] = v[a];
+      if (NumberField* e = m_objSizeFields[a])
+        e->setValue(v[a]);
+    }
+  }
+
   void pollAndRender(bool force)
   {
     if (!isVisible()) return;
+    // Objects: the helpers work on the focused object; a sheet picked in
+    // the timeline focuses its object; the Fields object row follows.
+    stopOrphanPlayback();
+    applyFocusScope();
+    followTimelineObject();
+    refreshObjectUi();
+    if (m_refitPanels > 0 && !anyPanelEditorBusy()) {
+      --m_refitPanels;
+      for (int f = 0; f < kFaceCount; ++f)
+        if (m_editors[f] && m_panes[f]->isVisible()) {
+          // After New object the canvas grew; the view's scrollable area is
+          // stale until its next layout and would clamp the fit's scroll.
+          // Only here (a focus switch), never on every fit: that disturbed
+          // the panels during studio start-up and strokes.
+          if (ui::View* v = ui::View::getView(m_editors[f]))
+            v->updateView();
+          m_editors[f]->fitClipSpriteBounds();
+        }
+    }
     syncDepthToolFromApp();
+    runPendingAlign();
+    refreshObjectSizeFields();
     // Wheel-zoom guarantee: a panel editor whose idle state has
     // fallen back to plain StandbyState (for any reason — a state
     // pop, a tool change, an editor recreated by a caller) would
@@ -6774,7 +9313,7 @@ private:
         // matches the exact sheet size, nothing happens here,
         // so a face resize via the dimension controls is not
         // double-applied.
-        const gfx::Size exact = sharedSheetSize(spr);
+        const gfx::Size exact = atlasSize(spr);
         // Never rebuild the sheets (and so never shrink the
         // canvas) while a panel splitter is being dragged:
         // a UI layout drag must not mutate the document.
@@ -6792,14 +9331,17 @@ private:
             (spr->width() != exact.w || spr->height() != exact.h)) {
           int oldW[kFaceCount], oldH[kFaceCount];
           sharedFaceSizes(spr, oldW, oldH);
-          const double sx = (exact.w > 0 && spr->width() != exact.w)
+          // With several objects a hand canvas resize has no single
+          // meaning (whose cells would it scale?): the atlas is restored.
+          const bool restore = hasObjectGroups(spr);
+          const double sx = (!restore && exact.w > 0 && spr->width() != exact.w)
                               ? double(spr->width()) / double(exact.w) : 1.0;
-          const double sy = (exact.h > 0 && spr->height() != exact.h)
+          const double sy = (!restore && exact.h > 0 && spr->height() != exact.h)
                               ? double(spr->height()) / double(exact.h) : 1.0;
           int newW[kFaceCount], newH[kFaceCount];
           for (int f = 0; f < kFaceCount; ++f) {
-            newW[f] = std::clamp(int(std::round(oldW[f] * sx)), 4, 256);
-            newH[f] = std::clamp(int(std::round(oldH[f] * sy)), 4, 256);
+            newW[f] = std::clamp(int(std::round(oldW[f] * sx)), 1, 256);
+            newH[f] = std::clamp(int(std::round(oldH[f] * sy)), 1, 256);
           }
           rebuildSharedSheets(doc, newW, newH);
           initLayersAndFraming();
@@ -6953,6 +9495,7 @@ private:
     const int renderStyle = std::max(0, m_renderTypeCombo->getSelectedItemIndex());
     const bool addOutline = m_strokeCheck->isSelected();
     const bool allowCutouts = m_cutoutCheck->isSelected();
+    const bool tintCutouts = Preferences::instance().easymetric.showCutouts();
     const bool showDiff = m_mapDiffuseCheck->isSelected();
     const bool showNorm = m_mapNormalCheck->isSelected();
     const bool showDept = m_mapDepthCheck->isSelected();
@@ -6970,27 +9513,63 @@ private:
     mix(uint64_t(renderStyle));
     mix(uint64_t(addOutline ? 1 : 0));
     mix(uint64_t(allowCutouts ? 1 : 0));
+    mix(uint64_t(tintCutouts ? 1 : 0));
     mix(uint64_t(showDiff ? 1 : 0));
     mix(uint64_t(showNorm ? 1 : 0));
     mix(uint64_t(showDept ? 1 : 0));
 
-    for (int f = 0; f < kFaceCount; ++f) {
-      mix(uint64_t(data.w[f]));
-      mix(uint64_t(data.h[f]));
-      const uint32_t* p = data.pixels[f].data();
-      const size_t n = data.pixels[f].size();
-      for (size_t i = 0; i < n; ++i)
-        mix(p[i]);
-      if (data.hasCustomDepthLayer) {
-        const uint8_t* dp = data.depthPixels[f].data();
+    auto mixData = [&mix](const SixSurfaceData& d) {
+      for (int f = 0; f < kFaceCount; ++f) {
+        mix(uint64_t(d.w[f]));
+        mix(uint64_t(d.h[f]));
+        const uint32_t* p = d.pixels[f].data();
+        const size_t n = d.pixels[f].size();
         for (size_t i = 0; i < n; ++i)
-          mix(dp[i]);
+          mix(p[i]);
+        if (d.hasCustomDepthLayer) {
+          const uint8_t* dp = d.depthPixels[f].data();
+          for (size_t i = 0; i < n; ++i)
+            mix(dp[i]);
+        }
+        if (d.hasBaseLayer[f]) {
+          const uint8_t* ba = d.baseAlpha[f].data();
+          for (size_t i = 0; i < n; ++i)
+            mix(uint64_t(ba[i]));
+        }
       }
-      if (data.hasBaseLayer[f]) {
-        const uint8_t* ba = data.baseAlpha[f].data();
-        for (size_t i = 0; i < n; ++i)
-          mix(uint64_t(ba[i]));
+    };
+    mixData(data);
+
+    // Objects (Stage 3): with object groups the preview shows every
+    // visible object, each placed at its offset; any object's pixels,
+    // place, rank or visibility re-render it.
+    const bool composite = doc && doc->sprite() && hasObjectGroups(doc->sprite());
+    CompositeInput comp;
+    if (composite) {
+      const bool useDepth = (m_useFaceDepthCheck && m_useFaceDepthCheck->isSelected());
+      buildCompositeInput(
+        doc, frame, useDepth, m_docView, m_focusKey,
+        [this](const std::string& k) -> const std::array<bool, 3>* {
+          if (k == m_focusKey)
+            return &m_colLinked;
+          auto it = m_linkedByObject.find(k);
+          return it != m_linkedByObject.end() ? &it->second : nullptr;
+        },
+        comp);
+      mix(uint64_t(comp.objects.size()));
+      for (size_t i = 0; i < comp.objects.size(); ++i) {
+        const PreviewObject& p = comp.objects[i];
+        mix(uint64_t(std::hash<std::string>()(comp.keys[i])));
+        for (float c : { p.cx, p.cy, p.cz }) {
+          uint32_t bits = 0;
+          std::memcpy(&bits, &c, sizeof(bits));
+          mix(bits);
+        }
+        mix(uint64_t(p.priority));
+        if (comp.keys[i] != m_focusKey)
+          mixData(*p.data);
       }
+      mix(uint64_t(m_showOthers ? 1 : 0));
     }
 
     // Effective grids (committed, or the live draft while a
@@ -7035,7 +9614,20 @@ private:
 
     render3DModel(data, yawDeg, pitchDeg, pivX, pivY, pivZ,
                   renderStyle, addOutline, allowCutouts,
-                  showDiff, showNorm, showDept, &effGrids);
+                  showDiff, showNorm, showDept, &effGrids, tintCutouts,
+                  composite ? &comp.objects : nullptr);
+    if (composite) {
+      m_lastObjHitKeys = comp.keys;
+      rebuildOverlay(data, comp);
+      invalidateAllPanels();
+    }
+    else {
+      m_lastObjHitKeys.clear();
+      m_lastObjHitPx.clear();
+      m_lastOverlayPx = 0;
+      for (int f = 0; f < kFaceCount; ++f)
+        m_overlay[f].clear();
+    }
     m_lastRenderMs = double(base::current_tick());
     m_lastRenderDurMs = m_lastRenderMs - nowMs;
 
@@ -7068,7 +9660,31 @@ public:
   void recomputeGhost()
   {
     Doc* doc = m_docView ? m_docView->document() : nullptr;
-    m_ghost = computeGhost(doc, m_editors[0] ? m_editors[0]->frame() : doc::frame_t(0));
+    doc::frame_t frames[kFaceCount];
+    std::vector<int> edgesU[kFaceCount], edgesV[kFaceCount];
+    for (int f = 0; f < kFaceCount; ++f) {
+      frames[f] = m_editors[f] ? m_editors[f]->frame() : doc::frame_t(0);
+      // Cell mode: when this face's panel grid is on, hints work per grid cell.
+      const PanelGridSettings gs = gridForFace(f);
+      const gfx::Rect rc = gridFaceRect(f);
+      std::vector<float> lines;
+      if (gs.on && !rc.isEmpty()) {
+        if (gridLinePositions(rc.w, gs.countV, gs.spacingV, lines) && gs.countV > 1) {
+          edgesU[f].push_back(0);
+          for (float l : lines)
+            edgesU[f].push_back(int(std::lround(l)));
+          edgesU[f].push_back(rc.w);
+        }
+        if (gridLinePositions(rc.h, gs.countH, gs.spacingH, lines) && gs.countH > 1) {
+          edgesV[f].push_back(0);
+          for (float l : lines)
+            edgesV[f].push_back(int(std::lround(l)));
+          edgesV[f].push_back(rc.h);
+        }
+      }
+    }
+    const bool linked[3] = { m_colLinked[0], m_colLinked[1], m_colLinked[2] };
+    m_ghost = computeGhost(doc, frames, linked, edgesU, edgesV);
   }
 
   void invalidateAllPanels()
@@ -7081,6 +9697,560 @@ public:
   // Draws this panel's missing-content bands (called from the grid decorator's
   // post-render). One low-opacity band per demanding surface, in that
   // surface's colour, so it is clear WHICH surface asks for the content.
+  // ---- Objects (2026-11-17) ----
+
+  const std::string& focusedObjectKey() const { return m_focusKey; }
+
+  // Re-asserts the studio's focused object as the helpers' scope (a headless
+  // command may have changed it). A focused object that no longer exists
+  // (undo of New Object, deleted from the studio, the timeline or a script)
+  // falls back to the object before it in the list (Arin, 2026-11-18), and
+  // to Object 1 when it was the first.
+  void applyFocusScope()
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+    if (!spr)
+      return;
+    if (!m_focusKey.empty() && !findObjectGroup(spr, m_focusKey))
+      switchFocus(previousObjectKey(spr, m_focusKey));
+    g_objectScopeSprite = spr->id();
+    g_objectScopeKey = m_focusKey;
+  }
+
+  // Stops playback in every panel (Arin, 2026-11-18: "the animation isn't
+  // stopping"). Called before the studio rearranges its panels (object
+  // switch, new/delete object, model resize). A playback left running in
+  // a panel that is no longer the active one cannot be stopped with Enter:
+  // Play/Stop acts on the active panel and would start a second playback.
+  void stopAllPlayback()
+  {
+    for (Editor* ed : m_editors)
+      if (ed && ed->isPlaying())
+        ed->stop();
+    if (Editor* ed = m_docView ? m_docView->editor() : nullptr)
+      if (ed->isPlaying())
+        ed->stop();
+  }
+
+  // Poll: a panel still playing while ANOTHER panel is the active one is
+  // an orphan playback (see stopAllPlayback); stop it so Enter on the
+  // active panel is a plain Play/Stop again.
+  void stopOrphanPlayback()
+  {
+    Editor* active = m_docView ? m_docView->editor() : nullptr;
+    for (Editor* ed : m_editors)
+      if (ed && ed != active && ed->isPlaying())
+        ed->stop();
+  }
+
+  // The nearest object before `key` in the last object list the studio
+  // showed (= creation order) that still exists; "" = Object 1.
+  std::string previousObjectKey(doc::Sprite* spr, const std::string& key) const
+  {
+    auto it = std::find(m_objectComboKeys.begin(), m_objectComboKeys.end(), key);
+    while (it != m_objectComboKeys.begin()) {
+      --it;
+      if (it->empty() || findObjectGroup(spr, *it))
+        return *it;
+    }
+    return std::string();
+  }
+
+  void deleteFocusedObject()
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+    if (!spr || m_focusKey.empty() || !findObjectGroup(spr, m_focusKey))
+      return;
+    if (anyPanelEditorBusy())
+      return;
+    stopAllPlayback();
+    const std::string key = m_focusKey;
+    std::string name = key;
+    for (const ObjectInfo& i : resolveObjects(spr))
+      if (i.key == key)
+        name = i.name;
+    const std::string prev = previousObjectKey(spr, key);
+    std::string prevName = "Object 1";
+    for (const ObjectInfo& i : resolveObjects(spr))
+      if (i.key == prev)
+        prevName = i.name;
+    if (ui::Alert::show(fmt::format(
+          "Delete object<<Delete \"{}\" and everything drawn in it (all frames)?"
+          "<<You will be on \"{}\" afterwards. Undo (Ctrl+Z) brings it back."
+          "||&Delete||&Cancel",
+          name, prevName)) != 1)
+      return;
+    // Leave the object first, so no panel still points at its sheets.
+    switchFocus(prev);
+    if (!deleteObjectOnDoc(doc, key)) {
+      easymetricReportError("deleteObject", "could not delete " + name);
+      return;
+    }
+    switchFocus(prev);
+    initLayersAndFraming();
+    m_refitPanels = 2;
+    m_lastHash = 0;
+    pollAndRender(true);
+    if (auto* sb = StatusBar::instance())
+      sb->showTip(2500, fmt::format("Deleted \"{}\"; now on \"{}\" (undo to restore)", name,
+                                    prevName));
+  }
+
+  void focusObject(const std::string& key)
+  {
+    switchFocus(key);
+    m_lastHash = 0;
+    pollAndRender(true);
+  }
+
+  // Picking another object's sheet in the timeline focuses that object.
+  void followTimelineObject()
+  {
+    Editor* ed = m_docView ? m_docView->editor() : nullptr;
+    doc::Layer* al = ed ? ed->layer() : nullptr;
+    if (!al || al->name().rfind("Surface_", 0) != 0 || anyPanelEditorBusy())
+      return;
+    std::string key;
+    for (doc::Layer* p = al->parent(); p; p = p->parent()) {
+      ObjectMeta m;
+      if (readObjectMeta(p, m)) {
+        key = m.key;
+        break;
+      }
+    }
+    if (key != m_focusKey)
+      switchFocus(key);
+  }
+
+  void switchFocus(const std::string& key)
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+    if (!spr)
+      return;
+    stopAllPlayback();
+    // The sheet the user works on (Base / Texture / Depth) carries over.
+    int kind = 0;
+    {
+      EasymetricObjectScope old(spr, m_focusKey);
+      const SharedSurfaceLayers cur = findSharedLayers(spr);
+      doc::Layer* a = m_docView->editor() ? m_docView->editor()->layer() : nullptr;
+      if (a && a == cur.textureLayer)
+        kind = 1;
+      else if (a && a == cur.depthLayer)
+        kind = 2;
+      else if (a && a->name() == "Surface_Texture")
+        kind = 1; // picked in the timeline: same kind in the new object
+      else if (a && a->name() == "Surface_DEPTH")
+        kind = 2;
+    }
+    m_linkedByObject[m_focusKey] = m_colLinked;
+    m_focusKey = (key.empty() || findObjectGroup(spr, key)) ? key : std::string();
+    g_objectScopeSprite = spr->id();
+    g_objectScopeKey = m_focusKey;
+    auto it = m_linkedByObject.find(m_focusKey);
+    const std::array<bool, 3> linked =
+      it != m_linkedByObject.end() ? it->second : std::array<bool, 3>{ false, false, false };
+
+    const SharedSurfaceLayers nw = findSharedLayers(spr);
+    doc::LayerImage* lyr = kind == 1 ? nw.textureLayer : kind == 2 ? nw.depthLayer : nw.baseLayer;
+    if (!lyr)
+      lyr = nw.baseLayer ? nw.baseLayer : nw.textureLayer;
+    for (int f = 0; f < kFaceCount; ++f)
+      if (m_editors[f] && lyr)
+        m_editors[f]->setLayer(lyr);
+    // Fresh per-object bookkeeping: the new object's sizes are not a
+    // "change" of the old one's (that would resize the new object).
+    m_lastActiveFace = -1;
+    for (int f = 0; f < kFaceCount; ++f) {
+      m_lastFaceW[f] = 0;
+      m_lastFaceH[f] = 0;
+    }
+    for (int a = 0; a < 3; ++a)
+      m_lastObjSize[a] = -1;
+    m_pendingAlignFace = -1;
+    applyColumnLinks(linked);
+    initLayersAndFraming();
+    // The canvas may have just grown (New object): the editors learn the
+    // new sprite size later, so fit the panels again on the next idle poll.
+    m_refitPanels = 2;
+    m_objectListSig.clear(); // refresh the Fields object row
+    for (int f = 0; f < kFaceCount; ++f)
+      m_overlay[f].clear();
+    std::string name = "Object 1";
+    if (doc::LayerGroup* g = findObjectGroup(spr, m_focusKey))
+      name = objectDisplayName(g);
+    if (auto* sb = StatusBar::instance())
+      sb->showTip(1500, "Editing " + name);
+  }
+
+  // Linked columns without touching the document (unlike toggleColumnLink,
+  // which copies the top face into the bottom one when linking).
+  void applyColumnLinks(const std::array<bool, 3>& linked)
+  {
+    for (int c = 0; c < 3; ++c) {
+      m_colLinked[c] = linked[c];
+      if (m_linkButtons[c])
+        m_linkButtons[c]->setLinked(linked[c]);
+      const int top = c * 2, btm = c * 2 + 1;
+      if (!m_headers[top] || !m_headers[btm])
+        continue;
+      if (linked[c]) {
+        static const char* titles[3] = { "Top / Bottom", "Front / Back", "Right / Left" };
+        m_headers[top]->setTitle(titles[c]);
+      }
+      else {
+        m_headers[top]->setTitle(kFaceSpecs[top].displayName);
+        m_headers[btm]->setTitle(kFaceSpecs[btm].displayName);
+      }
+    }
+    layout();
+    for (int f = 0; f < kFaceCount; ++f)
+      if (m_editors[f] && m_panes[f]->isVisible())
+        m_editors[f]->fitClipSpriteBounds();
+    invalidate();
+  }
+
+  // Fields object row: the list, the focused object's place and rank.
+  void refreshObjectUi()
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+    if (!spr || !m_objectCombo)
+      return;
+    const std::vector<ObjectInfo> infos = resolveObjects(spr);
+    std::string sig = m_focusKey + "|";
+    for (const ObjectInfo& i : infos)
+      sig += fmt::format("{}:{}:{},{},{}:{}:{};", i.key, i.name, i.meta.o[0], i.meta.o[1],
+                         i.meta.o[2], i.meta.rank, i.visible ? 1 : 0);
+    if (sig == m_objectListSig)
+      return;
+    m_objectListSig = sig;
+    m_updatingObjectUi = true;
+    m_objectCombo->deleteAllItems();
+    m_objectComboKeys.clear();
+    for (const ObjectInfo& i : infos) {
+      m_objectCombo->addItem(i.visible ? i.name : i.name + " (hidden)");
+      m_objectComboKeys.push_back(i.key);
+      if (i.key == m_focusKey) {
+        m_objectCombo->setSelectedItemIndex(int(m_objectComboKeys.size()) - 1);
+        if (m_objRankCombo)
+          m_objRankCombo->setSelectedItemIndex(std::clamp(i.meta.rank + 1, 0, 10));
+      }
+    }
+    m_updatingObjectUi = false;
+    if (m_deleteObjBtn) // Object 1 cannot be deleted
+      m_deleteObjBtn->setEnabled(!m_focusKey.empty());
+  }
+
+  // Faded other objects (Arin: "faded in panels, normal in preview"). For
+  // each pixel of a focused face that is empty, the same view of every other
+  // visible object is sampled at the same MODEL position (offsets + the
+  // ghostAxesOfFace table), frontmost priority first. Display only.
+  void rebuildOverlay(const SixSurfaceData& focused, const CompositeInput& comp)
+  {
+    m_lastOverlayPx = 0;
+    for (int f = 0; f < kFaceCount; ++f) {
+      m_overlay[f].clear();
+      m_overlaySize[f] = gfx::Size(0, 0);
+    }
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+    if (!spr || !m_showOthers || comp.objects.size() == 0)
+      return;
+    const std::vector<ObjectInfo> infos = resolveObjects(spr);
+    const ObjectInfo* fInfo = nullptr;
+    for (const ObjectInfo& i : infos)
+      if (i.key == m_focusKey)
+        fInfo = &i;
+    if (!fInfo || infos.empty())
+      return;
+    const int rootH = infos[0].box[1];
+    // Model frame: X from the root's left, Y DOWN from the root's top, Z
+    // from the root's back (the ghost-axes fractions are Y-down too).
+    auto origin = [rootH](const ObjectInfo& o, float org[3]) {
+      org[0] = float(o.meta.o[0]);
+      org[1] = float(rootH - o.meta.o[1] - o.box[1]);
+      org[2] = float(o.meta.o[2]);
+    };
+    struct Other {
+      const SixSurfaceData* data;
+      float org[3];
+      int box[3];
+      int priority;
+    };
+    std::vector<Other> others;
+    for (size_t k = 0; k < comp.keys.size(); ++k) {
+      if (comp.keys[k] == m_focusKey)
+        continue;
+      for (const ObjectInfo& i : infos)
+        if (i.key == comp.keys[k]) {
+          Other o;
+          o.data = comp.objects[k].data;
+          origin(i, o.org);
+          for (int a = 0; a < 3; ++a)
+            o.box[a] = std::max(1, i.box[a]);
+          o.priority = i.priority;
+          others.push_back(o);
+        }
+    }
+    if (others.empty())
+      return;
+    std::sort(others.begin(), others.end(),
+              [](const Other& a, const Other& b) { return a.priority > b.priority; });
+    float forg[3];
+    origin(*fInfo, forg);
+    for (int f = 0; f < kFaceCount; ++f) {
+      const int fw = focused.w[f], fh = focused.h[f];
+      if (fw <= 0 || fh <= 0 || int(focused.pixels[f].size()) < fw * fh)
+        continue;
+      GhostAxis ax[2];
+      ghostAxesOfFace(f, ax);
+      std::vector<uint32_t> out(size_t(fw) * fh, 0);
+      bool any = false;
+      for (int v = 0; v < fh; ++v) {
+        for (int u = 0; u < fw; ++u) {
+          if (doc::rgba_geta(focused.pixels[f][size_t(v) * fw + u]) > 16)
+            continue;
+          float m[3] = { 0, 0, 0 };
+          for (const GhostAxis& a : ax) {
+            float c = a.coord == 0 ? (u + 0.5f) / fw : (v + 0.5f) / fh;
+            if (a.flip)
+              c = 1.0f - c;
+            m[a.axis] = forg[a.axis] + c * std::max(1, fInfo->box[a.axis]);
+          }
+          for (const Other& o : others) {
+            const int ow = o.data->w[f], oh = o.data->h[f];
+            int pu = -1, pv = -1;
+            bool inside = true;
+            for (const GhostAxis& a : ax) {
+              float c = (m[a.axis] - o.org[a.axis]) / float(o.box[a.axis]);
+              if (c < 0.0f || c >= 1.0f) {
+                inside = false;
+                break;
+              }
+              if (a.flip)
+                c = 1.0f - c;
+              if (a.coord == 0)
+                pu = std::clamp(int(c * ow), 0, ow - 1);
+              else
+                pv = std::clamp(int(c * oh), 0, oh - 1);
+            }
+            if (!inside || pu < 0 || pv < 0)
+              continue;
+            const uint32_t col = o.data->sampleSymmetric(f, pu, pv);
+            if (doc::rgba_geta(col) > 16) {
+              out[size_t(v) * fw + u] = col;
+              any = true;
+              ++m_lastOverlayPx;
+              break;
+            }
+          }
+        }
+      }
+      if (any) {
+        m_overlay[f] = std::move(out);
+        m_overlaySize[f] = gfx::Size(fw, fh);
+      }
+    }
+  }
+
+  void drawOtherObjects(EditorPostRender* render, int face) const
+  {
+    if (!m_showOthers || face < 0 || face >= kFaceCount || m_overlay[face].empty())
+      return;
+    const gfx::Rect rc = gridFaceRect(face);
+    const int fw = m_overlaySize[face].w, fh = m_overlaySize[face].h;
+    if (rc.isEmpty() || rc.w != fw || rc.h != fh)
+      return; // stale (the face was resized); rebuilt with the next preview
+    const auto& px = m_overlay[face];
+    for (int v = 0; v < fh; ++v) {
+      for (int u = 0; u < fw;) {
+        const uint32_t c = px[size_t(v) * fw + u];
+        if (!c) {
+          ++u;
+          continue;
+        }
+        int e = u + 1;
+        while (e < fw && px[size_t(v) * fw + e] == c)
+          ++e;
+        render->fillRect(gfx::rgba(doc::rgba_getr(c), doc::rgba_getg(c), doc::rgba_getb(c), 90),
+                         gfx::Rect(rc.x + u, rc.y + v, e - u, 1));
+        u = e;
+      }
+    }
+  }
+
+  // Guided "New object" (Arin, 2026-11-17: block creation was not guided
+  // enough). Name, size as seen from the Front, where it goes relative to
+  // the focused object, and a live description of what will be made.
+  // New object (shared model size, 2026-11-18): the object gets the model
+  // size, like every object; the dialog only asks for a name and an
+  // optional starting block placed next to what the focused object has
+  // painted. The block goes on the current frame only (Arin).
+  void openNewObjectDialog()
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    doc::Sprite* spr = doc ? doc->sprite() : nullptr;
+    if (!spr)
+      return;
+    stopAllPlayback();
+    const std::vector<ObjectInfo> infos = resolveObjects(spr);
+    if (infos.empty())
+      return;
+    std::string refName = infos[0].name;
+    for (const ObjectInfo& i : infos)
+      if (i.key == m_focusKey)
+        refName = i.name;
+    const std::string refKey = m_focusKey;
+    const doc::frame_t frame = m_editors[0] ? m_editors[0]->frame() : doc::frame_t(0);
+    int S[3];
+    modelBox(spr, S);
+
+    const int s = ui::guiscale();
+    ui::Window win(ui::Window::WithTitleBar, "New object");
+    auto* box = new ui::VBox;
+    box->setBorder(gfx::Border(4 * s));
+    box->setChildSpacing(3 * s);
+    win.addChild(box);
+
+    auto* nameRow = new ui::HBox;
+    nameRow->setChildSpacing(4 * s);
+    auto* nameE = new ui::Entry(32, "");
+    nameE->setText(fmt::format("Object {}", infos.size() + 1));
+    nameE->setExpansive(true);
+    nameRow->addChild(new ui::Label("Name"));
+    nameRow->addChild(nameE);
+    box->addChild(nameRow);
+
+    box->addChild(new ui::Label(fmt::format(
+      "Uses the model size {} x {} x {}, like every object.", S[0], S[1], S[2])));
+    box->addChild(new ui::Label("Draw it where it belongs; the other objects show faded."));
+
+    auto* fillCheck = new ui::CheckBox("Start with a block (flat depth)");
+    fillCheck->setSelected(false);
+    box->addChild(fillCheck);
+
+    auto* blockBox = new ui::VBox;
+    blockBox->setChildSpacing(3 * s);
+    auto* sizeRow = new ui::HBox;
+    sizeRow->setChildSpacing(4 * s);
+    NumberField* sizeF[3];
+    const char* sizeNames[3] = { "Block W", "H", "D" };
+    for (int a = 0; a < 3; ++a) {
+      sizeF[a] = new NumberField(1, 256, std::max(1, S[a] / 4));
+      sizeRow->addChild(new ui::Label(sizeNames[a]));
+      sizeRow->addChild(sizeF[a]);
+    }
+    blockBox->addChild(sizeRow);
+    blockBox->addChild(new ui::Label("W = left-right, H = up-down, D = front-back."));
+
+    auto* placeRow = new ui::HBox;
+    placeRow->setChildSpacing(4 * s);
+    auto* placeCombo = new ui::ComboBox;
+    static const char* kPlaceKeys[] = { "above", "below", "right", "left", "front", "back", "center" };
+    static const char* kPlaceText[] = { "On top of", "Below",   "Right of", "Left of",
+                                        "In front of", "Behind", "Inside (centred in)" };
+    for (const char* t : kPlaceText)
+      placeCombo->addItem(fmt::format("{} {}", t, refName));
+    placeCombo->setSelectedItemIndex(int(std::size(kPlaceKeys)) - 1);
+    placeCombo->setExpansive(true);
+    placeRow->addChild(new ui::Label("Place"));
+    placeRow->addChild(placeCombo);
+    blockBox->addChild(placeRow);
+    auto* sketch = new ui::Label("");
+    blockBox->addChild(sketch);
+    auto* sketch2 = new ui::Label("");
+    blockBox->addChild(sketch2);
+    box->addChild(blockBox);
+    blockBox->setVisible(false);
+
+    auto* btnRow = new ui::HBox;
+    btnRow->setChildSpacing(4 * s);
+    auto* okBtn = new ui::Button("Create");
+    auto* cancelBtn = new ui::Button("Cancel");
+    btnRow->addChild(okBtn);
+    btnRow->addChild(cancelBtn);
+    box->addChild(btnRow);
+
+    int blk[3] = { 1, 1, 1 }, org[3] = { 0, 0, 0 };
+    bool fits = true;
+    auto compute = [&] {
+      for (int a = 0; a < 3; ++a)
+        blk[a] = std::clamp(sizeF[a]->getValue(), 1, 256);
+      const int idx = std::clamp(placeCombo->getSelectedItemIndex(), 0,
+                                 int(std::size(kPlaceKeys)) - 1);
+      fits = placeBlock(spr, refKey, frame, blk, kPlaceKeys[idx], org);
+    };
+    auto updateSketch = [&] {
+      compute();
+      sketch->setText(fmt::format("Block {} x {} x {} at X {}..{}, Y {}..{} (from the top), "
+                                  "Z {}..{} (from the back), frame {}",
+                                  blk[0], blk[1], blk[2], org[0], org[0] + blk[0], org[1],
+                                  org[1] + blk[1], org[2], org[2] + blk[2], frame + 1));
+      sketch2->setText(fits ? std::string()
+                            : std::string("No room there: moved/cut to fit. Make the model "
+                                          "bigger (Fields > Model size) for more room."));
+      win.layout();
+    };
+    for (int a = 0; a < 3; ++a)
+      sizeF[a]->Change.connect([&] { updateSketch(); });
+    placeCombo->Change.connect([&] { updateSketch(); });
+    fillCheck->Click.connect([&] {
+      blockBox->setVisible(fillCheck->isSelected());
+      updateSketch();
+      win.remapWindow();
+      win.centerWindow();
+      win.invalidate();
+    });
+    updateSketch();
+
+    bool ok = false;
+    auto accept = [&] {
+      ok = true;
+      win.closeWindow(okBtn);
+    };
+    okBtn->Click.connect(accept);
+    for (NumberField* nf : sizeF)
+      nf->Enter.connect(accept);
+    cancelBtn->Click.connect([&] { win.closeWindow(cancelBtn); });
+    win.remapWindow();
+    win.centerWindow();
+    win.openWindowInForeground();
+    if (!ok)
+      return;
+
+    compute();
+    NewObjectSpec spec;
+    spec.name = nameE->text().empty() ? std::string("Object") : nameE->text();
+    spec.fillBlock = fillCheck->isSelected();
+    for (int a = 0; a < 3; ++a) {
+      spec.block[a] = blk[a];
+      spec.blockOrg[a] = org[a];
+    }
+    spec.frame = frame;
+    const doc::color_t col =
+      color_utils::color_for_image(Preferences::instance().colorBar.fgColor(), doc::IMAGE_RGB);
+    spec.color = doc::rgba(doc::rgba_getr(col), doc::rgba_getg(col), doc::rgba_getb(col), 255);
+    std::string err;
+    const std::string key = newObjectOnDoc(doc, spec, err);
+    if (key.empty()) {
+      easymetricReportError("newObject", err);
+      return;
+    }
+    focusObject(key);
+    // The block goes on the current frame only (Arin's choice): say so in a
+    // multi-frame file, where the object is empty (and so blinks during
+    // playback) on the other frames.
+    if (spec.fillBlock && spr->totalFrames() > 1)
+      if (auto* sb = StatusBar::instance())
+        sb->showTip(5000, fmt::format("\"{}\" has its block on frame {} only; its other {} "
+                                      "frames are empty until you draw on them",
+                                      spec.name, frame + 1, spr->totalFrames() - 1));
+  }
+
   void drawGhostBands(EditorPostRender* render, int dst) const
   {
     if (!m_ghostOn || !m_ghost.any || dst < 0 || dst >= kFaceCount)
@@ -7260,6 +10430,83 @@ public:
     if (!m_gridConfirmed)
       revertGridDraft();
     m_gridPopupFace = -1;
+  }
+
+  // "Start from a block": width / height / depth of the block, and the size
+  // of the cells it sits in (default: the current object size, grown if the
+  // block does not fit). Replaces the content of all six views.
+  void openBlockDialog()
+  {
+    Doc* doc = m_docView ? m_docView->document() : nullptr;
+    if (!doc || !doc->sprite())
+      return;
+    const int s = ui::guiscale();
+    int fw[kFaceCount], fh[kFaceCount];
+    sharedFaceSizes(doc->sprite(), fw, fh);
+    const int curCell[3] = { fw[kFaceFront], fh[kFaceFront], fw[kFaceRight] };
+    ui::Window win(ui::Window::WithTitleBar, "Start from a block");
+    auto* box = new ui::VBox;
+    box->setBorder(gfx::Border(4 * s));
+    box->setChildSpacing(3 * s);
+    win.addChild(box);
+    auto* note = new ui::Label("Replaces everything on all six views of this object with one block.");
+    box->addChild(note);
+    NumberField* blockE[3];
+    NumberField* cellE[3];
+    const char* names[3] = { "Width (X)", "Height (Y)", "Depth (Z)" };
+    for (int a = 0; a < 3; ++a) {
+      auto* row = new ui::HBox;
+      row->setChildSpacing(4 * s);
+      blockE[a] = new NumberField(1, 256, std::max(1, curCell[a] / 3));
+      cellE[a] = new NumberField(1, 256, curCell[a]);
+      row->addChild(new ui::Label(names[a]));
+      row->addChild(new ui::Label("block"));
+      row->addChild(blockE[a]);
+      row->addChild(new ui::Label("cell"));
+      row->addChild(cellE[a]);
+      box->addChild(row);
+    }
+    box->addChild(new ui::Label("The block is centred in each cell, rounded once in model space."));
+    auto* btnRow = new ui::HBox;
+    btnRow->setChildSpacing(4 * s);
+    auto* okBtn = new ui::Button("Create");
+    auto* cancelBtn = new ui::Button("Cancel");
+    btnRow->addChild(okBtn);
+    btnRow->addChild(cancelBtn);
+    box->addChild(btnRow);
+    bool ok = false;
+    okBtn->Click.connect([&] {
+      ok = true;
+      win.closeWindow(okBtn);
+    });
+    cancelBtn->Click.connect([&] { win.closeWindow(cancelBtn); });
+    win.remapWindow();
+    win.centerWindow();
+    win.openWindowInForeground();
+    if (!ok)
+      return;
+    auto val = [](NumberField* e, int d) {
+      const std::string t = e->text();
+      return t.empty() ? d : std::clamp(std::atoi(t.c_str()), 1, 256);
+    };
+    const BlockLayout b = planBlockLayout(val(blockE[0], 8), val(blockE[1], 8), val(blockE[2], 8),
+                                          val(cellE[0], curCell[0]), val(cellE[1], curCell[1]),
+                                          val(cellE[2], curCell[2]));
+    const doc::color_t col =
+      color_utils::color_for_image(Preferences::instance().colorBar.fgColor(), doc::IMAGE_RGB);
+    std::string err;
+    const doc::frame_t fr = m_editors[0] ? m_editors[0]->frame() : doc::frame_t(0);
+    if (!applyBlockLayout(doc, fr, b, doc::rgba(doc::rgba_getr(col), doc::rgba_getg(col),
+                                                doc::rgba_getb(col), 255), err)) {
+      easymetricReportError("startFromBlock", err);
+      return;
+    }
+    initLayersAndFraming();
+    m_lastHash = 0;
+    pollAndRender(true);
+    if (auto* sb = StatusBar::instance())
+      sb->showTip(3000, fmt::format("Block {}x{}x{} in cells {}x{}x{}", b.block[0], b.block[1],
+                                    b.block[2], b.cell[0], b.cell[1], b.cell[2]));
   }
 
   void buildGridPopup()
@@ -7510,10 +10757,17 @@ private:
                      bool showDiff,
                      bool showNorm,
                      bool showDept,
-                     const std::array<PanelGridSettings, kFaceCount>* grids = nullptr)
+                     const std::array<PanelGridSettings, kFaceCount>* grids = nullptr,
+                     bool tintCutouts = false,
+                     const std::vector<PreviewObject>* composite = nullptr)
   {
-    Render3DResult res = compute3DPreviewImages(data, yawDeg, pitchDeg, pivX, pivY, pivZ,
-                                                renderStyle, addOutline, allowCutouts, grids);
+    Render3DResult res =
+      composite ? compute3DPreviewMulti(*composite, yawDeg, pitchDeg, pivX, pivY, pivZ,
+                                        renderStyle, addOutline, allowCutouts, grids, tintCutouts)
+                : compute3DPreviewImages(data, yawDeg, pitchDeg, pivX, pivY, pivZ, renderStyle,
+                                         addOutline, allowCutouts, grids, tintCutouts);
+    m_lastCutoutPx = res.cutoutPx;
+    m_lastObjHitPx = res.objHitPx;
     m_lastDiffImg = res.diffImg;
     m_lastNormImg = res.normImg;
     m_lastDeptImg = res.deptImg;
@@ -7686,236 +10940,18 @@ private:
     }
 
     const std::string objPath = base::replace_extension(selected.front(), "obj");
-    const std::string mtlPath = base::replace_extension(objPath, "mtl");
-    const std::string texPath = base::replace_extension(objPath, "png");
-    const std::string mtlFileName = base::get_file_name(mtlPath);
-    const std::string texFileName = base::get_file_name(texPath);
-
     const doc::frame_t fr = (m_docView->editor() ? m_docView->editor()->frame() : doc::frame_t(0));
-    SixSurfaceData data;
-    extractSixSurfaces(doc, fr, data);
-
-    // Texture atlas
-    {
-      doc::FramesSequence seq;
-      seq.insert(fr);
-      std::unique_ptr<FileOp> fop(FileOp::createSaveDocumentOperation(
-        UIContext::instance(),
-        FileOpROI(doc, doc->sprite()->bounds(), "", "", seq, false),
-        texPath,
-        "",
-        false));
-      if (fop && !fop->hasError()) {
-        fop->operate();
-        fop->done();
-      }
-    }
-
-    // MTL file
-    {
-      std::ofstream mtl(mtlPath);
-      if (mtl.is_open()) {
-        mtl << "# Aseprite 2.0 Easymetric Material\n"
-            << "newmtl EasymetricMat\n"
-            << "Ka 1.000 1.000 1.000\n"
-            << "Kd 1.000 1.000 1.000\n"
-            << "Ks 0.000 0.000 0.000\n"
-            << "d 1.0\n"
-            << "illum 1\n"
-            << "map_Kd " << texFileName << "\n";
-      }
-    }
-
-    // OBJ file
-    {
-      std::ofstream obj(objPath);
-      if (!obj.is_open()) return;
-
-      const int pivX = m_pivXSlider ? m_pivXSlider->getValue() : 50;
-      const int pivY = m_pivYSlider ? m_pivYSlider->getValue() : 50;
-      const int pivZ = m_pivZSlider ? m_pivZSlider->getValue() : 50;
-      SculptedVoxelVolume vol = buildSculptedVolume(data, pivX, pivY, pivZ);
-
-      const float sprW = std::max(1.0f, float(doc->sprite()->width()));
-      const float sprH = std::max(1.0f, float(doc->sprite()->height()));
-      // Per-face rect in the exported texture atlas (the flattened
-      // sprite). Previously every face was given UVs over the whole
-      // 0..1 atlas, so each face showed the entire atlas at once and
-      // transparent regions of other faces read as holes. Each face
-      // must instead sample only its own rect.
-      gfx::Rect faceRect[kFaceCount];
-      for (int f = 0; f < kFaceCount; ++f)
-        faceRect[f] = sharedFaceRect(doc->sprite(), f);
-      const float halfX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown] }) * 0.5f;
-      const float halfY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight] }) * 0.5f;
-      const float halfZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown] }) * 0.5f;
-
-      // Depth sculpting (2026-11-07): when the volume grew past the Base
-      // box, the Base box sits centred in it (pad voxels per side).
-      // World and UV coords are measured from the Base box so it keeps
-      // its size and Plus bumps stick out beyond it in the exported
-      // mesh. Otherwise (pad 0) these are exactly the old formulas.
-      const int dimX = std::max({ data.w[kFaceFront], data.w[kFaceBack], data.w[kFaceTop], data.w[kFaceDown], 8 });
-      const int dimY = std::max({ data.h[kFaceFront], data.h[kFaceBack], data.h[kFaceLeft], data.h[kFaceRight], 8 });
-      const int dimZ = std::max({ data.w[kFaceLeft], data.w[kFaceRight], data.h[kFaceTop], data.h[kFaceDown], 8 });
-      const int padX = std::max(0, (vol.vx - dimX) / 2);
-      const int padY = std::max(0, (vol.vy - dimY) / 2);
-      const int padZ = std::max(0, (vol.vz - dimZ) / 2);
-      const int spanX = (padX > 0 ? dimX : vol.vx);
-      const int spanY = (padY > 0 ? dimY : vol.vy);
-      const int spanZ = (padZ > 0 ? dimZ : vol.vz);
-      const float cellSizeX = (2.0f * halfX) / float(spanX);
-      const float cellSizeY = (2.0f * halfY) / float(spanY);
-      const float cellSizeZ = (2.0f * halfZ) / float(spanZ);
-
-      obj << "# Aseprite 2.0 Easymetric Sculpted 3D Model\n"
-          << "mtllib " << mtlFileName << "\n"
-          << "usemtl EasymetricMat\n"
-          << "o EasymetricSculptedModel\n";
-
-      int vIdx = 1, vtIdx = 1, vnIdx = 1;
-
-      // uOld/vOld are the old 0..1 coordinates across the voxel
-      // volume (orientation preserved exactly); they are remapped
-      // into this face's rect in the atlas. vOld is bottom-up, so
-      // (1 - vOld) is the distance down from the top of the face.
-      auto emitQuad = [&](int face,
-                          float x0, float y0, float z0,
-                          float x1, float y1, float z1,
-                          float x2, float y2, float z2,
-                          float x3, float y3, float z3,
-                          float nx, float ny, float nz,
-                          float uOld0, float vOld0, float uOld1, float vOld1) {
-        const gfx::Rect& fr = faceRect[face];
-        const float u0 = (fr.x + uOld0 * float(data.w[face])) / sprW;
-        const float u1 = (fr.x + uOld1 * float(data.w[face])) / sprW;
-        const float v0 = 1.0f - (fr.y + (1.0f - vOld0) * float(data.h[face])) / sprH;
-        const float v1 = 1.0f - (fr.y + (1.0f - vOld1) * float(data.h[face])) / sprH;
-        obj << "v " << x0 << " " << y0 << " " << z0 << "\n"
-            << "v " << x1 << " " << y1 << " " << z1 << "\n"
-            << "v " << x2 << " " << y2 << " " << z2 << "\n"
-            << "v " << x3 << " " << y3 << " " << z3 << "\n";
-        obj << "vt " << u0 << " " << v0 << "\n"
-            << "vt " << u1 << " " << v0 << "\n"
-            << "vt " << u1 << " " << v1 << "\n"
-            << "vt " << u0 << " " << v1 << "\n";
-        obj << "vn " << nx << " " << ny << " " << nz << "\n";
-        obj << "f "
-            << (vIdx + 0) << "/" << (vtIdx + 0) << "/" << vnIdx << " "
-            << (vIdx + 1) << "/" << (vtIdx + 1) << "/" << vnIdx << " "
-            << (vIdx + 2) << "/" << (vtIdx + 2) << "/" << vnIdx << " "
-            << (vIdx + 3) << "/" << (vtIdx + 3) << "/" << vnIdx << "\n";
-        vIdx += 4;
-        vtIdx += 4;
-        vnIdx += 1;
-      };
-
-      for (int vy = 0; vy < vol.vy; ++vy) {
-        const float yMax = halfY - float(vy - padY) * cellSizeY;
-        const float yMin = halfY - float(vy + 1 - padY) * cellSizeY;
-
-        for (int vz = 0; vz < vol.vz; ++vz) {
-          const float zMin = -halfZ + float(vz - padZ) * cellSizeZ;
-          const float zMax = -halfZ + float(vz + 1 - padZ) * cellSizeZ;
-
-          for (int vx = 0; vx < vol.vx; ++vx) {
-            if (!vol.isSolid(vx, vy, vz)) continue;
-
-            const float xMin = -halfX + float(vx - padX) * cellSizeX;
-            const float xMax = -halfX + float(vx + 1 - padX) * cellSizeX;
-
-            // 1. Front face (+Z)
-            if (vz + 1 >= vol.vz || !vol.isSolid(vx, vy, vz + 1)) {
-              // UVs are clamped to [0,1]: a Plus bump sticks out past
-              // the Base box, and its side faces would otherwise get
-              // out-of-range UVs (texture repeat instead of the face
-              // edge). Un-sculpted values are already in range, so
-              // this is a no-op for them.
-              const float u0 = std::clamp(float(vx - padX) / float(spanX), 0.0f, 1.0f);
-              const float u1 = std::clamp(float(vx + 1 - padX) / float(spanX), 0.0f, 1.0f);
-              const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
-              const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
-              emitQuad(kFaceFront, xMin, yMin, zMax,
-                       xMax, yMin, zMax,
-                       xMax, yMax, zMax,
-                       xMin, yMax, zMax,
-                       0.0f, 0.0f, 1.0f,
-                       u0, v0, u1, v1);
-            }
-
-            // 2. Back face (-Z)
-            if (vz - 1 < 0 || !vol.isSolid(vx, vy, vz - 1)) {
-              const float u0 = std::clamp(float(spanX - 1 - (vx - padX)) / float(spanX), 0.0f, 1.0f);
-              const float u1 = std::clamp(float(spanX - (vx - padX)) / float(spanX), 0.0f, 1.0f);
-              const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
-              const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
-              emitQuad(kFaceBack, xMax, yMin, zMin,
-                       xMin, yMin, zMin,
-                       xMin, yMax, zMin,
-                       xMax, yMax, zMin,
-                       0.0f, 0.0f, -1.0f,
-                       u0, v0, u1, v1);
-            }
-
-            // 3. Top face (+Y)
-            if (vy - 1 < 0 || !vol.isSolid(vx, vy - 1, vz)) {
-              const float u0 = std::clamp(float(vx - padX) / float(spanX), 0.0f, 1.0f);
-              const float u1 = std::clamp(float(vx + 1 - padX) / float(spanX), 0.0f, 1.0f);
-              const float v0 = std::clamp(1.0f - float(vz + 1 - padZ) / float(spanZ), 0.0f, 1.0f);
-              const float v1 = std::clamp(1.0f - float(vz - padZ) / float(spanZ), 0.0f, 1.0f);
-              emitQuad(kFaceTop, xMin, yMax, zMax,
-                       xMax, yMax, zMax,
-                       xMax, yMax, zMin,
-                       xMin, yMax, zMin,
-                       0.0f, 1.0f, 0.0f,
-                       u0, v0, u1, v1);
-            }
-
-            // 4. Bottom face (-Y)
-            if (vy + 1 >= vol.vy || !vol.isSolid(vx, vy + 1, vz)) {
-              const float u0 = std::clamp(float(vx - padX) / float(spanX), 0.0f, 1.0f);
-              const float u1 = std::clamp(float(vx + 1 - padX) / float(spanX), 0.0f, 1.0f);
-              const float v0 = std::clamp(1.0f - float(spanZ - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
-              const float v1 = std::clamp(1.0f - float(spanZ - 1 - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
-              emitQuad(kFaceDown, xMin, yMin, zMin,
-                       xMax, yMin, zMin,
-                       xMax, yMin, zMax,
-                       xMin, yMin, zMax,
-                       0.0f, -1.0f, 0.0f,
-                       u0, v0, u1, v1);
-            }
-
-            // 5. Right face (+X)
-            if (vx + 1 >= vol.vx || !vol.isSolid(vx + 1, vy, vz)) {
-              const float u0 = std::clamp(float(spanZ - 1 - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
-              const float u1 = std::clamp(float(spanZ - (vz - padZ)) / float(spanZ), 0.0f, 1.0f);
-              const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
-              const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
-              emitQuad(kFaceRight, xMax, yMin, zMax,
-                       xMax, yMin, zMin,
-                       xMax, yMax, zMin,
-                       xMax, yMax, zMax,
-                       1.0f, 0.0f, 0.0f,
-                       u0, v0, u1, v1);
-            }
-
-            // 6. Left face (-X)
-            if (vx - 1 < 0 || !vol.isSolid(vx - 1, vy, vz)) {
-              const float u0 = std::clamp(float(vz - padZ) / float(spanZ), 0.0f, 1.0f);
-              const float u1 = std::clamp(float(vz + 1 - padZ) / float(spanZ), 0.0f, 1.0f);
-              const float v0 = std::clamp(1.0f - float(vy + 1 - padY) / float(spanY), 0.0f, 1.0f);
-              const float v1 = std::clamp(1.0f - float(vy - padY) / float(spanY), 0.0f, 1.0f);
-              emitQuad(kFaceLeft, xMin, yMin, zMin,
-                       xMin, yMin, zMax,
-                       xMin, yMax, zMax,
-                       xMin, yMax, zMin,
-                       -1.0f, 0.0f, 0.0f,
-                       u0, v0, u1, v1);
-            }
-          }
-        }
-      }
-    }
+    const bool useDepth = (m_useFaceDepthCheck && m_useFaceDepthCheck->isSelected());
+    exportEasymetricObj(UIContext::instance(), doc, fr, objPath,
+                        m_pivXSlider ? m_pivXSlider->getValue() : 50,
+                        m_pivYSlider ? m_pivYSlider->getValue() : 50,
+                        m_pivZSlider ? m_pivZSlider->getValue() : 50, useDepth,
+                        [this](const std::string& k) -> const std::array<bool, 3>* {
+                          if (k == m_focusKey)
+                            return &m_colLinked;
+                          auto it = m_linkedByObject.find(k);
+                          return it != m_linkedByObject.end() ? &it->second : nullptr;
+                        });
 
     if (auto* sb = StatusBar::instance())
       sb->showTip(2500, fmt::format("Exported 3D Wavefront OBJ to {}", objPath));
@@ -8078,6 +11114,38 @@ private:
   GhostData m_ghost;
   PaneActionButton* m_ghostHeaderBtn = nullptr;
   ui::CheckBox* m_ghostCheck = nullptr;
+  // Object W/H/D fields (Fields > Object row); kept in sync with the face sizes.
+  std::array<NumberField*, 3> m_objSizeFields = { nullptr, nullptr, nullptr };
+  int m_lastObjSize[3] = { -1, -1, -1 };
+  // Objects (2026-11-17): the focused object ("" = Object 1), linked
+  // columns per object, the Fields object row, the last composite preview.
+  std::string m_focusKey;
+  std::map<std::string, std::array<bool, 3>> m_linkedByObject;
+  ui::ComboBox* m_objectCombo = nullptr;
+  std::vector<std::string> m_objectComboKeys;
+  std::string m_objectListSig;
+  ui::ComboBox* m_objRankCombo = nullptr;
+  ui::Button* m_deleteObjBtn = nullptr;
+  ui::CheckBox* m_showOthersCheck = nullptr;
+  bool m_showOthers = true;
+  bool m_updatingObjectUi = false;
+  int m_refitPanels = 0;
+  std::vector<int> m_lastObjHitPx;
+  std::vector<std::string> m_lastObjHitKeys;
+  // Faded other objects in the panels: per face, colour per face pixel
+  // (0 = nothing), rebuilt with the preview.
+  std::array<std::vector<uint32_t>, kFaceCount> m_overlay;
+  std::array<gfx::Size, kFaceCount> m_overlaySize;
+  int m_lastOverlayPx = 0;
+  // Auto-align (see planFaceAlign).
+  ui::CheckBox* m_autoAlignCheck = nullptr;
+  ui::Slider* m_alignLimitSlider = nullptr;
+  ui::CheckBox* m_showCutoutsCheck = nullptr;
+  DocUndo* m_undoObserved = nullptr;
+  int m_pendingAlignFace = -1;
+  bool m_aligning = false;
+  json11::Json m_lastAlign;
+  int m_lastCutoutPx = 0;
   bool m_overlaysSaved = false;
   bool m_savedShowSlices = true;
   bool m_savedShowLayerEdges = false;
@@ -8128,6 +11196,7 @@ void EasymetricWheelZoomState::EasymetricGridDecorator::postRenderDecorator(
   Editor* editor = render->getEditor();
   if (!editor || !m_view || m_face < 0 || m_face >= kFaceCount)
     return;
+  m_view->drawOtherObjects(render, m_face);
   m_view->drawGhostBands(render, m_face);
   const PanelGridSettings grid = m_view->gridForFace(m_face);
   if (!grid.on)
@@ -8248,6 +11317,180 @@ protected:
     // Headless / Parameterized Execution
     if (m_params.has_param("action")) {
       const std::string action = m_params.get("action");
+      // Objects: every action works on `object` (name or key); without it,
+      // on the root object ("Object 1"), whatever the studio has focused.
+      std::string objKey;
+      if (m_params.has_param("object") &&
+          !resolveObjectKey(doc->sprite(), m_params.get("object"), objKey)) {
+        easymetricReportError(action, "no object named " + m_params.get("object"));
+        return;
+      }
+      std::optional<EasymetricObjectScope> objScope;
+      objScope.emplace(doc->sprite(), objKey);
+      auto geti = [this](const char* k, int d) {
+        return m_params.has_param(k) ? std::stoi(m_params.get(k)) : d;
+      };
+      // Size-changing actions first migrate a pre-2026-11-18 file (objects
+      // with their own sizes / offsets) to one shared model size. Read-only
+      // actions (state, previewStats, exportObj) see the file as it is.
+      if (action == "newObject" || action == "modelSize" || action == "unifyObjects" ||
+          action == "linkDims" || action == "blockLayout" || action == "deleteObject") {
+        objScope.reset();
+        const std::array<int, 3> u = unifyObjectsOnDoc(doc);
+        objScope.emplace(doc->sprite(), objKey);
+        if (action == "unifyObjects") {
+          if (m_params.has_param("out")) {
+            std::ofstream f(m_params.get("out"));
+            f << json11::Json(json11::Json::object{
+                                { "changed", u[0] > 0 },
+                                { "modelSize", json11::Json::array{ u[0], u[1], u[2] } } })
+                   .dump();
+          }
+          return;
+        }
+      }
+      if (action == "modelSize") {
+        // Params: width, height, depth, mode (stretch|keep, default keep).
+        // Every object gets the new size (one undo step).
+        int S[3];
+        modelBox(doc->sprite(), S);
+        int box[3] = { std::clamp(geti("width", S[0]), 1, 256),
+                       std::clamp(geti("height", S[1]), 1, 256),
+                       std::clamp(geti("depth", S[2]), 1, 256) };
+        const ResizeMode mode = (m_params.has_param("mode") && m_params.get("mode") == "stretch")
+                                  ? ResizeMode::Stretch
+                                  : ResizeMode::Keep;
+        objScope.reset();
+        resizeModelOnDoc(doc, box, mode);
+        return;
+      }
+      if (action == "newObject") {
+        // Params: name, block (true|false, default false), bw, bh, bd (block
+        // size; width/height/depth are aliases), place (above|below|right|
+        // left|front|back|center, next to what `object` - or Object 1 - has
+        // painted), r, g, b, frame. The object itself has the model size.
+        NewObjectSpec spec;
+        if (m_params.has_param("name"))
+          spec.name = m_params.get("name");
+        spec.fillBlock = m_params.has_param("block") && m_params.get("block") == "true";
+        spec.block[0] = std::clamp(geti("bw", geti("width", 8)), 1, 256);
+        spec.block[1] = std::clamp(geti("bh", geti("height", 8)), 1, 256);
+        spec.block[2] = std::clamp(geti("bd", geti("depth", 8)), 1, 256);
+        spec.frame = doc::frame_t(geti("frame", 0));
+        spec.color = doc::rgba(geti("r", 34), geti("g", 32), geti("b", 52), 255);
+        placeBlock(doc->sprite(), objKey, spec.frame, spec.block,
+                   m_params.has_param("place") ? m_params.get("place") : "center", spec.blockOrg);
+        std::string err;
+        const std::string key = newObjectOnDoc(doc, spec, err);
+        objScope.reset(); // the studio's own focus scope takes over
+        if (key.empty())
+          easymetricReportError("newObject", err);
+        else if (context->isUIAvailable())
+          focusStudioObject(key);
+        return;
+      }
+      if (action == "setObject") {
+        // Params: rank (-1 = auto), visible, name. Objects have no offset
+        // any more (shared model size, 2026-11-18): ox/oy/oz are ignored.
+        const int rank = geti("rank", -2);
+        const bool vis = !(m_params.has_param("visible") && m_params.get("visible") == "false");
+        const std::string name = m_params.has_param("name") ? m_params.get("name") : std::string();
+        setObjectOnDoc(doc, objKey, nullptr, rank >= -1 ? &rank : nullptr,
+                       m_params.has_param("visible") ? &vis : nullptr,
+                       name.empty() ? nullptr : &name);
+        return;
+      }
+      if (action == "previewStats") {
+        // Params: yaw, pitch, out. Renders the preview headless (every
+        // visible object when there are object groups) and reports the
+        // screen pixels each object won: {"objects":[{"key","px"}],...}.
+        const int yaw = geti("yaw", 45), pitch = geti("pitch", 30);
+        Render3DResult res;
+        std::vector<std::string> keys;
+        using clk = std::chrono::steady_clock;
+        const auto t0 = clk::now();
+        auto t1 = t0;
+        if (hasObjectGroups(doc->sprite())) {
+          CompositeInput in;
+          buildCompositeInput(doc, doc::frame_t(0), true, nullptr, std::string(), nullptr, in);
+          t1 = clk::now();
+          res = compute3DPreviewMulti(in.objects, yaw, pitch, 50, 50, 50, 0, true, true, nullptr,
+                                      false);
+          keys = in.keys;
+        }
+        else {
+          SixSurfaceData data;
+          extractSixSurfaces(doc, doc::frame_t(0), data, true);
+          t1 = clk::now();
+          res = compute3DPreviewImages(data, yaw, pitch, 50, 50, 50, 0, true, true);
+          keys = { std::string() };
+        }
+        const auto t2 = clk::now();
+        auto ms = [](clk::duration d) {
+          return std::chrono::duration<double, std::milli>(d).count();
+        };
+        json11::Json::array objs;
+        for (size_t i = 0; i < keys.size() && i < res.objHitPx.size(); ++i)
+          objs.push_back(json11::Json::object{ { "key", keys[i] }, { "px", res.objHitPx[i] } });
+        // FNV-1a of the diffuse image (hex): equal images, equal hashes. The
+        // shared-size migration test compares it before/after (2026-11-18).
+        uint64_t hash = 1469598103934665603ull;
+        if (const doc::Image* im = res.diffImg.get())
+          for (int y = 0; y < im->height(); ++y)
+            for (int x = 0; x < im->width(); ++x) {
+              hash ^= uint64_t(doc::get_pixel(im, x, y));
+              hash *= 1099511628211ull;
+            }
+        // `raw`: also write the diffuse image as raw RGBA bytes (outW x outH),
+        // for Lua: Image(outW, outH).bytes = <file>, then :saveAs(png).
+        if (m_params.has_param("raw") && res.diffImg &&
+            res.diffImg->pixelFormat() == doc::IMAGE_RGB) {
+          std::ofstream rf(m_params.get("raw"), std::ios::binary | std::ios::trunc);
+          const doc::Image* im = res.diffImg.get();
+          for (int y = 0; y < im->height(); ++y)
+            rf.write(reinterpret_cast<const char*>(im->getPixelAddress(0, y)),
+                     std::streamsize(im->widthBytes()));
+        }
+        const std::string text = json11::Json(json11::Json::object{
+                                                { "hash", fmt::format("{:016x}", hash) },
+                                                { "outW", res.outW },
+                                                { "outH", res.outH },
+                                                { "cutoutPx", res.cutoutPx },
+                                                { "extractMs", ms(t1 - t0) },
+                                                { "renderMs", ms(t2 - t1) },
+                                                { "volumeMs", res.volumeMs },
+                                                { "objects", objs } })
+                                   .dump();
+        if (m_params.has_param("out") && !m_params.get("out").empty()) {
+          std::ofstream f(m_params.get("out"), std::ios::binary | std::ios::trunc);
+          f << text;
+        }
+        else {
+          std::printf("%s\n", text.c_str());
+          std::fflush(stdout);
+        }
+        return;
+      }
+      if (action == "exportObj") {
+        // Params: out (path; .obj, with .mtl and .png next to it), frame (1-based).
+        if (m_params.has_param("out"))
+          exportEasymetricObj(context, doc, doc::frame_t(geti("frame", 1) - 1), m_params.get("out"),
+                              50, 50, 50, true, nullptr);
+        return;
+      }
+      if (action == "deleteObject") {
+        if (objKey.empty())
+          easymetricReportError("deleteObject", "Object 1 cannot be deleted");
+        else
+          deleteObjectOnDoc(doc, objKey);
+        return;
+      }
+      if (action == "focusObject") {
+        objScope.reset();
+        if (context->isUIAvailable())
+          focusStudioObject(objKey);
+        return;
+      }
       if (action == "linkDims") {
         std::string faceStr = m_params.has_param("face") ? m_params.get("face") : "top";
         int w = m_params.has_param("width") ? std::stoi(m_params.get("width")) : 32;
@@ -8261,6 +11504,18 @@ protected:
         else if (faceStr == "left" || faceStr == "LEFT") faceIdx = kFaceLeft;
 
         propagateLinkedDimensions(doc, faceIdx, w, h);
+      }
+      else if (action == "blockLayout") {
+        auto geti = [this](const char* k, int d) {
+          return m_params.has_param(k) ? std::stoi(m_params.get(k)) : d;
+        };
+        const int bx = geti("width", 22), by = geti("height", 21), bz = geti("depth", 22);
+        const BlockLayout b = planBlockLayout(bx, by, bz, geti("cellW", bx), geti("cellH", by),
+                                              geti("cellD", bz));
+        const doc::color_t col = doc::rgba(geti("r", 34), geti("g", 32), geti("b", 52), geti("a", 255));
+        std::string err;
+        if (!applyBlockLayout(doc, doc::frame_t(geti("frame", 0)), b, col, err))
+          easymetricReportError("blockLayout", err);
       }
       else if (action == "setupSmartObjects") {
         setupTwoLayerStructure(doc, true);
@@ -8384,16 +11639,35 @@ protected:
     }
     else {
       setupSixSurfacesOnDoc(docView->document(), true);
+      // A file made before 2026-11-18 (objects with their own size and
+      // offset) becomes one shared model size, the model looking the same.
+      const std::array<int, 3> unified = unifyObjectsOnDoc(docView->document());
       auto* multiPane = new EasymetricMultiPaneView(docView);
       std::vector<Editor*> editors = multiPane->surfaceEditors();
       docView->enterMultiPaneMode(multiPane, editors);
       multiPane->initLayersAndFraming();
-      if (auto* sb = StatusBar::instance())
-        sb->showTip(1500, "Easymetric 6-Surface Studio: 4-Column Workspace Grid Active");
+      if (auto* sb = StatusBar::instance()) {
+        if (unified[0] > 0)
+          sb->showTip(4000,
+                      fmt::format("Objects now share one {} x {} x {} model space (undo to revert)",
+                                  unified[0], unified[1], unified[2]));
+        else
+          sb->showTip(1500, "Easymetric 6-Surface Studio: 4-Column Workspace Grid Active");
+      }
     }
   }
 
 private:
+  // Objects: focus an object in the open studio (no-op without one).
+  static void focusStudioObject(const std::string& key)
+  {
+    UIContext* uiCtx = UIContext::instance();
+    DocView* view = uiCtx ? uiCtx->activeView() : nullptr;
+    if (view && view->isMultiPane())
+      if (auto* mp = dynamic_cast<EasymetricMultiPaneView*>(view->multiPaneLayout()))
+        mp->focusObject(key);
+  }
+
   Params m_params;
 };
 
@@ -8402,6 +11676,18 @@ private:
 std::string easymetric_state_json(Context* context)
 {
   return easymetricStateJsonText(context);
+}
+
+std::string easymetric_face_of_editor(Editor* editor)
+{
+  if (!editor || !UIContext::instance())
+    return std::string();
+  DocView* view = UIContext::instance()->activeView();
+  if (!view || !view->isMultiPane())
+    return std::string();
+  auto* mp = dynamic_cast<EasymetricMultiPaneView*>(view->multiPaneLayout());
+  const int f = mp ? mp->faceOfEditor(editor) : -1;
+  return f >= 0 ? std::string(kFaceSpecs[f].sliceName) : std::string();
 }
 
 Command* CommandFactory::createEasymetricStudioCommand()

@@ -155,6 +155,10 @@ class UiTest:
 
     def lua(self, code):
         r = self.call("lua", code=code)
+        if "luaOk" not in r:
+            # The script never reported back (e.g. it was stopped by a modal
+            # security prompt for Lua file I/O): do not treat that as success.
+            raise UiTestError("lua: no result from the app (did the script open a dialog?)")
         if not r.get("luaOk", True):
             raise UiTestError("lua error: %s" % r.get("luaErrors"))
         return r.get("output", "")

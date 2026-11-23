@@ -20,6 +20,10 @@ class Context;
 // See docs/aseprite2/UITEST.md.
 std::string easymetric_state_json(Context* context);
 
+// "TOP" / "FRONT" / ... when `editor` is an Easymetric studio panel, else "".
+class Editor;
+std::string easymetric_face_of_editor(Editor* editor);
+
 } // namespace app
 
 #endif

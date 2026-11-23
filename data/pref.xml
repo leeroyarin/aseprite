@@ -246,6 +246,16 @@
       <option id="api" type="std::string" />
       <option id="set_cursor_fix" type="bool" default="true" />
     </section>
+    <section id="session_recorder">
+      <option id="enabled" type="bool" default="true" />
+      <option id="screenshots" type="bool" default="true" />
+      <option id="max_size_mb" type="int" default="1000" />
+    </section>
+    <section id="easymetric">
+      <option id="auto_align" type="bool" default="true" />
+      <option id="auto_align_limit" type="int" default="4" />
+      <option id="show_cutouts" type="bool" default="false" />
+    </section>
     <section id="experimental">
       <option id="multiple_windows" type="bool" default="false" />
       <option id="new_render_engine" type="bool" default="true" />

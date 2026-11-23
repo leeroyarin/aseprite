@@ -52,18 +52,14 @@ def main():
         t.sleep(500)
         st = t.state()
         check("G5 clicking it turns the hints off", st["studio"]["ghostOn"] is False, st["studio"]["ghostOn"])
-        chk = t.find(text="Ghost hints")
-        check("G6 the Fields checkbox follows", len(chk) >= 1 and not chk[0]["selected"], chk)
-        # (A fresh profile shows Aseprite's own mini Preview window over the Fields pane, so the
-        # checkbox cannot be clicked there; flip the header toggle again and check the checkbox follows.)
+        check("G6 the Fields 'Ghost hints' checkbox is gone (the header toggle is the one control)",
+              len(t.find(text="Ghost hints")) == 0)
         t.click(*rect_center(btn[0]["rect"]))
         t.sleep(500)
-        chk = t.find(text="Ghost hints")
-        check("G7 the header toggle turns them back on and the checkbox follows",
-              t.state()["studio"]["ghostOn"] is True and chk[0]["selected"])
+        check("G7 the header toggle turns them back on", t.state()["studio"]["ghostOn"] is True)
 
         check("G8 the per-face 'Apply Size' (XY / YZ resizing) row is gone", len(t.find(text="Apply Size")) == 0)
-        check("G9 the three-dimension 'Apply Object Size' remains", len(t.find(text="Apply Object Size")) == 1)
+        check("G9 the three-dimension 'Apply Model Size' remains (renamed from Apply Object Size, 2026-11-18)", len(t.find(text="Apply Model Size")) == 1)
 
     failed = [r for r in results if not r[1]]
     print("\n%d/%d passed" % (len(results) - len(failed), len(results)))

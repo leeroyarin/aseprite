@@ -6,7 +6,8 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 EXE = os.path.join(REPO, "build", "bin", "aseprite.exe")
 SUITES = ["easymetric_test.lua", "easymetric_adversarial_stress.lua", "easymetric_four_requirements_test.lua",
           "easymetric_texture_layer_panel_bugs.lua", "easymetric_depth_sculpt_test.lua",
-          "easymetric_studio_tools_test.lua"]
+          "easymetric_studio_tools_test.lua", "easymetric_symmetric_fallback_test.lua",
+          "easymetric_objects_test.lua"]
 failed = False
 user = tempfile.mkdtemp(prefix="asehl_")
 os.makedirs(os.path.join(user, "extensions", "pixellab"), exist_ok=True)
@@ -24,6 +25,12 @@ for s in SUITES:
     print("%s %-45s %s passed, %s failed (exit %s)" % ("PASS" if ok else "FAIL", s, passed, bad, p.returncode))
     if not ok:
         print(out[-1500:])
+# Render goldens: single-object output must not change unless updated on purpose.
+p = subprocess.run([sys.executable, os.path.join(REPO, "tests", "check_golden.py")], capture_output=True, text=True)
+print("%s %-45s %s" % ("PASS" if p.returncode == 0 else "FAIL", "check_golden.py", (p.stdout.strip().splitlines() or ["?"])[-1]))
+failed |= p.returncode != 0
+if p.returncode != 0:
+    print(p.stdout[-2000:])
 if "--no-ui" not in sys.argv:
     ui_dir = os.path.join(REPO, "tests", "ui")
     for name in sorted(os.listdir(ui_dir)):
