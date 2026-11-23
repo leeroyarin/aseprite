@@ -603,6 +603,8 @@ void Editor::setClipSpriteBounds(const gfx::Rect& rc)
   if (m_clipSpriteBounds == rc)
     return;
   m_clipSpriteBounds = rc;
+  m_clipAutoFit = true;
+  m_clipFitViewportSize = gfx::Size();
   invalidate();
 }
 
@@ -618,6 +620,8 @@ void Editor::fitClipSpriteBounds()
     return;
 
   m_fittingClip = true;
+  m_clipAutoFit = true;
+  m_clipFitViewportSize = vp.size();
 
   const int margin = 10 * guiscale();
   const double sx = double(std::max(1, vp.w - margin * 2)) / double(m_clipSpriteBounds.w);
@@ -2587,8 +2591,16 @@ void Editor::onResize(ui::ResizeEvent& ev)
   Widget::onResize(ev);
   m_padding = calcExtraPadding(m_proj);
 
-  if (!m_clipSpriteBounds.isEmpty())
-    fitClipSpriteBounds();
+  // Re-fit a panel editor only when its viewport really changed size and
+  // the user has not zoomed by hand. View::updateView() sends resize events
+  // with an unchanged size on every document update (selection, moving
+  // pixels...) and those used to reset zoom and scroll.
+  if (!m_clipSpriteBounds.isEmpty()) {
+    View* view = View::getView(this);
+    const gfx::Size vpSize = view ? view->viewportBounds().size() : gfx::Size();
+    if (m_clipAutoFit && vpSize != m_clipFitViewportSize)
+      fitClipSpriteBounds();
+  }
 
   if (m_state)
     m_state->onEditorResize(this);
@@ -3017,6 +3029,9 @@ void Editor::setZoomAndCenterInMouse(const Zoom& zoom,
   HideBrushPreview hide(m_brushPreview);
   View* view = View::getView(this);
   Rect vp = view->viewportBounds();
+  // A manual zoom on a panel editor stops the automatic fit-to-face.
+  if (!m_clipSpriteBounds.isEmpty())
+    m_clipAutoFit = false;
   Projection proj = m_proj;
   proj.setZoom(zoom);
 

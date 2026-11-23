@@ -486,6 +486,7 @@ target_sources(app-lib PRIVATE
   commands/cmd_set_loop_section.cpp
   commands/cmd_set_palette.cpp
   commands/cmd_set_palette_entry_size.cpp
+  commands/cmd_session_recorder.cpp
   commands/cmd_set_same_ink.cpp
   commands/cmd_show.cpp
   commands/cmd_slice_properties.cpp
@@ -717,6 +718,7 @@ target_sources(app-lib PRIVATE
   ui/workspace_tabs.cpp
   ui/zoom_entry.cpp
   ui_context.cpp
+  session_recorder.cpp
   ui_test_server.cpp
   util/autocrop.cpp
   util/buffer_region.cpp

@@ -1,3 +1,177 @@
+## 2026-11-18 — Studio playback: "only Top animates / won't stop" (Claude Opus 5.5), same branch, uncommitted
+
+Arin, recordings 20261118-140235 and -143522: after adding objects, "an animation for single surface only, which was the top, and the animation isn't stopping". Arin confirmed two things: playback that wouldn't stop, and a new object blinking. He keeps the block on the current frame only, so the blink is expected.
+
+**Not reproduced exactly:**
+- In fresh runs, playback stayed in sync and stopped on focus switch / New object.
+- The recordings show Enter starting Play (Aseprite's default) from the timeline/panels, and long runs that ended only on a panel click or a second Enter.
+- The file's frames 2-4 held older drawings (the Body's starting block, an older head), which Arin later copied over; that explains some of the "flipping".
+
+**Mechanism fixed anyway:**
+- PlayState keeps driving the panel it started in, but linked panels followed only the ACTIVE panel (`onAfterFrameChanged`). A playback left in a non-active panel animated alone, and Enter (acting on the active panel) started a second playback instead of stopping it.
+
+**Done:**
+- `onAfterFrameChanged` also syncs from a playing panel.
+- `stopOrphanPlayback()` runs every poll and stops a playing panel that isn't the active one.
+- `stopAllPlayback()` runs before switchFocus, New object, Delete object and Apply Model Size.
+- New object prints a tip when the block lands on one frame of several.
+- Studio state faces gained `frame` / `playing` / `active`.
+- New `tests/ui/playback_test.py` 6/6. `run_all.py`: all 22 suites PASS.
+- `realfile_shared_size.py` now passes the full session path to the summarizer.
+- Installed.
+
+## 2026-11-18 — Delete object button with fallback to the previous object (Claude Opus 5.5), same branch, uncommitted
+
+Arin: "I want to remove the object, is there an option? and make sure to fall back to previous one". Before this, deleting existed only as the headless `deleteObject` action, and a vanished focused object fell back to Object 1.
+
+- **Fields** gets **Delete object** next to New object...:
+  - an Alert asks first (Delete / Cancel) and names the object you land on;
+  - `deleteObjectOnDoc` does the deletion (one undo step);
+  - the button is disabled on Object 1.
+  - **Show others** moved to its own row; it was cut off in a narrow pane.
+- **Fallback:** `previousObjectKey` is the nearest still-existing object before it in the last shown list (creation order), else Object 1. `applyFocusScope` uses it too, so script deletes, timeline deletes and undo fall back the same way.
+- **New test:** `tests/ui/delete_object_test.py`, 8/8.
+- **Re-run:** objects UI 21/21, Fields 26/26, objects Lua 16/16.
+- **Installed.**
+
+## 2026-11-18 — Objects share ONE model size; resize asks Stretch/Keep; Enter fix (Claude Opus 5.5 + Codex + Antigravity), same branch, uncommitted
+
+**Arin's report** (recording 20261118-103320, 12:24-12:27): Left Hand was 32x16x32, H was set to 32, then Apply Object Size. The old pixels stayed top-left in the bigger cells, so the side views were half empty and the preview showed a slab, not a cube. Enter in the size field also started Play Animation.
+
+**Arin's decisions:**
+- All objects share **one model size**; there is no per-object W/H/D or offset.
+- Apply asks **Stretch / Keep / Cancel** each time.
+- The new object's block goes on the **current frame only**.
+
+**Done (C++ `cmd_easymetric.cpp`):**
+- `ResizeMode{Keep, Stretch}` + `copyFacePixels`/`faceShiftForOrigin`.
+  - **Keep** is centred in model space via `ghostAxesOfFace`, so opposite views stay consistent; it replaces the top-left anchor for every caller.
+  - **Stretch** is nearest-neighbour with mirror-exact sampling.
+- `rebuildAtlas(newW,newH,mode,orgs)` gives every object the same sizes.
+- `unifyObjectsOnDoc`/`needsUnify` migrate old files:
+  - union box, each object copied to its old place, `o`=0, one undo step;
+  - runs automatically on studio open (status tip), and before size-changing headless actions.
+- `resizeModelOnDoc` and `modelBox`.
+- `placeBlock` places a block next to the focused object's painted bounds (`paintedIndexBox`).
+- Auto priority ("smaller in front") now uses the painted volume.
+- **UI:**
+  - "Model size W H D" + **Apply Model Size**, which shows a `ui::Alert` (Stretch drawings / Keep pixels / Cancel).
+  - The At X/Y/Z + Move row is removed.
+  - `NumberField` consumes Enter and fires `Enter` (no Play Animation); Enter in the size fields applies.
+  - The New object dialog has no size: name, an optional block (size + placement), placed on the current frame.
+- **Headless:**
+  - new `modelSize{width,height,depth,mode}` and `unifyObjects{out}`;
+  - `newObject{name,block,bw,bh,bd,place,r,g,b,frame}` (block defaults to false);
+  - `state.modelSize`;
+  - `previewStats` gets `hash` and `raw=`;
+  - `setObject` ignores ox/oy/oz.
+
+**Verified:**
+- Headless:
+  - Arin's case with Stretch: all views 32x32 full, and undo restores.
+  - Keep 16→32: centred at 8..23.
+  - `frame=2` puts the block on that frame only.
+  - The migration of `Easymetric-Shubha-Model-Test.aseprite` (copy) keeps shapes and places; about 100 px of outline lines differ.
+- UI: Enter in H opens the question, the frame stays 1, Stretch fills Front 24x30.
+- `run_all.py`: goldens and every other suite PASS. Old object tests fail as expected and are being rewritten by Codex. `ghost_test` G9 was renamed by me (9/9).
+- Installed.
+
+**Team:**
+- Brief: `docs/aseprite2/TASKS-objects-shared-size.md`.
+- Codex owns the object tests.
+- Antigravity owns OBJECTS.md and the real-file check. Its branch is `antigravity/objects-shared-size-docs`, with a commit made in its worktree.
+- **Merged (Claude Code, later the same day):**
+  - **Codex** rewrote, in the main checkout, `tests/easymetric_objects_test.lua` (16 cases), `tests/ui/objects_test.py` (21) and `tests/ui/fields_test.py` (26).
+  - **Antigravity's** `OBJECTS.md` and `tools/ui-test/realfile_shared_size.py` were copied from its branch `antigravity/objects-shared-size-docs`, which has its own commit `87b565917`.
+    - Claude Code corrected four doc points: no prompt before the migration; priority by painted volume; `previewStats` `hash`/`raw`; the migration is not pixel-identical. It also added a Tests section.
+    - Claude Code fixed the harness so it no longer dumps the user's own latest recording.
+- **Final verification:**
+  - `run_all.py`: all 20 suites PASS (objects 16/16, Fields 26/26, objects UI 21/21, goldens 3/3).
+  - `realfile_shared_size.py` PASS: the copy migrated to 64x44x32, and Stretch H 44→60 works.
+- **Not committed.** The Antigravity branch can be deleted once Arin approves a commit here.
+
+## 2026-11-18 — Objects follow-up: volume cache, OBJ per object, real-file check (Claude Opus 5.5), same branch, uncommitted
+
+- [x] Real file: a copy of `Body Model.aseprite` (head block only) got a Body object under the head. The preview, bake and OBJ all show the head on the body. The original on I:\ was not touched.
+- [x] Perf: building volumes was most of each render (3 x 64^3: 61 of 75 ms). Added `cachedSculptedVolume` (8 entries, content-keyed): about 7 ms per camera move, about 27 ms when one object changes. Goldens unchanged.
+- [x] OBJ export: one `o <name>` per object at its place; headless `exportObj`.
+- [x] Fix: the panel re-fit after New object refreshes the panel views (`updateView`) only in the studio's deferred re-fit after a focus switch. Doing it inside every `Editor::fitClipSpriteBounds` made the first stroke in a panel land in the wrong cell at studio start (first_click_test, intermittent).
+- KNOWN FLAKY (pre-existing, same with the 2026-11-17 build): `tests/ui/auto_align_test.py` fails in about half of the runs. The document is read while a stroke still looks in progress: every view reads shifted by the block origin, and the alignment shows up one stroke late. Not investigated yet; check whether the injected mouse-up is delayed or lost.
+- Tests: objects Lua 14/14 (OBJ parts and positions; the cache re-renders changed objects).
+
+## 2026-11-17 — Objects Stages 2-3 (objects, focus, faded overlay, composite preview, New object dialog) DONE (Claude Opus 5.5), same branch, uncommitted
+
+Design and reference: [OBJECTS.md](OBJECTS.md).
+- [x] Object model: groups `Object: <name>` with their own Surface_Base/Texture/DEPTH, keyed slices `<key>:TOP..`, metadata in group user data; Object 1 = the untouched root sheets.
+- [x] Scope instead of rewriting call sites: `EasymetricObjectScope` / `g_objectScopeKey` consulted by findSliceForFace, findLayerByName, findOrCreateLayer, sharedFaceRect (+band y). `atlasSize` in the 4 canvas checks; `rebuildAtlas` (one Tx, all bands) behind `rebuildSharedSheets` once groups exist. A hand canvas resize with objects is restored, not rescaled.
+- [x] Latent fixes: `SixSurfaceData::setFaceSize` clamps to [1,1024] and `extractSixSurfaces` indexes with the clamped size (was a buffer overrun for faces > 256); extraction no longer allocates canvas-sized buffers per face; depth restack uses the base layer's parent. (Skipped the planned `minDim` param: world size comes from face sizes, so a min-8 voxel grid only upsamples and never stretches.)
+- [x] Composite preview: `compute3DPreviewMulti` (union camera, per-object volumes, depth buffer, priority tie within 0.5 px); `compute3DPreviewImages` is the one-object wrapper and is bit-identical (goldens unchanged). bake3D renders every object. Empty and hidden objects are skipped.
+- [x] Headless: `object=` on every action (default Object 1), `newObject`, `setObject`, `deleteObject`, `focusObject`, `previewStats`; `state.objects[]`; studio state `focusedObject`, `previewObjects`, `otherObjectsPx`, `colLinked`.
+- [x] Studio: Fields rows Object combo + New object..., Place X/Y/Z + Move, In front (Auto / Rank 0..9), Show others; focus follows a timeline sheet pick; undo of New object falls back to Object 1; per-object linked columns; faded other objects (~35%) where the focused view is empty; guided New object dialog (name, W/H/D from the Front, placement presets, live description). Start from block now uses NumberFields and acts on the focused object.
+- Tests: `tests/easymetric_objects_test.lua` 12/12 (in run_all), `tests/ui/objects_test.py`.
+- Not done: OBJ export writes the focused object only; no voxel-exact overlap priority; overlay ordered by priority, not depth.
+
+## 2026-11-17 — Objects plan; Stage 1 (Fields cleanup, typed sizes, depth fixes) DONE (Claude Opus 5.5 / Sonnet 5.5), branch `fix/easymetric-viewport-ghost-recorder`, uncommitted
+
+Plan: `~/.claude/plans/cheerful-doodling-map.md` (Objects = Blender-style parts, each with own W/H/D, own six cells in its own canvas band, placement offset, priority auto = smaller in front; other objects faded ~35% in panels). Stages 2-3: see the entry above.
+
+Stage 1, from Arin's 2026-11-17 recording (`usage/20261117-132811`):
+- [x] Fields rows removed: Sym X / Sym Y / Center Sym, Lock Borders, Link Dims, Ghost hints checkbox, Pop out Column. Member pointers stay null; all users null-checked. (Link Dims' poll block is now inert.)
+- [x] Object W/H/D: `NumberField` (IntEntry subclass, no slider popup, plain click right after focus selects the whole value), 1..256, labelled W/H/D, refreshed by `refreshObjectSizeFields()` only when the real size changes (so typed-but-unapplied values survive). Root cause of "3 -> 4.2": `ui::Slider` clamps on every keystroke (`src/ui/slider.cpp:238-243`). The row was split in three: Apply/Easy Start/Start from block sat past the right edge of the Fields pane.
+- [x] Size minimum 4 -> 1 in setFaceSize, propagateDimensionLink, propagateLinkedDimensions, canvas reconcile, planBlockLayout (voxel grid keeps its own min 8).
+- [x] Start from block resets Surface_DEPTH face rects to flat grey 128 (same Tx).
+- [x] BUG FIXED: an empty (all transparent) Surface_DEPTH made the whole model vanish (transparent depth = through-hole): `extractSixSurfaces` now treats a face with no painted depth as flat. Probe: 371 px -> 0 before, 371 after.
+- [x] Easy Start (1 pixel) did nothing in the studio; now a 1x1x1 block through `applyBlockLayout`.
+- [x] Render goldens: `tests/easymetric_golden.lua` + `tests/easymetric_golden.txt` + `tests/check_golden.py` (in `run_all.py`). Use `--update` only for intended render changes.
+- Tests: new `tests/ui/fields_test.py` 20/20; `ghost_test.py` G6/G7 updated; `block_layout_test.py` + depth reset (12/12). Full `run_all.py` all PASS. Installed.
+- Note: Arin had `Body Model.aseprite` open from `build/bin`; the locked exe was renamed to `build/bin/aseprite.in-use-29640.exe` (delete once closed).
+
+## 2026-11-16 (night) — Session recorder (Claude Opus 5.5), branch `fix/easymetric-viewport-ghost-recorder`, uncommitted
+
+- [x] Plan Step 5 done. Doc: `docs/aseprite2/RECORDER.md`. Code: `src/app/session_recorder.{h,cpp}` (started in `App::initialize` after the UI test server, stopped first thing in `App::~App`), commands in `src/app/commands/cmd_session_recorder.cpp`: Help > Record Session (`ToggleSessionRecorder`, checked), Help > Mark a Problem... (`MarkProblem`, Ctrl+Alt+M), Help > Open Session Recordings Folder. Prefs `[session_recorder]` enabled (true) / screenshots (true) / max_size_mb (1000).
+- Output `%APPDATA%/Aseprite2/usage/<stamp>/events.jsonl` + `shots/*.png` (own zlib PNG writer on a worker thread; capture = one locked surface copy on the UI thread). Reader: `tools/usage/summarize_session.py` (`--notes`, `--list`, `--no-drag`).
+- `easymetric_face_of_editor()` (cmd_easymetric_state.h) names the Easymetric panel under a click.
+- Tests: `tests/ui/recorder_test.py` 15/15 (real injected input, command, edit, zoom view event, note via Ctrl+Alt+M + dialog, PNGs valid, off = nothing written). Normal close verified: exit 0, no dump, `session_end` last. Full `tests/run_all.py` all PASS.
+- Not measured: screenshot capture time at full 1920x1080 (the harness window is 960x500). It is one pass over the surface on the UI thread per shot, at most 2/s.
+- `build/bin/aseprite.in-use-45904.exe`: the previous binary, renamed because a user session (pid 45904) had it locked during linking. Delete it once that window is closed.
+
+## 2026-11-16 — Phase 3: paint on the 3D preview, DESIGN ONLY (Claude Opus 5.5)
+
+- Note: `docs/aseprite2/PAINT_ON_PREVIEW.md`. Nothing built; Arin decides. Key idea: the renderer records a pick buffer {face, u, v} per output pixel, so picking reuses the render mapping instead of inverting it. Strokes reuse the depth-stroke Tx pattern (one stroke = one undo). v1 tools: pencil + eraser behind a Paint toggle on the Preview header.
+- FIXED (same day): `SixSurfaceData::sampleSymmetric` showed an empty face with its opposite face's pixels at the SAME (u, v), i.e. unmirrored. It now mirrors (Top/Down flip v, Front/Back and Right/Left flip u, sizes carried over as fractions), matching the axis table and the linked copies. Also affects geometry where a face has no Base (`isFaceSolid` uses it). Test: `tests/easymetric_symmetric_fallback_test.lua` (bake3D from front vs behind, and right vs left: the red half must swap screen sides). It FAILED on the pre-fix binary (same side) and passes now; added to `run_all.py`.
+
+## 2026-11-16 (later still) — Phase 2: Start from a block (Claude Sonnet 5.5), branch `fix/easymetric-viewport-ghost-recorder`, uncommitted
+
+- **What**: `planBlockLayout` / `applyBlockLayout` (`cmd_easymetric.cpp`, before `class EasymetricMultiPaneView`). Block W/H/D + cell X/Y/Z (cells grow to at least the block). The block origin per model axis is `(cell - block) / 2`, rounded ONCE in model space; each view's range comes from `ghostAxesOfFace` (flip applied), so the odd leftover pixel is on the same side of the model in every view. Resizes the six cells (`rebuildSharedSheets`, own undo step), then clears every face rect on Base+Texture and fills the block on Base with the foreground colour (second undo step "Start From Block"); Depth untouched. Frame = Top panel's frame.
+- **Entry points**: Fields > Object row button "Start from block..." (modal: block + cell per axis, default block = 1/3 of the current cell, default cell = current object size) and headless `EasymetricStudio{ action="blockLayout", width=, height=, depth=, cellW=, cellH=, cellD=, r=,g=,b=,a=, frame= }`.
+- **Deviation from the brief**: the brief said to fold this into "the columns+rows grid dialog that's already on the plan". That dialog does NOT exist (the per-panel Grid pop-up still has the Axis combo; plan Step 3 is not built). The block entry is a separate small dialog next to Object W/H/D. When Step 3 is built, move the three block fields into it.
+- **Tests**: `tests/ui/block_layout_test.py` (11 checks: even and odd cells, flipped views, cells grow, undo, then with the studio open: no ghost hints, previewCutoutPx 0, auto-align has nothing to do). Full `tests/run_all.py` all PASS. NOT tested through the UI harness: the dialog itself (its button is clipped in the harness's small Fields pane and covered by the floating preview), only the action.
+- Known: starting from a block overwrites all six views (undoable with two Ctrl+Z).
+
+## 2026-11-16 (later) — Auto-align, Phase 1 (Claude Opus 5.5), branch `fix/easymetric-viewport-ghost-recorder`, uncommitted
+
+Brief: "the editor owns alignment, shape decisions stay mine". Phase 1 only; Phase 2 (block layout in the grid dialog) and the Phase 3 design note are NOT done.
+- **What**: after a paint/eraser stroke in a panel, `runPendingAlign` (poll) compares that view's occupied extent on each of its two model axes with the reference (Front for width/height, Top for depth). Same length + offset <= limit: the view shifts (Base, Texture, Depth sheets; Depth fills vacated pixels by edge replication) in its own transaction "Align <Face> View", so Ctrl+Z drops only the nudge. Different length: nothing moves, readout "Right: depth 24 px, Top says 22 px". Drawn in a reference view: nothing moves, readout lists the other views' offsets. Over the limit: nothing moves, readout says so. Linked column: the hidden partner is rewritten as the mirrored copy in the same transaction. Status-bar message, e.g. "Right view aligned +2 px depth" (sign = direction in that panel, + = right/down).
+- **Code** (`cmd_easymetric.cpp`): `computeFaceOccupancy` (split out of `computeGhost`, which now uses it), `planFaceAlign`, `applyFaceShift`, `alignPlanSummary/Json`; the studio is a `DocUndoObserver` (`onAddUndoState` marks the panel whose tool loop committed while still mid-stroke, paint/eraser inks only; ignores its own nudge via `m_aligning`). View->model axes come from `ghostAxesOfFace`; no new mapping.
+- **Settings**: new `[easymetric]` section in `data/pref.xml`: `auto_align` (default true), `auto_align_limit` (4), `show_cutouts` (false). Fields row "Auto-align views / max px / Show cut voxels (magenta)". NOTE: before this nothing in the studio persisted (ghost, grid, Cutouts are still in-memory only).
+- **Preview**: `Render3DResult::cutoutPx` counts pixels Cutouts carves (always); `show_cutouts` paints them magenta instead of dropping them. State: `studio.previewCutoutPx`, `studio.lastAlign`, `studio.autoAlign`, `studio.autoAlignLimit`, `studio.showCutouts`.
+- **Tests**: `tests/ui/auto_align_test.py` (25 checks: user's case Right 2 px / Bottom 1 px off -> both aligned, previewCutoutPx 0; undo keeps stroke; reference stroke moves nothing; size mismatch + over-limit readouts; linked Left = mirrored Right after the shift; toggle off). Full `tests/run_all.py`: all PASS. On a copy of the user's file with show_cutouts on: previewCutoutPx 347, magenta visible.
+- **Harness gotcha**: Lua `io.open` inside the running app is gated by a security prompt, and `UiTest.lua()` used to return "" silently in that case. It now raises (`tools/ui-test/uitest.py`). Pass data into scripts from Python instead (see `faces_lua` in the test).
+
+## 2026-11-16 — Panel zoom/scroll fix, large-face preview fix, ghost hints rewrite (Claude Fable 5.2 / Sonnet 5.5) — IN PROGRESS, branch `fix/easymetric-viewport-ghost-recorder`
+
+Plan: `~/.claude/plans/cheerful-doodling-map.md` (user's file: 192x256 sprite, 64x128 faces, 3x3 / 3x4 panel grids).
+- [x] **Viewport/zoom** (`editor.cpp/.h`): `Editor::onResize` re-fitted a panel to its face on every resize event, and `View::updateView` sends one on every document update, so selecting/moving pixels and the Zoom command reset zoom. Now it re-fits only when the viewport size changed AND the user has not zoomed by hand (`m_clipAutoFit`, `m_clipFitViewportSize`); manual zoom clears the flag, explicit fit / `setClipSpriteBounds` set it. The wheel-zoom clip-clearing workaround in `EasymetricWheelZoomState` is removed. Test: `tests/ui/viewport_test.py`.
+- [x] **Preview empty for faces > 64 px** (`cmd_easymetric.cpp`): voxel box dims are capped at `kMaxVoxelDim` (64) in `buildSculptedVolume`, the renderer and the OBJ export (the old code clamped the volume but not the box, giving a negative pad and sampling only the middle 64 px). `state.studio.previewRect` added. Test: `tests/ui/preview_test.py`.
+- [x] **Ghost hints** (`computeGhost`): the lower face of a linked column is neither source nor destination; each face reads its own panel frame; colour-mode-correct opacity (Indexed/Grayscale); when a panel grid is on, hints are per grid cell (a whole cell is flagged only if it has no content).
+- [x] **Linked columns were not mirrored** (`extractSixSurfaces` link block, `syncOpposingCels`): the renderer and the ghost hints sample Down with Z = 1 - v, Back with X = 1 - u and Left with Z = u, so a linked face must be the FLIPPED source (Down = Top flipped vertically; Back/Left = Front/Right flipped horizontally). The straight copy made any off-centre shape disagree by twice its offset, and with Cutouts on the preview rendered as a hollow shell (verified on a copy of the user's `Body Model.aseprite`: before = 0 skin px in the preview, after = 606). `syncOpposingCels` now also grows a trimmed cel to the sprite so every mirrored pixel can land, and treats out-of-image sources as transparent.
+- [x] **Voxel cap 64 -> 128** (`kMaxVoxelDim`, also used by the volume clamp): 128-px faces were sampled every 2 px in Y, which half-cut edges on odd rows with Cutouts on. 128^3 voxels, no measurable slowdown in the UI tests.
+- User-side finding (not a bug): in the user's file the Right view block is at cols 20-41 = depth 22-43 (the front of the object is on the LEFT of the Right view), Top rows 20-41 = depth 20-41, Bottom is 1 px right of Top. The ghost hints flag exactly these (TOP rows 42-43, RIGHT cols 42-43, DOWN col 20); they were correct. Scripts used: scratchpad `bm/ranges.lua`, `bm/link_check.py` (open copy, click `LinkToggleButton`s, dump face ranges, count skin px in `previewRect`).
+- [ ] Ghost toggle: persist `m_ghostOn`; Ghost/Dock buttons + scrollable Fields in the floating preview window; `toggleGhost` action.
+- [ ] Panel grid dialog: columns and rows together (no Axis combo), symmetric integer cells, persistence.
+- [ ] Session recorder (`session_recorder.cpp`, Help > Record Session, `%APPDATA%/Aseprite2/usage/`).
+- Suite: `python tests/run_all.py` all PASS (6 Lua suites + 6 UI tests). Not yet confirmed on the user's real file. The new viewport/preview tests were only run on the fixed build (not shown to fail on the old one).
+
 ## 2026-11-10 (later) — Ghost hints (cross-surface consistency), Fields size row removed (Claude Sonnet 5.5)
 
 - **Ghost hints** (William: "when I draw a rectangle there should be a similar shape on the perpendicular surfaces; where missing show a faint marker; toggle it like onion skin"). `computeGhost` (cmd_easymetric.cpp): the six surfaces are the orthographic projections of one object, so a pixel on Front at (x, y) demands content in column x of Top/Down and row y of Right/Left (and likewise for every pair; mirrored axes follow `buildSculptedVolume`: Back flips X, Down flips Z, Right flips Z). Opposite surfaces are not compared. A demanded column/row with NO content is "missing" and is drawn as a low-opacity band in the demanding surface's colour on that panel (post-render decorator, never document pixels). Toggle: icon button "Ghost" in the Preview header + "Ghost hints" checkbox in Fields; default ON. State: `studio.ghostOn`, per face `ghost{cols,rows}` (headless too). Tests: G1-G4 in `tests/easymetric_studio_tools_test.lua`, `tests/ui/ghost_test.py`.
@@ -372,6 +546,10 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+
+- 2026-11-23 — Codex prepared the Easymetric objects, viewport, playback and recorder changes for integration into `Aseprite-2.0`. Instrument artwork is a separate local change.
+
+- 2026-11-18 — Codex (GPT-6.2): updated the Lua objects, UI objects, and Fields suites for the shared model size on `fix/easymetric-viewport-ghost-recorder`. Verified Stretch, centred Keep, legacy migration and undo, optional blocks, and Enter without frame advance. Standalone: 16/16, 21/21, 26/26. Full regression run exited 0 (20 suites passed). Tests left uncommitted for Claude Code.
 - 2026-11-12 — Gemini: Created `bundle/aseprite2-unmerged-features` from `Aseprite-2.0` merging `upstream/main` (`9cf3c128f`), `feature/agent-mesh-hub-v3` (`c3ec249e7`), and `codex/agent-hub-v2-step1` (`e4545841f`) cleanly (127 Worker + 33 Python sidecar tests + `tsc` pass; remote `test_phase_a.py` hits live worker and still returns old `?token=` behavior until user approves deploy). Optimized `rotsprite_image`, `image_scale2x_tpl`, `image_scale_tpl`, and `draw_scanline` (row pointers, zero-copy Scale2x ping-pong, subpixel `double` overload in `LayerSmartObject::renderTransformedImage`, block-center downsample), dropping `256x256` 37° from `84.26ms` to `32.89ms` and `2x@45°` from `212.41ms` to `22.07ms`. Added undoable `cmd::SetSmartObjectTransform` with UI `Rotate`, `Flip`, and `Layer Properties` (`Angle`, `Scale`, `Flip H/V`, `Reset`) support. Verified with `test_rotation_speed_quality_ui.lua`, `run_tests.ps1` (140/140), M2 stress (`test_m2_empirical_stress.lua`, `challenger_m2_it3_scaled_right_angles_stress.lua` 15,360/15,360), `tests/run_all.py` (all 10 suites pass), and installed to `%LOCALAPPDATA%\Programs\Aseprite 2.0`.
 - 2026-11-05 — Codex: Built and reinstalled the current Windows app at
   `b9cb6c7c8`; the installed executable matches the build and remained running

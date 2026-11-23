@@ -147,6 +147,7 @@
       <key command="EasymetricStudio" shortcut="Alt+F7" />
       <key command="FullscreenPreview" shortcut="F8" />
       <key command="FullscreenMode" shortcut="F11" mac="Cmd+Ctrl+F" />
+      <key command="MarkProblem" shortcut="Ctrl+Alt+M" mac="Cmd+Alt+M" />
       <key command="ShowGrid" shortcut="Ctrl+'" mac="Cmd+'" />
       <key command="ShowPixelGrid" shortcut="Ctrl+Shift+'" mac="Cmd+Shift+'" />
       <key command="SnapToGrid" shortcut="Shift+S" />
@@ -1116,6 +1117,10 @@
           <param name="type" value="url" />
           <param name="path" value="http://twitter.com/aseprite" />
         </item>
+        <separator />
+        <item command="ToggleSessionRecorder" text="@.help_record_session" />
+        <item command="MarkProblem" text="@.help_mark_problem" />
+        <item command="OpenRecordingsFolder" text="@.help_open_recordings" />
         <separator id="enter_license_separator" />
         <item command="EnterLicense" id="enter_license" text="@.help_enter_license" group="help_enter_license" />
         <separator />
