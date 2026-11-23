@@ -56,6 +56,7 @@
 #include "app/ui/toolbar.h"
 #include "app/ui/workspace.h"
 #include "app/ui_context.h"
+#include "app/session_recorder.h"
 #include "app/ui_test_server.h"
 #include "app/util/clipboard.h"
 #include "base/exception.h"
@@ -420,6 +421,10 @@ int App::initialize(const AppOptions& options)
   if (isGui())
     start_ui_test_server_if_requested();
 
+  // Local session recorder (docs/aseprite2/RECORDER.md).
+  if (isGui())
+    start_session_recorder();
+
 #ifdef ENABLE_SCRIPTING
   // Call the init() function from all plugins
   LOG("APP: Initializing scripts...\n");
@@ -640,6 +645,9 @@ App::~App()
   try {
     LOG("APP: Exit\n");
     ASSERT(m_instance == this);
+
+    // Detach the session recorder while the UI still exists.
+    stop_session_recorder();
 
 #ifdef ENABLE_SCRIPTING
     // Destroy scripting engine calling a method (instead of using
