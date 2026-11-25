@@ -1,7 +1,20 @@
+import { githubAuthRoute, verifyGithubSession, GithubAuthFailure } from "./github-auth";
+import { redact } from "./redaction";
+import { V2Transport, fetchV2 } from "./v2";
+
 export interface Env {
   HUB_DO: DurableObjectNamespace;
   HUB_TOKEN?: string;
   ADMIN_TOKEN?: string;
+  HUB_DB?: D1Database;
+  PORTAL_ORIGIN?: string;
+  PORTAL_AUTH_PROVIDER?: string;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  GITHUB_OWNER_ID?: string;
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
+  PORTAL_ADMIN_EMAIL?: string;
   [key: string]: any;
 }
 
@@ -16,6 +29,7 @@ export interface AgentMessage {
   timestamp: string;
   subject?: string;
   verify?: boolean;
+  sub?: string;
 }
 
 export interface AgentTokenRecord {
@@ -58,6 +72,7 @@ interface MessageRow extends Record<string, SqlStorageValue> {
   timestamp: string;
   subject: string | null;
   created_at_ms: number;
+  sub: string | null;
 }
 
 interface AuthContext {
@@ -81,6 +96,7 @@ export class AgentMeshHub {
   private state: DurableObjectState;
   private env: Env;
   private initialized: Promise<void> | null = null;
+  private v2Transport?: V2Transport;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -90,7 +106,7 @@ export class AgentMeshHub {
         new WebSocketRequestResponsePair("ping", "pong")
       );
     } catch (e) {
-      console.warn("setWebSocketAutoResponse warning:", e);
+      console.warn("setWebSocketAutoResponse warning:");
     }
   }
 
@@ -146,6 +162,7 @@ export class AgentMeshHub {
       this.sql.exec("CREATE INDEX IF NOT EXISTS idx_messages_project_seq ON messages(project, seq)");
       this.sql.exec("CREATE INDEX IF NOT EXISTS idx_messages_seq ON messages(seq)");
 
+      this.sql.exec("CREATE TABLE IF NOT EXISTS hub_v2_channel_deliveries(id TEXT PRIMARY KEY)");
       // 3. Migrate old 'tokens' table if exists
       try {
         const oldTokens = this.sql.exec<Record<string, SqlStorageValue>>(
@@ -205,17 +222,16 @@ export class AgentMeshHub {
           }
         }
       } catch (err) {
-        console.warn("[Message Migration Warning]", err);
+        console.warn("[Message Migration Warning]");
       }
 
-      // 5. Clean up any historical system or ping/pong records from messages table
-      try {
-        this.sql.exec(
-          "DELETE FROM messages WHERE lower(project) = 'system' OR lower(type) IN ('ping', 'pong')"
-        );
-      } catch (_) {}
+      // Canonical history is append-only, including older control records.
+      // Inbox filters already hide control traffic without deleting stored rows.
+      this.sql.exec("CREATE TRIGGER IF NOT EXISTS hub_messages_no_update BEFORE UPDATE ON messages BEGIN SELECT RAISE(ABORT, 'Message history is append-only'); END");
+      this.sql.exec("CREATE TRIGGER IF NOT EXISTS hub_messages_no_delete BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT, 'Message history is append-only'); END");
+
     } catch (err) {
-      console.error("[initDatabase Error]", err);
+      console.error("[initDatabase Error]");
     }
   }
 
@@ -268,7 +284,7 @@ export class AgentMeshHub {
         description: row.description || undefined,
       };
     } catch (err) {
-      console.error("[getTokenByHash Error]", err);
+      console.error("[getTokenByHash Error]");
       return null;
     }
   }
@@ -311,7 +327,7 @@ export class AgentMeshHub {
         };
       });
     } catch (err) {
-      console.error("[listTokens Error]", err);
+      console.error("[listTokens Error]");
       return [];
     }
   }
@@ -364,7 +380,7 @@ export class AgentMeshHub {
         last_created: e.last_created,
       }));
     } catch (err) {
-      console.error("[listAgents Error]", err);
+      console.error("[listAgents Error]");
       return [];
     }
   }
@@ -558,6 +574,15 @@ export class AgentMeshHub {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    if (path === "/api/v2" || path.startsWith("/api/v2/")) {
+      this.v2Transport ||= new V2Transport(this.state, this.env, (req) => this.authenticate(req));
+      return this.v2Transport.fetch(request);
+    }
+
+    if(path!=="/"&&path!==""){
+      const auth=await this.authenticate(request);
+      if(auth.isValid&&!auth.isAdmin&&auth.agent&&this.env.HUB_DB){this.v2Transport ||= new V2Transport(this.state,this.env,req=>this.authenticate(req));if(!(await this.v2Transport.enrollmentAllowed(auth.agent)))return Response.json({error:"not enrolled"},{status:403});}
+    }
     // Route: Root Healthcheck
     if (path === "/" || path === "") {
       return Response.json({
@@ -824,14 +849,14 @@ export class AgentMeshHub {
           if (oldWs.readyState !== 1) continue;
           const sess = oldWs.deserializeAttachment() as AgentSessionData | null;
           if (sess && sess.agent === agent) {
-            console.log(`[WS Deduplication] Closing older connection for agent=${agent}`);
+            console.log("[WS Deduplication] Closing an older session");
             try {
               oldWs.close(4000, "Superceded by new session");
             } catch (_) {}
             closedOld++;
           }
         } catch (err) {
-          console.warn("[WS Deduplication Check Warning]", err);
+          console.warn("[WS Deduplication Check Warning]");
         }
       }
       for (const oldWs of this.state.getWebSockets(agent)) {
@@ -843,7 +868,7 @@ export class AgentMeshHub {
         } catch (_) {}
       }
       if (closedOld > 0) {
-        console.log(`[WS Deduplication] Closed ${closedOld} older connection(s) for agent=${agent}`);
+        console.log(`[WS Deduplication] Closed ${closedOld} older connection(s)`);
       }
 
       const pair = new WebSocketPair();
@@ -862,6 +887,8 @@ export class AgentMeshHub {
         connectedAt: new Date().toISOString(),
       };
       server.serializeAttachment(sessionData);
+      if(this.env.HUB_DB&&!auth.isAdmin)await this.env.HUB_DB.prepare("INSERT INTO agent_connections(agent,connected_at) VALUES(?,?) ON CONFLICT(agent) DO UPDATE SET connected_at=excluded.connected_at").bind(agent,Date.now()).run();
+      if(!auth.isAdmin&&auth.agent){this.v2Transport ||= new V2Transport(this.state,this.env,req=>this.authenticate(req));await this.v2Transport.touch(auth.agent);}
 
       await this.ensureAlarmScheduled();
 
@@ -944,7 +971,7 @@ export class AgentMeshHub {
         await this.persistAndBroadcast(msg);
         return Response.json({ ok: true, id: msg.id });
       } catch (err: any) {
-        return Response.json({ error: err.message || "Invalid JSON" }, { status: 400 });
+        return Response.json({ error: "Invalid JSON message" }, { status: 400 });
       }
     }
 
@@ -998,6 +1025,7 @@ export class AgentMeshHub {
         ? Math.min(Math.max(parseInt(limitParam, 10) || 50, 1), 1000)
         : 1000;
 
+      if(!auth.isAdmin&&auth.agent){this.v2Transport ||= new V2Transport(this.state,this.env,req=>this.authenticate(req));await this.v2Transport.touch(auth.agent);}
       const queryResult = await this.queryMessages(targetProjects, agent, since, limit);
       return Response.json(queryResult);
     }
@@ -1109,7 +1137,7 @@ export class AgentMeshHub {
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const session = ws.deserializeAttachment() as AgentSessionData | null;
     if (!session) return;
-
+    if(!session.isAdmin&&this.env.HUB_DB){this.v2Transport ||= new V2Transport(this.state,this.env,req=>this.authenticate(req));if(!(await this.v2Transport.enrollmentAllowed(session.agent))){ws.close(4003,"not enrolled");return;}}
     try {
       const raw =
         typeof message === "string"
@@ -1205,22 +1233,18 @@ export class AgentMeshHub {
 
       await this.persistAndBroadcast(msg);
     } catch (err) {
-      console.error(`[WS Message Parse Error] agent=${session.agent}:`, err);
+      console.error("[WS Message Parse Error]");
     }
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
     const session = ws.deserializeAttachment() as AgentSessionData | null;
-    console.log(
-      `[WS Closed] agent=${session?.agent || "unknown"}, code=${code}, reason=${
-        reason ? JSON.stringify(reason) : "(none)"
-      }, clean=${wasClean}`
-    );
+    console.log("[WS Closed]", {code, clean: wasClean});
   }
 
   async webSocketError(ws: WebSocket, error: unknown) {
     const session = ws.deserializeAttachment() as AgentSessionData | null;
-    console.error(`[WS Error] agent=${session?.agent || "unknown"}:`, error);
+    console.error("[WS Error]");
   }
 
   async alarm() {
@@ -1235,7 +1259,7 @@ export class AgentMeshHub {
         try {
           ws.send(pingPayload);
         } catch (err) {
-          console.warn("[WS Ping Warning]", err);
+          console.warn("[WS Ping Warning]");
           try {
             ws.close(1006, "Ping send failed");
           } catch (_) {}
@@ -1252,11 +1276,15 @@ export class AgentMeshHub {
         await this.state.storage.setAlarm(Date.now() + 30000);
       }
     } catch (e) {
-      console.warn("Alarm scheduling warning:", e);
+      console.warn("Alarm scheduling warning:");
     }
   }
 
   private async persistAndBroadcast(msg: AgentMessage) {
+    // Keep transport semantics; redact newly received content before any history
+    // write or fan-out. Previously stored history is never rewritten or deleted.
+    msg = {...msg, body: redact(msg.body,[this.env.HUB_TOKEN || "",this.env.ADMIN_TOKEN || ""]),
+      subject: msg.subject ? redact(msg.subject) : msg.subject};
     if (
       msg.project.trim().toLowerCase() === "system" ||
       msg.type.trim().toLowerCase() === "ping" ||
@@ -1284,7 +1312,7 @@ export class AgentMeshHub {
           nowMs
         );
       } catch (err) {
-        console.error("[SQL Insert Error]", err);
+        console.error("[SQL Insert Error]");
       }
     }
 
@@ -1303,6 +1331,8 @@ export class AgentMeshHub {
     }
     await this.state.storage.put(listKey, recent);
 
+    if(this.env.HUB_DB){this.v2Transport ||= new V2Transport(this.state,this.env,req=>this.authenticate(req));await this.v2Transport.reconcileEnrollment();}
+    this.v2Transport?.changed();
     // 3. Broadcast to all active WebSocket connections
     const serialized = JSON.stringify(msg);
     const sockets = this.state.getWebSockets().filter((ws) => ws.readyState === 1);
@@ -1326,7 +1356,7 @@ export class AgentMeshHub {
           ws.send(serialized);
         }
       } catch (e) {
-        console.warn("[Broadcast Send Warning]", e);
+        console.warn("[Broadcast Send Warning]");
       }
     }
   }
@@ -1376,7 +1406,8 @@ export class AgentMeshHub {
           }
           if (agent && agent !== "admin") {
             lastWhere.push("(to_agent = 'all' OR to_agent = ? OR from_agent = ?)");
-            lastParams.push(agent, agent);
+            lastWhere.push("(NOT EXISTS (SELECT 1 FROM hub_v2_channel_deliveries d WHERE d.id=messages.id) OR to_agent=?)");
+            lastParams.push(agent, agent, agent);
           }
           const whereStr = lastWhere.length > 0 ? `WHERE ${lastWhere.join(" AND ")}` : "";
           const lastRow = this.sql.exec<{ id: string }>(
@@ -1410,6 +1441,8 @@ export class AgentMeshHub {
         if (agent && agent !== "admin") {
           whereClauses.push("(to_agent = 'all' OR to_agent = ? OR from_agent = ?)");
           params.push(agent, agent);
+          whereClauses.push("(NOT EXISTS (SELECT 1 FROM hub_v2_channel_deliveries d WHERE d.id=messages.id) OR to_agent=?)");
+          params.push(agent);
         }
 
         const query =
@@ -1426,6 +1459,7 @@ export class AgentMeshHub {
           reply_to: r.reply_to || null,
           body: r.body,
           timestamp: r.timestamp,
+          ...(r.sub ? {sub:r.sub} : {}),
           subject: r.subject || `proj.${r.project}.${r.type}`,
         }));
 
@@ -1452,7 +1486,8 @@ export class AgentMeshHub {
           }
           if (agent && agent !== "admin") {
             lastWhere.push("(to_agent = 'all' OR to_agent = ? OR from_agent = ?)");
-            lastParams.push(agent, agent);
+            lastWhere.push("(NOT EXISTS (SELECT 1 FROM hub_v2_channel_deliveries d WHERE d.id=messages.id) OR to_agent=?)");
+            lastParams.push(agent, agent, agent);
           }
           const whereStr = lastWhere.length > 0 ? `WHERE ${lastWhere.join(" AND ")}` : "";
           const lastRow = this.sql.exec<{ id: string }>(
@@ -1464,7 +1499,7 @@ export class AgentMeshHub {
 
         return { messages, latest_id: latestId };
       } catch (err) {
-        console.error("[queryMessages SQL Error]", err);
+        console.error("[queryMessages SQL Error]");
       }
     }
 
@@ -1512,18 +1547,48 @@ export class AgentMeshHub {
 }
 
 export default {
+  async scheduled(controller: ScheduledController, env:Env, ctx:ExecutionContext):Promise<void> {
+    if(!env.HUB_DB)return;
+    const stub=env.HUB_DO.get(env.HUB_DO.idFromName("global-agent-mesh-hub"));
+    const response=await stub.fetch("https://supervisor.internal/api/v2/internal/sweep",{headers:{"X-Hub-Scheduled-Time":String(controller.scheduledTime)}});
+    if(!response.ok)throw new Error("Supervisor sweep failed");
+  },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const portalOrigin = env.PORTAL_ORIGIN || "https://agent-hub.slack-clone-arin.workers.dev";
+    const origin = request.headers.get("Origin");
+    if (origin && origin !== portalOrigin) return Response.json({error:"Origin is not allowed"},{status:403});
+    const url = new URL(request.url);
+    const authResponse=await githubAuthRoute(request,env);
+    if(authResponse)return authResponse;
+    if(env.PORTAL_AUTH_PROVIDER==="github"&&request.method==="GET") {
+      if(url.pathname==="/admin/inbox")return new Response(null,{status:303,headers:{Location:"/api/v2/admin/portal","Cache-Control":"no-store"}});
+      if(url.pathname==="/api/v2/admin/portal") {
+        try { await verifyGithubSession(request,env); }
+        catch(error) {
+          if(error instanceof GithubAuthFailure && [401,503].includes(error.status))
+            return new Response(null,{status:303,headers:{Location:"/api/v2/auth/login","Cache-Control":"no-store"}});
+          return Response.json({error:"Portal authentication failed"},{status:403});
+        }
+      }
+    }
+    if(url.pathname.startsWith("/api/v2/internal"))return new Response(null,{status:404});
+    if (url.pathname === "/api/v2" || url.pathname.startsWith("/api/v2/") || (url.pathname==="/send"&&request.method==="POST")) {
+      return fetchV2(request, portalOrigin, async (req) => {
+        const id = env.HUB_DO.idFromName("global-agent-mesh-hub");
+        return env.HUB_DO.get(id).fetch(req);
+      });
+    }
     if (!env.HUB_TOKEN || !String(env.HUB_TOKEN).trim()) {
       return Response.json({ error: "HUB_TOKEN secret not configured on worker. Run 'wrangler secret put HUB_TOKEN' to set it." }, { status: 503 });
     }
     if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Authorization, Content-Type",
-        },
-      });
+      const requestedMethod=request.headers.get("Access-Control-Request-Method");
+      const requestedHeaders=(request.headers.get("Access-Control-Request-Headers") || "").toLowerCase().split(",").map(h=>h.trim()).filter(Boolean);
+      if (!origin || !["GET","POST","DELETE"].includes(requestedMethod || "") || requestedHeaders.some(h=>!["authorization","content-type"].includes(h)))
+        return Response.json({error:"Preflight is not allowed"},{status:403});
+      return new Response(null,{status:204,headers:{
+        "Access-Control-Allow-Origin":portalOrigin,"Access-Control-Allow-Methods":"GET, POST, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers":"Authorization, Content-Type","Vary":"Origin"}});
     }
 
     // Route to Singleton Durable Object
@@ -1537,7 +1602,9 @@ export default {
     }
 
     const newHeaders = new Headers(response.headers);
-    newHeaders.set("Access-Control-Allow-Origin", "*");
+    newHeaders.delete("Access-Control-Allow-Origin");
+    if (origin) newHeaders.set("Access-Control-Allow-Origin", portalOrigin);
+    newHeaders.set("Vary", "Origin");
     newHeaders.set("X-Hub-Worker-Version", "2.1.0");
     return new Response(response.body, {
       status: response.status,

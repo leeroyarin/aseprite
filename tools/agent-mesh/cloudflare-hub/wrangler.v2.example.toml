@@ -1,0 +1,31 @@
+# EXAMPLE ONLY. Do not provision, migrate remote data, or deploy without Arin approval.
+# Keep the existing Worker name, URL, DO binding and migration identity.
+name = "agent-mesh-hub"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+[vars]
+PORTAL_ORIGIN = "https://agent-mesh-hub.slack-clone-arin.workers.dev"
+ACCESS_TEAM_DOMAIN = "REPLACE_AFTER_APPROVAL.cloudflareaccess.com"
+ACCESS_AUD = "REPLACE_AFTER_APPROVAL"
+PORTAL_ADMIN_EMAIL = "REPLACE_AFTER_APPROVAL@example.invalid"
+
+[durable_objects]
+bindings = [{ name = "HUB_DO", class_name = "AgentMeshHub" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentMeshHub"]
+
+[[d1_databases]]
+binding = "HUB_DB"
+database_name = "agent-hub-v2"
+database_id = "REPLACE_ONLY_AFTER_RESOURCE_APPROVAL"
+migrations_dir = "migrations"
+
+[observability]
+enabled = true
+
+# Proposed only; enable after review, never against production during tests.
+[triggers]
+crons = ["*/5 * * * *"]
