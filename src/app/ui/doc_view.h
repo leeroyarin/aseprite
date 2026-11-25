@@ -61,9 +61,11 @@ public:
   // are laid out inside this DocView (e.g. Easymetric surface panes).
   // editor() returns the pane editor that was used last.
   ui::View* createPaneEditorView(Editor** outEditor);
+  // Layouts without pane editors keep the primary editor as the timeline site.
   void enterMultiPaneMode(ui::Widget* layoutRoot, const std::vector<Editor*>& paneEditors);
   void exitMultiPaneMode();
   bool isMultiPane() const { return m_paneLayout != nullptr; }
+  bool hasCanvaslessLayout() const { return m_paneLayout && m_paneEditors.empty(); }
   ui::Widget* multiPaneLayout() const { return m_paneLayout; }
   const std::vector<Editor*>& paneEditors() const { return m_paneEditors; }
   Editor* primaryEditor() const { return m_ownEditor; }

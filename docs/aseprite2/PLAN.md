@@ -81,6 +81,14 @@ AI agent ──MCP stdio──> tools/aseprite2-mcp (Node/TS)
 - **Game Engine Sprite Sheet & Animation Tag Tools**: `tag_manage` and `export_spritesheet` MCP tools.
 - **System Installer**: `tools/install-aseprite2.ps1` with live hot-swap support for `%LOCALAPPDATA%\Programs\Aseprite 2.0`, Start Menu & Desktop shortcuts, User PATH, and `.aseprite`/`.ase` file associations.
 
+### Phase 7 — Easymetric Model Studio
+
+- Add a GLB model source alongside Six Surfaces. Model Studio uses the active sprite as its project and leaves its canvas and layers alone until a render is added to it.
+- Embed one self-contained GLB per sprite with versioned scene settings. The model, camera, front direction, lighting, and motion stay available after saving, reopening, duplicating, or opening a project version.
+- Preview a mesh at the selected sprite resolution with an orthographic camera and fixed lighting. Select and trim imported clips or author whole-model movement, rotation, and scale keys.
+- Bake one pose or a timed sequence to a new RGB sprite or append to a matching RGB sprite. Use the existing frame duration, layer, cel, tag, and undo APIs.
+- Keep the native GLB loader and rasterizer independent of the Lua bridge and the Six Surfaces projection.
+
 ### Verification
 - `cmake --build build` after each C++ phase.
 - Run `build/bin/aseprite.exe`: title "Aseprite 2.0 v2.0…", `%APPDATA%\Aseprite2` created.

@@ -47,6 +47,9 @@ jobs:
         shell: bash
         run: |
           cd build && ninja
+      - name: Easymetric GLB model tests
+        shell: bash
+        run: xvfb-run ./build/bin/model_tests
       - name: Easymetric regression (67 tests)
         shell: bash
         run: |

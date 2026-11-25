@@ -344,7 +344,8 @@ void PreviewEditorWindow::updateUsingEditor(Editor* editor)
   if (m_opening)
     return;
 
-  if (!m_isEnabled || !editor) {
+  if (!m_isEnabled || !editor ||
+      (editor->getDocView() && editor->getDocView()->hasCanvaslessLayout())) {
     hideWindow();
     m_relatedEditor = nullptr;
     return;

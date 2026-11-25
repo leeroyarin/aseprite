@@ -18,6 +18,9 @@
 #include "app/context.h"
 #include "app/doc.h"
 #include "app/doc_api.h"
+#include "app/easymetric/model_project.h"
+#include "app/easymetric/model_studio.h"
+#include "app/i18n/strings.h"
 #include "app/extra_cel.h"
 #include "app/file/file.h"
 #include "app/file_selector.h"
@@ -3155,6 +3158,8 @@ static bool sculptDepthDabOnDoc(app::Doc* doc, doc::frame_t fr, int face,
   }
 }
 
+void switchStudioSource(DocView* view, bool model);
+
 class EasymetricMultiPaneView : public ui::Widget {
 public:
   EasymetricMultiPaneView(DocView* docView)
@@ -4432,6 +4437,16 @@ private:
     zoomRow->addChild(m_zoomLabel);
     m_fieldsBox->addChild(zoomRow);
 
+    auto* source = new ui::ComboBox;
+    source->addItem(Strings::easymetric_model_six_surfaces());
+    source->addItem(Strings::easymetric_model_imported_model());
+    source->setSelectedItemIndex(0);
+    source->Change.connect([this, source] {
+      if (source->getSelectedItemIndex() == 1)
+        switchStudioSource(m_docView, true);
+    });
+    m_fieldsBox->addChild(source);
+
     // Row 7: Action Buttons (Render, Export .OBJ, Exit)
     auto* actRow = new ui::HBox;
     actRow->setChildSpacing(4 * s);
@@ -5416,6 +5431,48 @@ private:
   doc::ImageRef m_lastDeptImg;
 };
 
+void closeStudio(DocView* view)
+{
+  if (auto* surfaces = dynamic_cast<EasymetricMultiPaneView*>(view->multiPaneLayout()))
+    surfaces->syncAllLinkedCels();
+  view->exitMultiPaneMode();
+}
+
+void switchStudioSource(DocView* view, bool model)
+{
+  closeStudio(view);
+  if (model) {
+    auto* studio = easymetric::createModelStudio(
+      *view, [view] { switchStudioSource(view, false); }, [view] { closeStudio(view); });
+    view->enterMultiPaneMode(studio, {});
+  }
+  else {
+    setupSixSurfacesOnDoc(view->document(), true);
+    auto* studio = new EasymetricMultiPaneView(view);
+    view->enterMultiPaneMode(studio, studio->surfaceEditors());
+    studio->initLayersAndFraming();
+  }
+}
+
+class EasymetricModelStudioCommand : public Command {
+public:
+  EasymetricModelStudioCommand() : Command(CommandId::EasymetricModelStudio()) {}
+
+protected:
+  bool onEnabled(Context* context) override
+  {
+    return context && context->isUIAvailable() && context->activeDocument();
+  }
+
+  void onExecute(Context*) override
+  {
+    auto* context = UIContext::instance();
+    auto* view = context ? context->activeView() : nullptr;
+    if (view && view->document())
+      switchStudioSource(view, true);
+  }
+};
+
 class EasymetricStudioCommand : public Command {
 public:
   EasymetricStudioCommand() : Command(CommandId::EasymetricStudio()) {}
@@ -5513,23 +5570,10 @@ protected:
     if (!docView || !docView->document())
       return;
 
-    if (docView->isMultiPane()) {
-      if (auto* multiPane = dynamic_cast<EasymetricMultiPaneView*>(docView->multiPaneLayout())) {
-        multiPane->syncAllLinkedCels();
-      }
-      docView->exitMultiPaneMode();
-      if (auto* sb = StatusBar::instance())
-        sb->showTip(1200, "Easymetric 6-Surface Studio: Switched to standard view");
-    }
-    else {
-      setupSixSurfacesOnDoc(docView->document(), true);
-      auto* multiPane = new EasymetricMultiPaneView(docView);
-      std::vector<Editor*> editors = multiPane->surfaceEditors();
-      docView->enterMultiPaneMode(multiPane, editors);
-      multiPane->initLayersAndFraming();
-      if (auto* sb = StatusBar::instance())
-        sb->showTip(1500, "Easymetric 6-Surface Studio: 4-Column Workspace Grid Active");
-    }
+    if (docView->isMultiPane())
+      closeStudio(docView);
+    else
+      switchStudioSource(docView, easymetric::hasEmbeddedModel(*doc->sprite()));
   }
 
 private:
@@ -5537,6 +5581,11 @@ private:
 };
 
 } // anonymous namespace
+
+Command* CommandFactory::createEasymetricModelStudioCommand()
+{
+  return new EasymetricModelStudioCommand;
+}
 
 Command* CommandFactory::createEasymetricStudioCommand()
 {

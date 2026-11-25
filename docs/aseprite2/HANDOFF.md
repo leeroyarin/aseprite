@@ -63,6 +63,9 @@ powershell -File tools\start-aseprite2.ps1
   - [x] PixelLab auto-detected and imported
   - [x] Bridge WebSocket smoke test clean
 
+- [x] **Phase 7** Easymetric Model Studio — GLB preview, lighting, motion keys, clips,
+  and sprite baking implemented. Linux build and native tests passed. Windows verification pending.
+
 ## Open questions for user (defaults applied meanwhile)
 1. Port 8765 OK? (default yes)
 2. `lua.exec` default OFF? (default OFF)
@@ -76,6 +79,19 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-25 — Codex: Implemented GLB import in **View > Easymetric Model Studio**, with
+  source switching from Six Surfaces, front presets, orthographic preview, output sizing, point
+  and directional lights, clip playback and trimming, motion keys, and timed frame baking.
+  GLBs and editable setup are embedded in the sprite. Native tests cover skinning, lighting, pixel
+  density, timing, sparse accessors, invalid input, undo, and a multi-block save/reopen round trip.
+  The Linux Skia build and all five native tests pass. Verified textured GLB import, setting front,
+  lowering output density to 32 × 32, adding and dragging a point light, and baking an imported
+  clip in the Linux GUI. Verified the saved sequence and a second bake appended to the same sprite
+  without changing the original frames or tag. The four existing Easymetric Lua suites reported
+  159 passing assertions.
+  The four-requirements process hit its previously recorded Linux shutdown crash after its 23
+  assertions passed. Windows MSVC build and GUI validation remain pending.
+
 - 2026-11-04 — Muse (ULTRON): Depth-sculpt tool + depth map from Base, DRAFT PR, headless-verified, GUI brush click NOT yet verified.
   Branch fix/easymetric-depth-sculpt, base 2cee30d. Note: this branch
   was built in the same worktree as PR #19, so its snapshot also
