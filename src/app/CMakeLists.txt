@@ -475,6 +475,9 @@ target_sources(app-lib PRIVATE
   commands/cmd_save_palette.cpp
   commands/cmd_version.cpp
   commands/cmd_easymetric.cpp
+  easymetric/model.cpp
+  easymetric/model_project.cpp
+  easymetric/model_studio.cpp
   versions/version_store.cpp
   commands/cmd_scroll.cpp
   commands/cmd_scroll_center.cpp

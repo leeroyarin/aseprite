@@ -279,7 +279,7 @@ DocView::~DocView()
 template<typename F>
 void DocView::forEachShownEditor(F&& f)
 {
-  if (m_paneLayout) {
+  if (!m_paneEditors.empty()) {
     for (Editor* e : m_paneEditors)
       f(e);
   }
@@ -302,7 +302,7 @@ ui::View* DocView::createPaneEditorView(Editor** outEditor)
 
 void DocView::enterMultiPaneMode(ui::Widget* layoutRoot, const std::vector<Editor*>& paneEditors)
 {
-  if (m_paneLayout || !layoutRoot || paneEditors.empty())
+  if (m_paneLayout || !layoutRoot)
     return;
 
   Editor* src = m_ownEditor;
@@ -319,12 +319,15 @@ void DocView::enterMultiPaneMode(ui::Widget* layoutRoot, const std::vector<Edito
   addChild(layoutRoot);
 
   const bool wasActive = src->isActive();
-  m_editor = m_paneEditors.front();
+  m_editor = m_paneEditors.empty() ? m_ownEditor : m_paneEditors.front();
   layout();
   invalidate();
 
-  if (wasActive)
+  if (wasActive) {
     UIContext::instance()->setActiveView(this);
+    if (m_paneEditors.empty() && m_previewDelegate)
+      m_previewDelegate->onPreviewOtherEditor(m_editor);
+  }
 }
 
 void DocView::exitMultiPaneMode()
@@ -351,6 +354,8 @@ void DocView::exitMultiPaneMode()
   std::vector<Editor*> old;
   old.swap(m_paneEditors);
 
+  if (old.empty() && m_editor->isActive() && m_previewDelegate)
+    m_previewDelegate->onPreviewOtherEditor(m_editor);
   if (paneWasActive)
     UIContext::instance()->setActiveView(this);
   for (Editor* e : old) {

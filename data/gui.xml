@@ -1068,6 +1068,7 @@
         </menu>
         <item command="SymmetryMode" text="@.view_symmetry_options" group="view_canvas_helpers" />
         <item command="EasymetricStudio" text="@.view_easymetric_studio" />
+        <item command="EasymetricModelStudio" text="@.view_easymetric_model_studio" />
         <separator />
         <item command="SetLoopSection" text="@.view_set_loop_section" />
         <item command="ShowOnionSkin" text="@.view_show_onion_skin" group="view_animation_helpers" />

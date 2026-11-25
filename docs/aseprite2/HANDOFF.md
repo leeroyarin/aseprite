@@ -533,6 +533,9 @@ powershell -File tools\start-aseprite2.ps1
   - [x] PixelLab auto-detected and imported
   - [x] Bridge WebSocket smoke test clean
 
+- [x] **Phase 7** Easymetric Model Studio — GLB preview, lighting, motion keys, clips,
+  and sprite baking implemented. Linux build and native tests passed. Windows verification pending.
+
 ## Open questions for user (defaults applied meanwhile)
 1. Port 8765 OK? (default yes)
 2. `lua.exec` default OFF? (default OFF)
@@ -546,6 +549,27 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-25 — Codex: Integrated Easymetric GLB Model Studio into `Aseprite-2.0`.
+  Kept shared objects, legacy model-size migration, the viewport, and Six Surfaces exit cleanup.
+  The combined Linux Skia build, five GLB tests, and three rendering goldens passed.
+  The GUI check reopened an embedded GLB and switched from a floating Six Surfaces preview
+  to Model Studio and back, preserving a shared object. Legacy Lua checks passed 192 assertions.
+  The four-requirements suite still crashes on Linux exit after its assertions pass, and the
+  final objects check requires a legacy sprite from Windows Downloads that was unavailable.
+
+- 2026-11-25 — Codex: Implemented GLB import in **View > Easymetric Model Studio**, with
+  source switching from Six Surfaces, front presets, orthographic preview, output sizing, point
+  and directional lights, clip playback and trimming, motion keys, and timed frame baking.
+  GLBs and editable setup are embedded in the sprite. Native tests cover skinning, lighting, pixel
+  density, timing, sparse accessors, invalid input, undo, and a multi-block save/reopen round trip.
+  The Linux Skia build and all five native tests pass. Verified textured GLB import, setting front,
+  lowering output density to 32 × 32, adding and dragging a point light, and baking an imported
+  clip in the Linux GUI. Verified the saved sequence and a second bake appended to the same sprite
+  without changing the original frames or tag. The four existing Easymetric Lua suites reported
+  159 passing assertions.
+  The four-requirements process hit its previously recorded Linux shutdown crash after its 23
+  assertions passed. Windows MSVC build and GUI validation remain pending.
+
 - 2026-11-25 — Codex: Merged `codex/agent-hub-v2-step1` into `Aseprite-2.0` in an isolated worktree. Preserved current Aseprite work and both handoff histories. Agent Hub Worker validation is recorded in its own docs; this merge does not deploy or replace the React frontend.
 
 

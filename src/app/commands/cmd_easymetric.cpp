@@ -22,6 +22,9 @@
 #include "app/context.h"
 #include "app/doc.h"
 #include "app/doc_api.h"
+#include "app/easymetric/model_project.h"
+#include "app/easymetric/model_studio.h"
+#include "app/i18n/strings.h"
 #include "app/extra_cel.h"
 #include "app/file/file.h"
 #include "app/file_selector.h"
@@ -6565,6 +6568,8 @@ static bool sculptDepthDabOnDoc(app::Doc* doc, doc::frame_t fr, int face,
   }
 }
 
+void switchStudioSource(DocView* view, bool model);
+
 class EasymetricMultiPaneView : public ui::Widget,
                                 public EditorObserver,
                                 public DocUndoObserver {
@@ -8878,6 +8883,16 @@ private:
     // the Preview header (opposite the label).
     // (The Fields "Pop out Column" button was removed 2026-11-17: the
     // Preview header has the same Pop out / Dock button.)
+
+    auto* source = new ui::ComboBox;
+    source->addItem(Strings::easymetric_model_six_surfaces());
+    source->addItem(Strings::easymetric_model_imported_model());
+    source->setSelectedItemIndex(0);
+    source->Change.connect([this, source] {
+      if (source->getSelectedItemIndex() == 1)
+        switchStudioSource(m_docView, true);
+    });
+    m_fieldsBox->addChild(source);
 
     // Row 7: Action Buttons (Render, Export .OBJ, Exit)
     auto* actRow = new ui::HBox;
@@ -11285,6 +11300,62 @@ static std::string easymetricStateJsonText(Context* context)
   return json11::Json(root).dump();
 }
 
+void closeStudio(DocView* view)
+{
+  if (auto* surfaces = dynamic_cast<EasymetricMultiPaneView*>(view->multiPaneLayout())) {
+    surfaces->syncAllLinkedCels();
+    surfaces->prepareForExit();
+  }
+  else
+    easymetric::prepareModelStudioForExit(view->multiPaneLayout());
+  view->exitMultiPaneMode();
+}
+
+void switchStudioSource(DocView* view, bool model)
+{
+  closeStudio(view);
+  if (model) {
+    auto* studio = easymetric::createModelStudio(
+      *view, [view] { switchStudioSource(view, false); }, [view] { closeStudio(view); });
+    view->enterMultiPaneMode(studio, {});
+  }
+  else {
+    setupSixSurfacesOnDoc(view->document(), true);
+    // Migrate legacy per-object sizes and offsets to the shared model space.
+    const auto unified = unifyObjectsOnDoc(view->document());
+    auto* studio = new EasymetricMultiPaneView(view);
+    view->enterMultiPaneMode(studio, studio->surfaceEditors());
+    studio->initLayersAndFraming();
+    if (auto* sb = StatusBar::instance()) {
+      if (unified[0] > 0)
+        sb->showTip(4000,
+                    fmt::format("Objects now share one {} x {} x {} model space (undo to revert)",
+                                unified[0], unified[1], unified[2]));
+      else
+        sb->showTip(1500, "Easymetric 6-Surface Studio: 4-Column Workspace Grid Active");
+    }
+  }
+}
+
+class EasymetricModelStudioCommand : public Command {
+public:
+  EasymetricModelStudioCommand() : Command(CommandId::EasymetricModelStudio()) {}
+
+protected:
+  bool onEnabled(Context* context) override
+  {
+    return context && context->isUIAvailable() && context->activeDocument();
+  }
+
+  void onExecute(Context*) override
+  {
+    auto* context = UIContext::instance();
+    auto* view = context ? context->activeView() : nullptr;
+    if (view && view->document())
+      switchStudioSource(view, true);
+  }
+};
+
 class EasymetricStudioCommand : public Command {
 public:
   EasymetricStudioCommand() : Command(CommandId::EasymetricStudio()) {}
@@ -11625,36 +11696,12 @@ protected:
       return;
 
     if (docView->isMultiPane()) {
-      if (auto* multiPane = dynamic_cast<EasymetricMultiPaneView*>(docView->multiPaneLayout())) {
-        multiPane->syncAllLinkedCels();
-        // Close the floating Preview & Fields window, stop the
-        // polling timer and restore symmetry/mask now: the view's
-        // deferred deletion never completes while its timer runs
-        // (see prepareForExit).
-        multiPane->prepareForExit();
-      }
-      docView->exitMultiPaneMode();
+      closeStudio(docView);
       if (auto* sb = StatusBar::instance())
-        sb->showTip(1200, "Easymetric 6-Surface Studio: Switched to standard view");
+        sb->showTip(1200, "Easymetric Studio: Switched to standard view");
     }
-    else {
-      setupSixSurfacesOnDoc(docView->document(), true);
-      // A file made before 2026-11-18 (objects with their own size and
-      // offset) becomes one shared model size, the model looking the same.
-      const std::array<int, 3> unified = unifyObjectsOnDoc(docView->document());
-      auto* multiPane = new EasymetricMultiPaneView(docView);
-      std::vector<Editor*> editors = multiPane->surfaceEditors();
-      docView->enterMultiPaneMode(multiPane, editors);
-      multiPane->initLayersAndFraming();
-      if (auto* sb = StatusBar::instance()) {
-        if (unified[0] > 0)
-          sb->showTip(4000,
-                      fmt::format("Objects now share one {} x {} x {} model space (undo to revert)",
-                                  unified[0], unified[1], unified[2]));
-        else
-          sb->showTip(1500, "Easymetric 6-Surface Studio: 4-Column Workspace Grid Active");
-      }
-    }
+    else
+      switchStudioSource(docView, easymetric::hasEmbeddedModel(*doc->sprite()));
   }
 
 private:
@@ -11688,6 +11735,11 @@ std::string easymetric_face_of_editor(Editor* editor)
   auto* mp = dynamic_cast<EasymetricMultiPaneView*>(view->multiPaneLayout());
   const int f = mp ? mp->faceOfEditor(editor) : -1;
   return f >= 0 ? std::string(kFaceSpecs[f].sliceName) : std::string();
+}
+
+Command* CommandFactory::createEasymetricModelStudioCommand()
+{
+  return new EasymetricModelStudioCommand;
 }
 
 Command* CommandFactory::createEasymetricStudioCommand()
