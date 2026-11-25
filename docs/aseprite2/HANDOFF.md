@@ -558,7 +558,10 @@ powershell -File tools\start-aseprite2.ps1
   139/139 tests passed. The older Easymetric refactor branch remains separate:
   its split of `cmd_easymetric.cpp` predates shared objects and GLB Model Studio
   and requires a deliberate port; a direct merge would discard newer behavior.
-  No production deploy, push, install, or full Aseprite regression suite was done.
+  No production deploy, install, or full Aseprite regression suite was done.
+  Publishing to `origin/Aseprite-2.0` waited on Git Credential Manager without
+  completing, so the push was canceled; the local branch remains ahead of origin.
+  The recovery stash and local Wrangler cache/scratch preview images were retained.
 
 - 2026-11-25 — Codex: Integrated Easymetric GLB Model Studio into `Aseprite-2.0`.
   Kept shared objects, legacy model-size migration, the viewport, and Six Surfaces exit cleanup.
