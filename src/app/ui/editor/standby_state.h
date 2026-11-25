@@ -14,6 +14,8 @@
 #include "app/ui/editor/handle_type.h"
 #include "app/ui/editor/state_with_wheel_behavior.h"
 #include "doc/algorithm/flip_type.h"
+#include "doc/frame.h"
+#include "doc/object_id.h"
 #include "obs/connection.h"
 
 namespace app {
@@ -100,6 +102,12 @@ private:
   bool overSelectionEdges(Editor* editor, const gfx::Point& mouseScreenPos) const;
   void selectTile(Editor* editor);
 
+  enum class SmartHandle { None, Move, Scale, Rotate };
+  static gfx::Rect smartHandleBounds(Editor* editor, SmartHandle handle);
+  SmartHandle m_smartHandle = SmartHandle::None;
+  doc::ObjectId m_smartLayer = doc::NullId;
+  doc::frame_t m_smartFrame = 0;
+  gfx::PointF m_smartStart;
   Decorator* m_decorator;
   obs::scoped_connection m_pivotVisConn;
   obs::scoped_connection m_pivotPosConn;

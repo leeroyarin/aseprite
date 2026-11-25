@@ -14,6 +14,10 @@
 #include "app/app.h"
 #include "app/app_menus.h"
 #include "app/color_picker.h"
+#include "app/cmd/set_user_data.h"
+#include "app/console.h"
+#include "app/context_access.h"
+#include "app/tx.h"
 #include "app/commands/cmd_eyedropper.h"
 #include "app/commands/commands.h"
 #include "app/commands/params.h"
@@ -56,7 +60,9 @@
 #include "app/util/tile_flags_utils.h"
 #include "base/pi.h"
 #include "base/vector2d.h"
+#include "doc/cel.h"
 #include "doc/grid.h"
+#include "doc/layer_smart_object.h"
 #include "doc/layer.h"
 #include "doc/layer_tilemap.h"
 #include "doc/mask.h"
@@ -149,6 +155,26 @@ void StandbyState::onActiveToolChange(Editor* editor, tools::Tool* tool)
   }
 }
 
+gfx::Rect StandbyState::smartHandleBounds(Editor* editor, SmartHandle handle)
+{
+  const auto* layer = editor->layer();
+  if (!editor->isActive() || isEasymetricPanelEditor(editor) || !layer ||
+      !layer->isSmartObject() || !layer->isEditable() || editor->document()->isReadOnly() ||
+      (!editor->getCurrentEditorInk() || !editor->getCurrentEditorInk()->isCelMovement()))
+    return {};
+  const auto* cel = static_cast<const doc::LayerSmartObject*>(layer)->cel(editor->frame());
+  if (!cel)
+    return {};
+  const auto bounds = editor->editorToScreen(cel->bounds());
+  if (handle == SmartHandle::Move)
+    return bounds;
+  const int size = 9 * guiscale();
+  const auto point = handle == SmartHandle::Rotate ?
+    gfx::Point(bounds.center().x, bounds.y - size * 2) :
+    gfx::Point(bounds.x + bounds.w, bounds.y + bounds.h);
+  return gfx::Rect(point.x - size / 2, point.y - size / 2, size, size);
+}
+
 bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
 {
   if (editor->hasCapture())
@@ -195,6 +221,19 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
   // Start scroll loop
   if (editor->checkForScroll(msg) || editor->checkForZoom(msg))
     return true;
+
+  if (layer && msg->left()) {
+    for (auto handle : { SmartHandle::Rotate, SmartHandle::Scale, SmartHandle::Move }) {
+      if (smartHandleBounds(editor, handle).contains(msg->position())) {
+        m_smartHandle = handle;
+        m_smartLayer = layer->id();
+        m_smartFrame = editor->frame();
+        m_smartStart = editor->screenToEditorF(msg->position());
+        editor->captureMouse();
+        return true;
+      }
+    }
+  }
 
   // Move cel X,Y coordinates
   if (clickedInk->isCelMovement()) {
@@ -452,6 +491,52 @@ bool StandbyState::onMouseDown(Editor* editor, MouseMessage* msg)
 
 bool StandbyState::onMouseUp(Editor* editor, MouseMessage* msg)
 {
+  if (m_smartHandle != SmartHandle::None) {
+    const auto handle = m_smartHandle;
+    m_smartHandle = SmartHandle::None;
+    auto* layer = editor->layer();
+    if (layer && layer->id() == m_smartLayer && editor->frame() == m_smartFrame) {
+      auto* smart = static_cast<doc::LayerSmartObject*>(layer);
+      auto transform = smart->transformForFrame(m_smartFrame);
+      const auto current = editor->screenToEditorF(msg->position());
+      const auto offset = gfx::PointF(smart->sourceSize().w * smart->pivot().x,
+                                      smart->sourceSize().h * smart->pivot().y);
+      const auto pivot = transform.position + offset;
+      const auto before = m_smartStart - pivot;
+      const auto after = current - pivot;
+      if (handle == SmartHandle::Move) {
+        transform.position += current - m_smartStart;
+      }
+      else if (handle == SmartHandle::Rotate) {
+        transform.angle += (std::atan2(after.y, after.x) -
+                            std::atan2(before.y, before.x)) * (180.0 / 3.141592653589793);
+      }
+      else {
+        const double initial = std::hypot(before.x, before.y);
+        if (initial > 0.001) {
+          const double ratio = std::clamp(std::hypot(after.x, after.y) / initial, 0.05, 16.0);
+          transform.scale.x = std::copysign(
+            std::clamp(std::abs(transform.scale.x) * ratio, 0.01, 64.0), transform.scale.x);
+          transform.scale.y = std::copysign(
+            std::clamp(std::abs(transform.scale.y) * ratio, 0.01, 64.0), transform.scale.y);
+        }
+      }
+      if (current != m_smartStart) {
+        try {
+          ContextWriter writer(UIContext::instance());
+          Tx tx(writer, "Transform Smart Object Frame");
+          auto data = smart->userData();
+          smart->writeFrameTransform(data, m_smartFrame, transform);
+          tx(new cmd::SetUserData(smart, data, editor->document()));
+          tx.commit();
+        }
+        catch (const std::exception& e) {
+          Console::showException(e);
+        }
+      }
+      editor->invalidate();
+    }
+  }
   editor->releaseMouse();
   return true;
 }
@@ -507,6 +592,11 @@ bool StandbyState::onSetCursor(Editor* editor, const gfx::Point& mouseScreenPos)
   tools::Ink* ink = editor->getCurrentEditorInk();
 
   // See if the cursor is in some selection handle.
+  if (smartHandleBounds(editor, SmartHandle::Rotate).contains(mouseScreenPos) ||
+      smartHandleBounds(editor, SmartHandle::Scale).contains(mouseScreenPos)) {
+    editor->showMouseCursor(kMoveCursor);
+    return true;
+  }
   if (m_decorator->onSetCursor(ink, editor, mouseScreenPos))
     return true;
 
@@ -1150,6 +1240,16 @@ void StandbyState::Decorator::postRenderDecorator(EditorPostRender* render)
   if (isEasymetricPanelEditor(editor))
     return;
 
+  if (!smartHandleBounds(editor, SmartHandle::Scale).isEmpty()) {
+    auto* bitmap = skin::SkinTheme::get(editor)->parts.transformationHandle()->bitmap(0);
+    ui::Graphics graphics(editor->display());
+    for (auto handle : { SmartHandle::Rotate, SmartHandle::Scale }) {
+      const auto bounds = smartHandleBounds(editor, handle);
+      graphics.drawRgbaSurface(bitmap, bounds.center().x - bitmap->width() / 2,
+                               bounds.center().y - bitmap->height() / 2);
+    }
+  }
+
   // Draw transformation handles (if the mask is visible and isn't frozen).
   if (editor->isActive() && editor->editorFlags() & Editor::kShowMask &&
       editor->document()->isMaskVisible() && !editor->document()->mask()->isFrozen()) {
@@ -1183,6 +1283,9 @@ void StandbyState::Decorator::getInvalidDecoratoredRegion(Editor* editor, gfx::R
   // handle region to invalidate.
   if (isEasymetricPanelEditor(editor))
     return;
+
+  for (auto handle : { SmartHandle::Rotate, SmartHandle::Scale })
+    region.createUnion(region, gfx::Region(smartHandleBounds(editor, handle)));
 
   Handles handles;
   if (getSymmetryHandles(editor, handles)) {

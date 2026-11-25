@@ -549,6 +549,17 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-25 — Codex (GPT-6): Switched the main checkout to `Aseprite-2.0` and
+  integrated the smart-object/mesh branch plus the pending React Agent Hub Worker
+  portal source. Kept the old checkout's uncommitted work with a recovery stash and
+  reapplied it without conflicts. The Windows MSVC app build completed (286 Ninja
+  steps); `aseprite.exe --version` reports `Aseprite 2.0 2.0-dev`. Smart-object
+  tag tests passed 19/19 headless and 6/6 UI. The combined Worker typecheck and
+  139/139 tests passed. The older Easymetric refactor branch remains separate:
+  its split of `cmd_easymetric.cpp` predates shared objects and GLB Model Studio
+  and requires a deliberate port; a direct merge would discard newer behavior.
+  No production deploy, push, install, or full Aseprite regression suite was done.
+
 - 2026-11-25 — Codex: Integrated Easymetric GLB Model Studio into `Aseprite-2.0`.
   Kept shared objects, legacy model-size migration, the viewport, and Six Surfaces exit cleanup.
   The combined Linux Skia build, five GLB tests, and three rendering goldens passed.
@@ -571,6 +582,12 @@ powershell -File tools\start-aseprite2.ps1
   assertions passed. Windows MSVC build and GUI validation remain pending.
 
 - 2026-11-25 — Codex: Merged `codex/agent-hub-v2-step1` into `Aseprite-2.0` in an isolated worktree. Preserved current Aseprite work and both handoff histories. Agent Hub Worker validation is recorded in its own docs; this merge does not deploy or replace the React frontend.
+
+
+- 2026-11-23 — Codex: added the New animation state dialog (inclusive host range, source tag picker, loop) and per-frame Smart Object editing in Layer Properties and on the main canvas. Fixed a float/double mismatch caught by the UI test. Windows build succeeded and the installed executable hash matched it. Focused checks passed: 19 tag playback, 6 UI including canvas rotation and scale with unchanged neighbors, and 8 existing Smart Object scripting checks. All headless regression suites and render goldens passed.
+
+
+- 2026-11-23 — Codex: implemented Smart Object source-tag state schedules in Layer Properties and Lua (`smartObjectAnimationStates`). Supports exact tag names, one-based host-frame cues, direction/repeat metadata, Hold/Fixed, save/reopen, clone, and undo/redo. A missing source tag after reload shows source frame 1. Timing follows host frames. Built successfully with MSVC and installed to the existing Aseprite 2.0 location. Code graph updated. New pixel-based suite 17/17, UI controls 2/2, existing M4 scripting 8/8, existing eight headless suites and three render goldens passed (exit 0). Added semicolon input support to the UI test harness and widened Layer Properties to fit its controls.
 
 
 - 2026-11-23 — Codex prepared the Easymetric objects, viewport, playback and recorder changes for integration into `Aseprite-2.0`. Instrument artwork is a separate local change.

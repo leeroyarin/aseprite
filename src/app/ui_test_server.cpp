@@ -17,6 +17,7 @@
 #include "app/file/file.h"
 #include "app/script/engine.h"
 #include "app/ui_context.h"
+#include "app/ui/editor/editor.h"
 #include "base/time.h"
 #include "doc/cel.h"
 #include "doc/color.h"
@@ -33,6 +34,7 @@
 #include "ui/cursor_type.h"
 #include "ui/display.h"
 #include "ui/manager.h"
+#include "ui/scale.h"
 #include "ui/system.h"
 #include "ui/timer.h"
 #include "ui/widget.h"
@@ -225,6 +227,7 @@ bool keyFromName(const std::string& rawName, os::KeyScancode& sc, base::codepoin
     if (c == ' ') { sc = os::kKeySpace; uc = ' '; return true; }
     if (c == '-') { sc = os::kKeyMinus; uc = '-'; return true; }
     if (c == '=') { sc = os::kKeyEquals; uc = '='; return true; }
+    if (c == ';') { sc = os::kKeySemicolon; uc = ';'; return true; }
   }
   if (lower.size() >= 2 && lower[0] == 'f') {
     const int f = std::atoi(lower.c_str() + 1);
@@ -625,6 +628,16 @@ private:
       std::string err;
       Json st = Json::parse(easymetric_state_json(UIContext::instance()), err);
       setResult("state", st);
+    }
+    else if (op == "active_cel_screen") {
+      auto* editor = Editor::activeEditor();
+      const auto* layer = editor ? editor->layer() : nullptr;
+      const auto* cel = layer && layer->isImage() ?
+        static_cast<const doc::LayerImage*>(layer)->cel(editor->frame()) : nullptr;
+      if (cel) {
+        setResult("bounds", rectToJson(editor->editorToScreen(cel->bounds())));
+        setResult("scale", ui::guiscale());
+      }
     }
     else if (op == "ui") {
       const bool visibleOnly = !cmd["all"].bool_value();

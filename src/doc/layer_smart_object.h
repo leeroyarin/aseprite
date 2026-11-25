@@ -107,9 +107,23 @@ public:
   Document* sourceDoc() const { return linkedDoc(); }
   void setSourceDoc(Document* doc) { setLinkedDoc(doc); }
 
+  struct FrameTransform {
+    gfx::PointF position;
+    gfx::PointF scale;
+    double angle;
+    bool flipH;
+    bool flipV;
+  };
+  FrameTransform transformForFrame(frame_t frame) const;
+  void writeFrameTransform(UserData& data, frame_t frame, const FrameTransform& transform) const;
+
   // Timeline synchronization & frame mapping
   TimelineMapping timelineMapping() const { return m_timelineMapping; }
   void setTimelineMapping(TimelineMapping mode);
+
+  // One-based host-frame cues, e.g. "1=Idle;25=Attack;41=Idle".
+  const std::string& animationStates() const { return m_animationStates; }
+  bool validateAnimationStates(const std::string& states) const;
 
   frame_t mapTimelineFrame(frame_t hostFrame) const;
   frame_t linkedFrameCount() const;
@@ -148,7 +162,8 @@ public:
   static void clearDetachedDocsCache();
 
 private:
-  void renderTransformedImage(const Image* srcImg, ImageRef& dstImg, gfx::Point& celPos) const;
+  void renderTransformedImage(const Image* srcImg, ImageRef& dstImg, gfx::Point& celPos,
+                              const FrameTransform& transform) const;
   ImageRef compositeSourceFrame(frame_t linkedFrame) const;
 
   std::string m_filepath;
@@ -159,6 +174,7 @@ private:
   bool m_flipV;                 // Vertical flip
   gfx::PointF m_pivot;          // Pivot point normalized (0.0..1.0), default (0.5, 0.5)
   TimelineMapping m_timelineMapping; // Animation timeline mapping mode (Loop, Hold, Fixed)
+  std::string m_animationStates;
   gfx::Size m_sourceSize;       // Linked document canvas size (width, height)
   uint64_t m_lastModifiedTime;  // Timestamp on disk when last loaded/synchronized
   mutable Document* m_linkedDoc;// Detached document pointer (cached, non-owning)

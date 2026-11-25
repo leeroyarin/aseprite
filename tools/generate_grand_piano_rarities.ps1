@@ -119,49 +119,49 @@ for ($oy = 0; $oy -lt $origH; $oy++) {
                 elseif ($ox -lt 54) { $zone = "LID_FLAP" }
                 else { $zone = "LID_MAIN" }
             }
-            elseif ($ox -ge 44 -and $ox -le 49 -and $oy -ge 18 -and $oy -le 39 -and $lum -gt 0.45) {
+            elseif ($ox -ge 44 -and $ox -le 46 -and $oy -ge 16 -and $oy -le 43) {
                 $zone = "PINBLOCK"
             }
-            elseif ($warmth -ge 7 -or ($oy -le 27 -and $ox -le 92 -and $lum -gt 0.09)) {
-                # Distinguish bridge studs / bright strings from soundboard wood
-                if ((($ox -eq 61 -or $ox -eq 62) -and ($oy -eq 29 -or $oy -eq 30)) -or
-                    (($ox -eq 66 -or $ox -eq 67) -and ($oy -eq 28 -or $oy -eq 29)) -or
-                    (($ox -eq 71 -or $ox -eq 72) -and ($oy -eq 27 -or $oy -eq 28)) -or
-                    (($ox -eq 76 -or $ox -eq 77) -and ($oy -eq 26 -or $oy -eq 27)) -or
-                    (($ox -eq 81 -or $ox -eq 82) -and ($oy -eq 25 -or $oy -eq 26)) -or
-                    (($ox -eq 86 -or $ox -eq 87) -and ($oy -eq 24 -or $oy -eq 25))) {
-                    $zone = "BRIDGE_STUD"
-                }
-                elseif ($lum -gt 0.24 -or ($c4.A -gt 40 -and (($ox + $oy) % 3 -eq 0))) {
-                    $zone = "STRINGS"
-                }
-                else {
-                    $zone = "SOUNDBOARD"
-                }
+            elseif ($ox -ge 47 -and $ox -le 50 -and $oy -ge 40 -and $oy -le 44) {
+                $zone = "BRIDGE_STUD"
+            }
+            elseif ($lum -gt 0.32 -and $ox -ge 48 -and $ox -le 92 -and $oy -ge 15 -and $oy -le 44) {
+                $zone = "STRINGS"
+            }
+            elseif ($ox -ge 45 -and $ox -le 94 -and $oy -ge 14 -and $oy -le 46) {
+                $zone = "SOUNDBOARD"
             }
             else {
-                if ($c6.A -gt 40) { $zone = "RIM_HIGHLIGHT" }
-                else { $zone = "RIM" }
+                $zone = "RIM"
             }
         }
-        if ($zone -eq "RIM" -and $c6.A -gt 40) {
-            $zone = "RIM_HIGHLIGHT"
+        else {
+            $zone = "RIM"
         }
 
-        $pixelData += [PSCustomObject]@{
-            OX = $ox; OY = $oy
-            X = $ox + $offX; Y = $oy + $offY
-            R = $cf.R; G = $cf.G; B = $cf.B; A = $cf.A
-            Lum = $lum; Warmth = $warmth
+        $pixelData += [pscustomobject]@{
+            X = $ox + $offX
+            Y = $oy + $offY
+            OX = $ox
+            OY = $oy
+            Lum = $lum
+            A = $cf.A
+            R = $cf.R
+            G = $cf.G
+            B = $cf.B
             Zone = $zone
-            C6A = $c6.A
         }
     }
 }
 
 $gpFlat.Dispose(); $b1.Dispose(); $b2.Dispose(); $b4.Dispose(); $b6.Dispose()
 
-# Define the 16 variation specifications (4 per rarity)
+# Define the 16 refined variation specifications
+# Guidelines:
+# - Common: Baseline concert materials & wood tones
+# - Rare: Added physical elements (brass candlestick sconces, sheet music on stand, metronome, velvet pedal mat)
+# - Epic: Glowing edge lights (soft cyber cyan, magenta neon, golden glow, emerald line) along lid & rim, grounded grand piano silhouette
+# - Legendary: Reddish wood (Rosewood, Mahogany, Padauk, Cherry) with inlaid gold filigree borders, gold pedals, gold hinges, gold soundboard accents
 $variations = @(
     # ================= COMMON (1 - 4) =================
     @{
@@ -191,12 +191,12 @@ $variations = @(
         RimHi = "FBBF24"
         Soundboard = @("451A03", "78350F", "A16207", "CA8A04", "FDE047")
         Strings = @("713F12", "A16207", "EAB308", "FACC15", "FEF9C3")
-        Pinblock = "FEF3C7"; PropStick = "FEF3C7"; Studs = "FDE047"
-        Plaque = @("78350F", "D97706", "FDE047"); Caster = "F59E0B"
-        KeyW = @("F5F5F4", "FFFFFF"); KeyB = @("292524", "57534E")
-        BenchCushion = @("1C1917", "292524", "44403C", "57534E", "78716C")
-        BenchTuft = "FDE68A"; BenchTrim = "F59E0B"
-        ShadowRgb = @(28, 18, 8)
+        Pinblock = "FEF9C3"; PropStick = "F59E0B"; Studs = "FACC15"
+        Plaque = @("713F12", "CA8A04", "FEF08A"); Caster = "F59E0B"
+        KeyW = @("FEFCE8", "FFFFFF"); KeyB = @("292524", "44403C")
+        BenchCushion = @("451A03", "78350F", "B45309", "D97706", "F59E0B")
+        BenchTuft = "FEF08A"; BenchTrim = "FBBF24"
+        ShadowRgb = @(28, 16, 8)
         WoodGrain = $true
     },
     @{
@@ -206,198 +206,210 @@ $variations = @(
         RimHi = "94A3B8"
         Soundboard = @("2A0A10", "450A0A", "7F1D1D", "991B1B", "DC2626")
         Strings = @("64748B", "94A3B8", "CBD5E1", "E2E8F0", "FFFFFF")
-        Pinblock = "E2E8F0"; PropStick = "E2E8F0"; Studs = "EF4444"
-        Plaque = @("334155", "94A3B8", "E2E8F0"); Caster = "94A3B8"
-        KeyW = @("E2E8F0", "F8FAFC"); KeyB = @("0F172A", "334155")
-        BenchCushion = @("450A0A", "7F1D1D", "991B1B", "B91C1C", "EF4444")
-        BenchTuft = "E2E8F0"; BenchTrim = "94A3B8"
-        ShadowRgb = @(12, 16, 28)
+        Pinblock = "E2E8F0"; PropStick = "94A3B8"; Studs = "CBD5E1"
+        Plaque = @("1E293B", "64748B", "CBD5E1"); Caster = "94A3B8"
+        KeyW = @("F1F5F9", "FFFFFF"); KeyB = @("0F172A", "1E293B")
+        BenchCushion = @("450A0A", "7F1D1D", "991B1B", "B91C1C", "DC2626")
+        BenchTuft = "CBD5E1"; BenchTrim = "EF4444"
+        ShadowRgb = @(12, 16, 26)
     },
 
     # ================= RARE (5 - 8) =================
+    # Rare feature: Extra grounded elements (Candlesticks, Sheet Music on Desk, Metronome, Velvet Mat)
     @{
-        Id = 5; Rarity = "Rare"; RarityIdx = 2; VarIdx = 1; Name = "Rare 1 - Cobalt Platinum & Electric Cyan LED"
-        Lid = @("334155", "475569", "94A3B8", "CBD5E1", "F8FAFC")
-        Rim = @("0F172A", "1E293B", "334155", "64748B", "CBD5E1")
-        RimHi = "00E5FF"
-        Soundboard = @("082F49", "0C4A6E", "0369A1", "0284C7", "38BDF8")
-        Strings = @("0284C7", "00B0FF", "00E5FF", "7DD3FC", "FFFFFF")
-        Pinblock = "E0F2FE"; PropStick = "00E5FF"; Studs = "00E5FF"
-        Plaque = @("0369A1", "00E5FF", "FFFFFF"); Caster = "38BDF8"
-        KeyW = @("E0F2FE", "FFFFFF"); KeyB = @("0284C7", "00E5FF")
-        BenchCushion = @("1E293B", "334155", "475569", "64748B", "94A3B8")
-        BenchTuft = "00E5FF"; BenchTrim = "00E5FF"
-        ShadowRgb = @(8, 28, 48)
-        RareMode = "CYAN_LED"
+        Id = 5; Rarity = "Rare"; RarityIdx = 2; VarIdx = 1; Name = "Rare 1 - Studio Walnut with Sheet Music & Metronome"
+        Lid = @("261208", "3D1D0D", "5C2E17", "7A3E20", "9C532D")
+        Rim = @("1A0C05", "261208", "3D1D0D", "5C2E17", "7A3E20")
+        RimHi = "C27845"
+        Soundboard = @("3D1D0D", "5C2E17", "8A4B22", "B56832", "DE8B49")
+        Strings = @("8A4B22", "B56832", "D49755", "F0C58A", "FFF0D4")
+        Pinblock = "F0C58A"; PropStick = "9C532D"; Studs = "D49755"
+        Plaque = @("3D1D0D", "8A4B22", "F0C58A"); Caster = "B56832"
+        KeyW = @("F5F5F4", "FFFFFF"); KeyB = @("1C1917", "292524")
+        BenchCushion = @("1E3A5F", "1D4ED8", "2563EB", "3B82F6", "60A5FA")
+        BenchTuft = "F0C58A"; BenchTrim = "93C5FD"
+        ShadowRgb = @(20, 14, 10)
+        WoodGrain = $true
+        RareItem = "SHEET_MUSIC_AND_METRONOME"
     },
     @{
-        Id = 6; Rarity = "Rare"; RarityIdx = 2; VarIdx = 2; Name = "Rare 2 - Sapphire Midnight & Ice-Blue Neon"
-        Lid = @("0F172A", "1E3A8A", "1D4ED8", "2563EB", "60A5FA")
-        Rim = @("020617", "0F172A", "172554", "1E3A8A", "3B82F6")
-        RimHi = "7DD3FC"
-        Soundboard = @("0F172A", "1E293B", "1E40AF", "0284C7", "38BDF8")
-        Strings = @("38BDF8", "7DD3FC", "BAE6FD", "E0F2FE", "FFFFFF")
-        Pinblock = "BAE6FD"; PropStick = "7DD3FC"; Studs = "38BDF8"
-        Plaque = @("1E40AF", "38BDF8", "E0F2FE"); Caster = "60A5FA"
-        KeyW = @("1E293B", "334155"); KeyB = @("00E5FF", "E0F2FE") # Reversed cyber keys
-        BenchCushion = @("172554", "1E3A8A", "1D4ED8", "2563EB", "60A5FA")
-        BenchTuft = "E0F2FE"; BenchTrim = "38BDF8"
-        ShadowRgb = @(10, 20, 55)
-        RareMode = "SAPPHIRE_ICE"
+        Id = 6; Rarity = "Rare"; RarityIdx = 2; VarIdx = 2; Name = "Rare 2 - Midnight Blue & Brass Candlestick Sconces"
+        Lid = @("0B132B", "1C2541", "2D3A63", "3A506B", "5BC0BE")
+        Rim = @("070B18", "0B132B", "1C2541", "2D3A63", "3A506B")
+        RimHi = "5BC0BE"
+        Soundboard = @("0B132B", "1C2541", "2E4057", "4A6572", "8EADC1")
+        Strings = @("4A6572", "7292A6", "9EBCC9", "C7DCDE", "FFFFFF")
+        Pinblock = "C7DCDE"; PropStick = "5BC0BE"; Studs = "FBBF24"
+        Plaque = @("1C2541", "3A506B", "5BC0BE"); Caster = "FBBF24"
+        KeyW = @("F0F4F8", "FFFFFF"); KeyB = @("0B132B", "1C2541")
+        BenchCushion = @("1C2541", "2D3A63", "3A506B", "4E6785", "6F8695")
+        BenchTuft = "FBBF24"; BenchTrim = "5BC0BE"
+        ShadowRgb = @(10, 16, 32)
+        RareItem = "BRASS_CANDLESTICKS"
     },
     @{
-        Id = 7; Rarity = "Rare"; RarityIdx = 2; VarIdx = 3; Name = "Rare 3 - Cyber Titanium & Emerald Matrix"
-        Lid = @("1E293B", "334155", "475569", "94A3B8", "E2E8F0")
-        Rim = @("022C22", "064E3B", "065F46", "047857", "10B981")
+        Id = 7; Rarity = "Rare"; RarityIdx = 2; VarIdx = 3; Name = "Rare 3 - Forest Emerald & Gold Lyre Pedals"
+        Lid = @("06281E", "0D3D2E", "165B45", "1F7A5E", "2CA580")
+        Rim = @("031812", "06281E", "0D3D2E", "165B45", "1F7A5E")
         RimHi = "34D399"
-        Soundboard = @("022C22", "064E3B", "047857", "059669", "10B981")
-        Strings = @("059669", "10B981", "34D399", "6EE7B7", "ECFDF5")
-        Pinblock = "A7F3D0"; PropStick = "34D399"; Studs = "6EE7B7"
-        Plaque = @("065F46", "10B981", "A7F3D0"); Caster = "10B981"
-        KeyW = @("ECFDF5", "FFFFFF"); KeyB = @("064E3B", "10B981")
-        BenchCushion = @("064E3B", "065F46", "047857", "059669", "34D399")
-        BenchTuft = "A7F3D0"; BenchTrim = "34D399"
-        ShadowRgb = @(6, 36, 28)
-        RareMode = "EMERALD_MATRIX"
+        Soundboard = @("3B200C", "5C3214", "85491E", "B3662C", "D98A44")
+        Strings = @("85491E", "B3662C", "D49755", "F5C887", "FFF2D6")
+        Pinblock = "F5C887"; PropStick = "D49755"; Studs = "FBBF24"
+        Plaque = @("0D3D2E", "1F7A5E", "34D399"); Caster = "FBBF24"
+        KeyW = @("F0FDF4", "FFFFFF"); KeyB = @("06281E", "0D3D2E")
+        BenchCushion = @("06281E", "0D3D2E", "165B45", "1F7A5E", "2CA580")
+        BenchTuft = "FBBF24"; BenchTrim = "34D399"
+        ShadowRgb = @(8, 26, 20)
+        RareItem = "EMERALD_VELVET_MAT"
     },
     @{
-        Id = 8; Rarity = "Rare"; RarityIdx = 2; VarIdx = 4; Name = "Rare 4 - Frosted Pearl White & Crystal Cyan"
-        Lid = @("64748B", "94A3B8", "CBD5E1", "F1F5F9", "FFFFFF")
-        Rim = @("475569", "64748B", "94A3B8", "E2E8F0", "FFFFFF")
-        RimHi = "00E5FF"
-        Soundboard = @("0369A1", "0284C7", "38BDF8", "7DD3FC", "E0F2FE")
-        Strings = @("0284C7", "38BDF8", "BAE6FD", "F0F9FF", "FFFFFF")
-        Pinblock = "FFFFFF"; PropStick = "FFFFFF"; Studs = "00E5FF"
-        Plaque = @("0284C7", "38BDF8", "FFFFFF"); Caster = "38BDF8"
-        KeyW = @("FFFFFF", "FFFFFF"); KeyB = @("0284C7", "38BDF8")
-        BenchCushion = @("64748B", "94A3B8", "CBD5E1", "F1F5F9", "FFFFFF")
-        BenchTuft = "00E5FF"; BenchTrim = "38BDF8"
-        ShadowRgb = @(14, 34, 52)
-        RareMode = "CRYSTAL_PEARL"
+        Id = 8; Rarity = "Rare"; RarityIdx = 2; VarIdx = 4; Name = "Rare 4 - Pure Ivory Pearl with Ornate Brass Desk"
+        Lid = @("475569", "64748B", "94A3B8", "CBD5E1", "F1F5F9")
+        Rim = @("334155", "475569", "64748B", "94A3B8", "CBD5E1")
+        RimHi = "F8FAFC"
+        Soundboard = @("38BDF8", "0284C7", "0369A1", "075985", "0C4A6E")
+        Strings = @("0284C7", "38BDF8", "7DD3FC", "BAE6FD", "FFFFFF")
+        Pinblock = "FFFFFF"; PropStick = "CBD5E1"; Studs = "FBBF24"
+        Plaque = @("0369A1", "38BDF8", "FFFFFF"); Caster = "FBBF24"
+        KeyW = @("FFFFFF", "FFFFFF"); KeyB = @("1E293B", "334155")
+        BenchCushion = @("1E293B", "334155", "475569", "64748B", "94A3B8")
+        BenchTuft = "FBBF24"; BenchTrim = "FBBF24"
+        ShadowRgb = @(20, 26, 36)
+        RareItem = "IVORY_SCORE_HOLDER"
     },
 
     # ================= EPIC (9 - 12) =================
+    # Epic feature: Glowing lights along edges / lid rim / music desk, tasteful & grounded grand piano
     @{
-        Id = 9; Rarity = "Epic"; RarityIdx = 3; VarIdx = 1; Name = "Epic 1 - Royal Amethyst Velvet & Vintage Gold"
-        Lid = @("3B0764", "581C87", "7E22CE", "9333EA", "C084FC")
-        Rim = @("2E1065", "4C1D95", "6B21A8", "9333EA", "FBBF24")
-        RimHi = "FBBF24"
-        Soundboard = @("451A03", "78350F", "B45309", "D97706", "FBBF24")
-        Strings = @("B45309", "D97706", "F59E0B", "FDE047", "FFFBEB")
+        Id = 9; Rarity = "Epic"; RarityIdx = 3; VarIdx = 1; Name = "Epic 1 - Royal Amethyst with Violet Edge Glow"
+        Lid = @("2A0845", "3D0E63", "5B188F", "7B24BD", "A13EE3")
+        Rim = @("1B052D", "2A0845", "3D0E63", "5B188F", "7B24BD")
+        RimHi = "C084FC"
+        Soundboard = @("291509", "451A03", "78350F", "B45309", "F59E0B")
+        Strings = @("78350F", "B45309", "D97706", "FBBF24", "FEF08A")
         Pinblock = "FEF08A"; PropStick = "FBBF24"; Studs = "C084FC"
-        Plaque = @("78350F", "F59E0B", "FEF08A"); Caster = "FBBF24"
-        KeyW = @("FEFCE8", "FFFFFF"); KeyB = @("581C87", "9333EA")
-        BenchCushion = @("3B0764", "581C87", "7E22CE", "9333EA", "C084FC")
-        BenchTuft = "FBBF24"; BenchTrim = "FBBF24"
-        ShadowRgb = @(32, 12, 48)
-        EpicMode = "AMETHYST_GOLD"
+        Plaque = @("3D0E63", "7B24BD", "C084FC"); Caster = "FBBF24"
+        KeyW = @("FAF5FF", "FFFFFF"); KeyB = @("2A0845", "3D0E63")
+        BenchCushion = @("2A0845", "3D0E63", "5B188F", "7B24BD", "A13EE3")
+        BenchTuft = "FBBF24"; BenchTrim = "C084FC"
+        ShadowRgb = @(22, 8, 36)
+        GlowColor = "C084FC"
+        GlowHi = "E879F9"
     },
     @{
-        Id = 10; Rarity = "Epic"; RarityIdx = 3; VarIdx = 2; Name = "Epic 2 - Imperial Crimson Ruby & Baroque Gold"
-        Lid = @("450A0A", "7F1D1D", "991B1B", "B91C1C", "EF4444")
-        Rim = @("2A0404", "450A0A", "7F1D1D", "B91C1C", "FBBF24")
-        RimHi = "FDE047"
-        Soundboard = @("451A03", "78350F", "B45309", "F59E0B", "FEF08A")
-        Strings = @("B45309", "F59E0B", "FBBF24", "FEF08A", "FFFFFF")
-        Pinblock = "FEF08A"; PropStick = "FDE047"; Studs = "EF4444"
-        Plaque = @("78350F", "FBBF24", "FEF08A"); Caster = "FBBF24"
-        KeyW = @("FFFBEB", "FFFFFF"); KeyB = @("7F1D1D", "DC2626")
-        BenchCushion = @("450A0A", "7F1D1D", "991B1B", "DC2626", "F87171")
-        BenchTuft = "FDE047"; BenchTrim = "FBBF24"
-        ShadowRgb = @(42, 10, 14)
-        EpicMode = "CRIMSON_BAROQUE"
+        Id = 10; Rarity = "Epic"; RarityIdx = 3; VarIdx = 2; Name = "Epic 2 - Obsidian Black with Amber Gold Edge Glow"
+        Lid = @("111116", "1C1C24", "2E2E3A", "454555", "626275")
+        Rim = @("0A0A0D", "111116", "1C1C24", "2E2E3A", "454555")
+        RimHi = "F59E0B"
+        Soundboard = @("2A0E07", "451A03", "78350F", "A16207", "D97706")
+        Strings = @("78350F", "A16207", "D97706", "FBBF24", "FEF08A")
+        Pinblock = "FEF08A"; PropStick = "FBBF24"; Studs = "F59E0B"
+        Plaque = @("1C1C24", "454555", "FBBF24"); Caster = "FBBF24"
+        KeyW = @("F5F5F4", "FFFFFF"); KeyB = @("111116", "1C1C24")
+        BenchCushion = @("450A0A", "7F1D1D", "991B1B", "B91C1C", "DC2626")
+        BenchTuft = "FBBF24"; BenchTrim = "F59E0B"
+        ShadowRgb = @(12, 12, 16)
+        GlowColor = "F59E0B"
+        GlowHi = "FDE047"
     },
     @{
-        Id = 11; Rarity = "Epic"; RarityIdx = 3; VarIdx = 3; Name = "Epic 3 - Arcane Nightshade & Magenta Runes"
-        Lid = @("1E1B4B", "2E1065", "4C1D95", "6D28D9", "A855F7")
-        Rim = @("0F0728", "1E1B4B", "3B0764", "581C87", "F59E0B")
-        RimHi = "E879F9"
-        Soundboard = @("2E1065", "4C1D95", "701A75", "A21CAF", "E879F9")
-        Strings = @("A21CAF", "D946EF", "E879F9", "F5D0FE", "FFFFFF")
-        Pinblock = "F5D0FE"; PropStick = "FBBF24"; Studs = "FDE047"
-        Plaque = @("581C87", "E879F9", "FEF08A"); Caster = "F59E0B"
-        KeyW = @("2E1065", "4C1D95"); KeyB = @("FBBF24", "FEF08A") # Arcane dark keys with gold sharps
-        BenchCushion = @("1E1B4B", "3B0764", "581C87", "7E22CE", "D946EF")
-        BenchTuft = "FDE047"; BenchTrim = "E879F9"
-        ShadowRgb = @(24, 10, 44)
-        EpicMode = "ARCANE_RUNES"
+        Id = 11; Rarity = "Epic"; RarityIdx = 3; VarIdx = 3; Name = "Epic 3 - Deep Sapphire with Ice-Cyan Edge Glow"
+        Lid = @("0A1733", "122552", "1C3B7E", "2854AC", "3B73DC")
+        Rim = @("060F21", "0A1733", "122552", "1C3B7E", "2854AC")
+        RimHi = "38BDF8"
+        Soundboard = @("0A1733", "122552", "1C3B7E", "0284C7", "38BDF8")
+        Strings = @("0284C7", "38BDF8", "7DD3FC", "BAE6FD", "FFFFFF")
+        Pinblock = "BAE6FD"; PropStick = "38BDF8"; Studs = "7DD3FC"
+        Plaque = @("122552", "1C3B7E", "38BDF8"); Caster = "38BDF8"
+        KeyW = @("F0F9FF", "FFFFFF"); KeyB = @("0A1733", "122552")
+        BenchCushion = @("0A1733", "122552", "1C3B7E", "2854AC", "3B73DC")
+        BenchTuft = "7DD3FC"; BenchTrim = "38BDF8"
+        ShadowRgb = @(8, 16, 38)
+        GlowColor = "00E5FF"
+        GlowHi = "7DD3FC"
     },
     @{
-        Id = 12; Rarity = "Epic"; RarityIdx = 3; VarIdx = 4; Name = "Epic 4 - Baroque Sunburst Gold & Amethyst Core"
-        Lid = @("78350F", "B45309", "D97706", "FBBF24", "FEF08A")
-        Rim = @("451A03", "78350F", "B45309", "F59E0B", "FEF08A")
-        RimHi = "FFFBEB"
-        Soundboard = @("2E1065", "4C1D95", "6B21A8", "9333EA", "C084FC")
-        Strings = @("9333EA", "C084FC", "FBBF24", "FEF08A", "FFFFFF")
-        Pinblock = "FEF08A"; PropStick = "FEF08A"; Studs = "FDE047"
-        Plaque = @("4C1D95", "9333EA", "FEF08A"); Caster = "FEF08A"
-        KeyW = @("FEF08A", "FFFBEB"); KeyB = @("581C87", "9333EA")
-        BenchCushion = @("3B0764", "581C87", "7E22CE", "9333EA", "C084FC")
-        BenchTuft = "FEF08A"; BenchTrim = "FBBF24"
-        ShadowRgb = @(44, 24, 8)
-        EpicMode = "GILDED_AMETHYST"
+        Id = 12; Rarity = "Epic"; RarityIdx = 3; VarIdx = 4; Name = "Epic 4 - Cyber Jade with Neon Emerald Edge Glow"
+        Lid = @("07241A", "0E382A", "18543F", "257559", "349C77")
+        Rim = @("041711", "07241A", "0E382A", "18543F", "257559")
+        RimHi = "34D399"
+        Soundboard = @("07241A", "0E382A", "18543F", "059669", "10B981")
+        Strings = @("059669", "10B981", "34D399", "6EE7B7", "ECFDF5")
+        Pinblock = "A7F3D0"; PropStick = "34D399"; Studs = "6EE7B7"
+        Plaque = @("0E382A", "18543F", "34D399"); Caster = "10B981"
+        KeyW = @("ECFDF5", "FFFFFF"); KeyB = @("07241A", "0E382A")
+        BenchCushion = @("07241A", "0E382A", "18543F", "257559", "349C77")
+        BenchTuft = "6EE7B7"; BenchTrim = "34D399"
+        ShadowRgb = @(6, 24, 18)
+        GlowColor = "10B981"
+        GlowHi = "6EE7B7"
     },
 
     # ================= LEGENDARY (13 - 16) =================
+    # Legendary rule: Reddish wood (Rosewood, Mahogany, Padauk, Cherry) with inlaid gold filigree & gold accents
     @{
-        Id = 13; Rarity = "Legendary"; RarityIdx = 4; VarIdx = 1; Name = "Legendary 1 - Celestial Seraphim Wings & Ruby Core"
-        Lid = @("78350F", "B45309", "F59E0B", "FDE047", "FFFBEB")
-        Rim = @("451A03", "78350F", "B45309", "F59E0B", "FEF08A")
-        RimHi = "FFFFFF"
-        Soundboard = @("451A03", "78350F", "D97706", "F59E0B", "FEF08A")
-        Strings = @("D97706", "F59E0B", "FDE047", "FEF08A", "FFFFFF")
-        Pinblock = "FFFFFF"; PropStick = "FFFFFF"; Studs = "EF4444"
-        Plaque = @("991B1B", "EF4444", "FEF08A"); Caster = "FEF08A"
-        KeyW = @("FFFBEB", "FFFFFF"); KeyB = @("B45309", "F59E0B")
-        BenchCushion = @("7F1D1D", "991B1B", "DC2626", "EF4444", "FCA5A5")
-        BenchTuft = "FEF08A"; BenchTrim = "FEF08A"
-        ShadowRgb = @(120, 60, 10)
-        LegendaryMode = "SERAPHIM"
+        Id = 13; Rarity = "Legendary"; RarityIdx = 4; VarIdx = 1; Name = "Legendary 1 - Imperial Rosewood & Inlaid 24K Gold"
+        Lid = @("3B0A0A", "5C1010", "851A1A", "B02525", "D93838") # Deep rich rosewood
+        Rim = @("240606", "3B0A0A", "5C1010", "851A1A", "B02525")
+        RimHi = "FEF08A" # Polished gold rim highlight
+        Soundboard = @("3B1207", "5C1D0C", "852E14", "B3421E", "DE5C2E") # Warm natural spruce with amber undertone
+        Strings = @("852E14", "B45309", "D97706", "FBBF24", "FEF08A") # Radiant gold strings
+        Pinblock = "FEF08A"; PropStick = "FBBF24"; Studs = "FEF08A"
+        Plaque = @("5C1010", "FBBF24", "FEF08A"); Caster = "FBBF24"
+        KeyW = @("FFFBEB", "FFFFFF"); KeyB = @("240606", "3B0A0A")
+        BenchCushion = @("3B0A0A", "5C1010", "851A1A", "B02525", "D93838")
+        BenchTuft = "FEF08A"; BenchTrim = "FBBF24"
+        ShadowRgb = @(32, 8, 8)
+        WoodGrain = $true
+        LegendaryStyle = "ROSEWOOD_GOLD"
     },
     @{
-        Id = 14; Rarity = "Legendary"; RarityIdx = 4; VarIdx = 2; Name = "Legendary 2 - Solar Phoenix Flame & Sunburst Crest"
-        Lid = @("7F1D1D", "B91C1C", "EA580C", "F59E0B", "FEF08A")
-        Rim = @("450A0A", "7F1D1D", "C2410C", "F59E0B", "FEF08A")
+        Id = 14; Rarity = "Legendary"; RarityIdx = 4; VarIdx = 2; Name = "Legendary 2 - Royal Crimson Mahogany & Baroque Gold Filigree"
+        Lid = @("450707", "6E0D0D", "9C1616", "CF2121", "F03A3A") # Crimson mahogany
+        Rim = @("2B0404", "450707", "6E0D0D", "9C1616", "CF2121")
         RimHi = "FEF08A"
-        Soundboard = @("7C2D12", "C2410C", "EA580C", "F97316", "FDE047")
-        Strings = @("F97316", "FB923C", "FDE047", "FEF08A", "FFFFFF")
-        Pinblock = "FEF08A"; PropStick = "FEF08A"; Studs = "FFFFFF"
-        Plaque = @("7C2D12", "F97316", "FEF08A"); Caster = "FDE047"
-        KeyW = @("FEF08A", "FFFFFF"); KeyB = @("991B1B", "EA580C")
-        BenchCushion = @("7C2D12", "9A3412", "EA580C", "F97316", "FDE047")
-        BenchTuft = "FFFFFF"; BenchTrim = "FEF08A"
-        ShadowRgb = @(135, 45, 12)
-        LegendaryMode = "PHOENIX"
-    },
-    @{
-        Id = 15; Rarity = "Legendary"; RarityIdx = 4; VarIdx = 3; Name = "Legendary 3 - Astral Archangel & Sapphire Halo"
-        Lid = @("94A3B8", "CBD5E1", "FEF08A", "FFFBEB", "FFFFFF")
-        Rim = @("78350F", "B45309", "F59E0B", "FEF08A", "FFFFFF")
-        RimHi = "38BDF8"
-        Soundboard = @("0F172A", "1E3A8A", "0284C7", "38BDF8", "E0F2FE")
-        Strings = @("38BDF8", "7DD3FC", "FEF08A", "FFFBEB", "FFFFFF")
-        Pinblock = "FFFFFF"; PropStick = "38BDF8"; Studs = "FEF08A"
-        Plaque = @("0284C7", "38BDF8", "FEF08A"); Caster = "FEF08A"
-        KeyW = @("FFFFFF", "FFFFFF"); KeyB = @("0284C7", "38BDF8")
-        BenchCushion = @("0369A1", "0284C7", "38BDF8", "BAE6FD", "FFFFFF")
+        Soundboard = @("451A03", "78350F", "B45309", "F59E0B", "FEF08A")
+        Strings = @("B45309", "D97706", "FBBF24", "FEF08A", "FFFFFF")
+        Pinblock = "FEF08A"; PropStick = "FEF08A"; Studs = "FEF08A"
+        Plaque = @("6E0D0D", "FBBF24", "FEF08A"); Caster = "FEF08A"
+        KeyW = @("FEFCE8", "FFFFFF"); KeyB = @("2B0404", "450707")
+        BenchCushion = @("450707", "6E0D0D", "9C1616", "CF2121", "F03A3A")
         BenchTuft = "FEF08A"; BenchTrim = "FEF08A"
-        ShadowRgb = @(30, 80, 140)
-        LegendaryMode = "ARCHANGEL"
+        ShadowRgb = @(36, 6, 6)
+        WoodGrain = $true
+        LegendaryStyle = "MAHOGANY_BAROQUE"
     },
     @{
-        Id = 16; Rarity = "Legendary"; RarityIdx = 4; VarIdx = 4; Name = "Legendary 4 - Sovereign Dragon Gold & Emerald Jade"
-        Lid = @("451A03", "78350F", "B45309", "F59E0B", "FEF08A")
-        Rim = @("064E3B", "047857", "B45309", "F59E0B", "FEF08A")
-        RimHi = "34D399"
-        Soundboard = @("022C22", "064E3B", "047857", "10B981", "6EE7B7")
+        Id = 15; Rarity = "Legendary"; RarityIdx = 4; VarIdx = 3; Name = "Legendary 3 - Antique Padauk & Celestial Gold Inlay"
+        Lid = @("421206", "691E0C", "942E15", "C24121", "E85C35") # Vibrant African Padauk reddish wood
+        Rim = @("2B0A03", "421206", "691E0C", "942E15", "C24121")
+        RimHi = "FEF08A"
+        Soundboard = @("0F172A", "1E293B", "1E40AF", "0284C7", "38BDF8") # Royal lapis lazuli soundboard contrast
+        Strings = @("D97706", "F59E0B", "FBBF24", "FEF08A", "FFFFFF")
+        Pinblock = "FEF08A"; PropStick = "FBBF24"; Studs = "FEF08A"
+        Plaque = @("691E0C", "FBBF24", "FEF08A"); Caster = "FBBF24"
+        KeyW = @("FFFBEB", "FFFFFF"); KeyB = @("2B0A03", "421206")
+        BenchCushion = @("1E3A8A", "1D4ED8", "2563EB", "3B82F6", "60A5FA")
+        BenchTuft = "FEF08A"; BenchTrim = "FBBF24"
+        ShadowRgb = @(34, 10, 6)
+        WoodGrain = $true
+        LegendaryStyle = "PADAUK_LAPIS"
+    },
+    @{
+        Id = 16; Rarity = "Legendary"; RarityIdx = 4; VarIdx = 4; Name = "Legendary 4 - Imperial Cherrywood & Jade Gold Emblem"
+        Lid = @("3B0D14", "5C1521", "852132", "B33045", "D9485F") # Dark cherry red wood
+        Rim = @("24070C", "3B0D14", "5C1521", "852132", "B33045")
+        RimHi = "FEF08A"
+        Soundboard = @("064E3B", "047857", "059669", "10B981", "34D399") # Imperial jade soundboard contrast
         Strings = @("10B981", "34D399", "FBBF24", "FEF08A", "FFFFFF")
-        Pinblock = "A7F3D0"; PropStick = "FEF08A"; Studs = "10B981"
-        Plaque = @("064E3B", "10B981", "FEF08A"); Caster = "FEF08A"
-        KeyW = @("ECFDF5", "FFFFFF"); KeyB = @("047857", "10B981")
-        BenchCushion = @("064E3B", "047857", "059669", "10B981", "6EE7B7")
-        BenchTuft = "FEF08A"; BenchTrim = "F59E0B"
-        ShadowRgb = @(16, 90, 50)
-        LegendaryMode = "DRAGON"
+        Pinblock = "FEF08A"; PropStick = "FEF08A"; Studs = "FEF08A"
+        Plaque = @("5C1521", "FBBF24", "FEF08A"); Caster = "FEF08A"
+        KeyW = @("ECFDF5", "FFFFFF"); KeyB = @("24070C", "3B0D14")
+        BenchCushion = @("064E3B", "047857", "059669", "10B981", "34D399")
+        BenchTuft = "FEF08A"; BenchTrim = "FEF08A"
+        ShadowRgb = @(30, 8, 12)
+        WoodGrain = $true
+        LegendaryStyle = "CHERRY_JADE"
     }
 )
 
@@ -407,60 +419,201 @@ function SetPx($bmp, [int]$x, [int]$y, [string]$hex, [int]$a = 255) {
     }
 }
 
-# Helper to draw ornate feathered wings above the grand piano lid (x = 46..98, y = 0..15)
-function Draw-Wings($bmp, $outlineHex, $darkHex, $midHex, $lightHex, $tipHex, $gemHex) {
-    # Left/Front Sweeping Wing rising from Lid Hinge (around ox=53..57 -> x=57..61, y=10)
-    $leftWing = @(
-        # Base connection at hinge (x=56..62, y=9..11)
-        @(57,10,$outlineHex), @(58,10,$darkHex), @(59,10,$midHex), @(60,10,$lightHex), @(61,10,$outlineHex),
-        @(55,9,$outlineHex), @(56,9,$midHex), @(57,9,$lightHex), @(58,9,$tipHex), @(59,9,$midHex), @(60,9,$outlineHex),
-        # Mid wing arch sweeping up-left and up-right
-        @(52,8,$outlineHex), @(53,8,$midHex), @(54,8,$lightHex), @(55,8,$tipHex), @(56,8,$lightHex), @(57,8,$midHex), @(58,8,$darkHex), @(59,8,$outlineHex),
-        @(49,7,$outlineHex), @(50,7,$lightHex), @(51,7,$tipHex), @(52,7,$lightHex), @(53,7,$midHex), @(54,7,$darkHex), @(55,7,$midHex), @(56,7,$lightHex), @(57,7,$outlineHex),
-        @(46,6,$outlineHex), @(47,6,$tipHex), @(48,6,$lightHex), @(49,6,$midHex), @(50,6,$darkHex), @(51,6,$outlineHex), @(52,6,$lightHex), @(53,6,$tipHex), @(54,6,$midHex), @(55,6,$outlineHex),
-        @(44,5,$outlineHex), @(45,5,$tipHex), @(46,5,$lightHex), @(47,5,$midHex), @(48,5,$outlineHex), @(50,5,$outlineHex), @(51,5,$tipHex), @(52,5,$lightHex), @(53,5,$darkHex), @(54,5,$outlineHex),
-        @(42,4,$outlineHex), @(43,4,$tipHex), @(44,4,$lightHex), @(45,4,$outlineHex), @(49,4,$outlineHex), @(50,4,$tipHex), @(51,4,$lightHex), @(52,4,$outlineHex),
-        @(41,3,$outlineHex), @(42,3,$tipHex), @(43,3,$outlineHex), @(48,3,$outlineHex), @(49,3,$tipHex), @(50,3,$outlineHex)
-    )
-    # Right/Main Grand Wing sweeping across the long lid (x=66..99, y=1..12)
-    $rightWing = @(
-        # Base attachment along lid top ridge (x=66..88, y=11)
-        @(66,11,$outlineHex), @(67,11,$darkHex), @(68,11,$midHex), @(69,11,$lightHex), @(70,11,$midHex), @(71,11,$darkHex), @(72,11,$outlineHex),
-        @(67,10,$outlineHex), @(68,10,$midHex), @(69,10,$lightHex), @(70,10,$tipHex), @(71,10,$lightHex), @(72,10,$midHex), @(73,10,$darkHex), @(74,10,$outlineHex),
-        # Primary feathers sweeping up & right toward tail (y=2..9)
-        @(69,9,$outlineHex), @(70,9,$midHex), @(71,9,$lightHex), @(72,9,$tipHex), @(73,9,$lightHex), @(74,9,$midHex), @(75,9,$darkHex), @(76,9,$midHex), @(77,9,$lightHex), @(78,9,$outlineHex),
-        @(71,8,$outlineHex), @(72,8,$midHex), @(73,8,$lightHex), @(74,8,$tipHex), @(75,8,$lightHex), @(76,8,$midHex), @(77,8,$darkHex), @(78,8,$midHex), @(79,8,$lightHex), @(80,8,$tipHex), @(81,8,$outlineHex),
-        @(73,7,$outlineHex), @(74,7,$midHex), @(75,7,$lightHex), @(76,7,$tipHex), @(77,7,$lightHex), @(78,7,$midHex), @(79,7,$darkHex), @(80,7,$midHex), @(81,7,$lightHex), @(82,7,$tipHex), @(83,7,$lightHex), @(84,7,$outlineHex),
-        @(76,6,$outlineHex), @(77,6,$midHex), @(78,6,$lightHex), @(79,6,$tipHex), @(80,6,$lightHex), @(81,6,$darkHex), @(82,6,$midHex), @(83,6,$lightHex), @(84,6,$tipHex), @(85,6,$lightHex), @(86,6,$midHex), @(87,6,$outlineHex),
-        @(79,5,$outlineHex), @(80,5,$lightHex), @(81,5,$tipHex), @(82,5,$lightHex), @(83,5,$darkHex), @(84,5,$midHex), @(85,5,$lightHex), @(86,5,$tipHex), @(87,5,$lightHex), @(88,5,$midHex), @(89,5,$outlineHex),
-        @(82,4,$outlineHex), @(83,4,$lightHex), @(84,4,$tipHex), @(85,4,$outlineHex), @(86,4,$outlineHex), @(87,4,$lightHex), @(88,4,$tipHex), @(89,4,$lightHex), @(90,4,$midHex), @(91,4,$outlineHex),
-        @(88,3,$outlineHex), @(89,3,$lightHex), @(90,3,$tipHex), @(91,3,$lightHex), @(92,3,$outlineHex),
-        @(90,2,$outlineHex), @(91,2,$tipHex), @(92,2,$lightHex), @(93,2,$outlineHex),
-        # Secondary lower feather tips along tail (x=88..101, y=7..12)
-        @(89,7,$outlineHex), @(90,7,$lightHex), @(91,7,$tipHex), @(92,7,$lightHex), @(93,7,$outlineHex),
-        @(91,8,$outlineHex), @(92,8,$midHex), @(93,8,$lightHex), @(94,8,$tipHex), @(95,8,$outlineHex),
-        @(93,9,$outlineHex), @(94,9,$midHex), @(95,9,$lightHex), @(96,9,$tipHex), @(97,9,$outlineHex),
-        @(95,10,$outlineHex), @(96,10,$midHex), @(97,10,$lightHex), @(98,10,$tipHex), @(99,10,$outlineHex)
-    )
-    foreach ($p in ($leftWing + $rightWing)) {
-        SetPx $bmp $p[0] $p[1] $p[2]
+# Helper to draw a tasteful Sheet Music booklet on the music desk
+function Draw-SheetMusic($bmp) {
+    # Music desk bounds approx x=32..38, y=18..30
+    # Left page & Right page with delicate score lines
+    $mx = 32 + $offX
+    $my = 18 + $offY
+    # Book backing
+    for ($dy = 0; $dy -le 8; $dy++) {
+        SetPx $bmp ($mx + 0) ($my + $dy) "292524"
+        SetPx $bmp ($mx + 7) ($my + $dy) "292524"
     }
-    # Wing hinge core gem (x=59..60, y=10..11) and tail gem (x=69..70, y=11)
-    SetPx $bmp 59 10 $gemHex; SetPx $bmp 60 10 $tipHex; SetPx $bmp 59 11 $gemHex
-    SetPx $bmp 69 11 $gemHex; SetPx $bmp 70 11 $tipHex
+    # Open paper pages (white/cream)
+    for ($dy = 1; $dy -le 7; $dy++) {
+        for ($dx = 1; $dx -le 6; $dx++) {
+            if ($dx -eq 3 -or $dx -eq 4) {
+                SetPx $bmp ($mx + $dx) ($my + $dy) "D6D3D1" # Center fold shadow
+            } else {
+                SetPx $bmp ($mx + $dx) ($my + $dy) "FAFAF9" # Page
+            }
+        }
+    }
+    # Musical notation lines (dark grey 1px dashes)
+    SetPx $bmp ($mx + 1) ($my + 2) "44403C"; SetPx $bmp ($mx + 2) ($my + 2) "44403C"
+    SetPx $bmp ($mx + 1) ($my + 4) "44403C"; SetPx $bmp ($mx + 2) ($my + 4) "44403C"
+    SetPx $bmp ($mx + 1) ($my + 6) "44403C"; SetPx $bmp ($mx + 2) ($my + 6) "44403C"
+    SetPx $bmp ($mx + 5) ($my + 2) "44403C"; SetPx $bmp ($mx + 6) ($my + 2) "44403C"
+    SetPx $bmp ($mx + 5) ($my + 4) "44403C"; SetPx $bmp ($mx + 6) ($my + 4) "44403C"
+    SetPx $bmp ($mx + 5) ($my + 6) "44403C"; SetPx $bmp ($mx + 6) ($my + 6) "44403C"
 }
 
-# Helper to draw 4-point sparkle star at (cx, cy)
-function Draw-Sparkle($bmp, [int]$cx, [int]$cy, [string]$coreHex, [string]$rayHex) {
-    SetPx $bmp $cx $cy $coreHex
-    SetPx $bmp ($cx - 1) $cy $rayHex
-    SetPx $bmp ($cx + 1) $cy $rayHex
-    SetPx $bmp $cx ($cy - 1) $rayHex
-    SetPx $bmp $cx ($cy + 1) $rayHex
+# Helper to draw a wooden/brass metronome next to music desk
+function Draw-Metronome($bmp) {
+    # Place on case shelf (ox=40..43, oy=14..20)
+    $mx = 41 + $offX
+    $my = 14 + $offY
+    # Pyramid casing (mahogany)
+    SetPx $bmp ($mx + 1) ($my + 0) "78350F"
+    SetPx $bmp ($mx + 1) ($my + 1) "92400E"
+    SetPx $bmp ($mx + 0) ($my + 2) "78350F"; SetPx $bmp ($mx + 1) ($my + 2) "B45309"; SetPx $bmp ($mx + 2) ($my + 2) "78350F"
+    SetPx $bmp ($mx + 0) ($my + 3) "78350F"; SetPx $bmp ($mx + 1) ($my + 3) "B45309"; SetPx $bmp ($mx + 2) ($my + 3) "78350F"
+    SetPx $bmp ($mx + 0) ($my + 4) "451A03"; SetPx $bmp ($mx + 1) ($my + 4) "78350F"; SetPx $bmp ($mx + 2) ($my + 4) "451A03"
+    # Pendulum arm & weight (brass/gold)
+    SetPx $bmp ($mx + 1) ($my + 1) "FBBF24"
+    SetPx $bmp ($mx + 2) ($my + 0) "FEF08A" # Pendulum tick weight
+}
+
+# Helper to draw twin brass candlestick sconces
+function Draw-CandlestickSconces($bmp) {
+    # Left sconce mounted near keyboard cheek (ox=23, oy=12..17)
+    $lx = 23 + $offX
+    $ly = 13 + $offY
+    # Brass base & stem
+    SetPx $bmp $lx ($ly + 3) "FBBF24"; SetPx $bmp ($lx + 1) ($ly + 3) "D97706"
+    SetPx $bmp $lx ($ly + 2) "FBBF24"
+    SetPx $bmp ($lx - 1) ($ly + 1) "FBBF24"; SetPx $bmp $lx ($ly + 1) "FEF08A"; SetPx $bmp ($lx + 1) ($ly + 1) "FBBF24"
+    # White candle wax
+    SetPx $bmp $lx $ly "F8FAFC"
+    SetPx $bmp $lx ($ly - 1) "F8FAFC"
+    # Warm flame
+    SetPx $bmp $lx ($ly - 2) "F59E0B"
+    SetPx $bmp $lx ($ly - 3) "FEF08A"
+
+    # Right sconce on front case rim (ox=40, oy=10..15)
+    $rx = 40 + $offX
+    $ry = 11 + $offY
+    SetPx $bmp $rx ($ry + 3) "FBBF24"; SetPx $bmp ($rx + 1) ($ry + 3) "D97706"
+    SetPx $bmp $rx ($ry + 2) "FBBF24"
+    SetPx $bmp ($rx - 1) ($ry + 1) "FBBF24"; SetPx $bmp $rx ($ry + 1) "FEF08A"; SetPx $bmp ($rx + 1) ($ry + 1) "FBBF24"
+    SetPx $bmp $rx $ry "F8FAFC"
+    SetPx $bmp $rx ($ry - 1) "F8FAFC"
+    SetPx $bmp $rx ($ry - 2) "F59E0B"
+    SetPx $bmp $rx ($ry - 3) "FEF08A"
+}
+
+# Helper to draw ornate music desk with brass filigree
+function Draw-OrnateDesk($bmp, $colorHex) {
+    # Music desk grid lines with elegant scrollwork notches
+    $dx = 33 + $offX
+    for ($dy = 14; $dy -le 34; $dy += 4) {
+        SetPx $bmp $dx ($dy + $offY) $colorHex
+        SetPx $bmp ($dx + 1) ($dy + $offY) "FEF08A"
+    }
+}
+
+# Helper to draw velvet pedal lyre mat
+function Draw-VelvetPedalMat($bmp, $matColorHex, $fringeHex) {
+    # Floor area beneath pedals (x=36..42, y=63..66)
+    $px = 37 + $offX
+    $py = 63 + $offY
+    for ($dy = 0; $dy -le 2; $dy++) {
+        for ($dx = 0; $dx -le 6; $dx++) {
+            SetPx $bmp ($px + $dx) ($py + $dy) $matColorHex
+        }
+    }
+    # Gold fringe trim
+    for ($dx = 0; $dx -le 6; $dx++) {
+        SetPx $bmp ($px + $dx) ($py + 3) $fringeHex
+    }
+}
+
+# Helper to apply clean glowing edge lights along the rim and lid for Epic
+function Apply-EpicEdgeGlow($bmp, $glowColor, $glowHi) {
+    # 1. Lid lower rim edge line
+    for ($ox = 43; $ox -le 93; $ox++) {
+        $ly = (Get-LidBottomY $ox) + $offY
+        SetPx $bmp ($ox + $offX) $ly $glowColor
+        # Soft accent dots along the contour
+        if (($ox % 3) -eq 0) {
+            SetPx $bmp ($ox + $offX) ($ly - 1) $glowHi
+        }
+    }
+    # 2. Outer S-curve case rim lower molding line
+    for ($ox = 24; $ox -le 94; $ox++) {
+        $botY = -1
+        for ($oy = 53; $oy -ge 20; $oy--) {
+            $pMatch = $bmp.GetPixel($ox + $offX, $oy + $offY)
+            if ($pMatch.A -eq 255) { $botY = $oy; break }
+        }
+        if ($botY -gt 20) {
+            SetPx $bmp ($ox + $offX) ($botY + $offY) $glowColor
+            if (($ox % 4) -eq 0) {
+                SetPx $bmp ($ox + $offX) ($botY + $offY - 1) $glowHi
+            }
+        }
+    }
+    # 3. Soft desk edge line
+    for ($oy = 14; $oy -le 36; $oy++) {
+        SetPx $bmp (32 + $offX) ($oy + $offY) $glowColor
+    }
+}
+
+# Helper to apply inlaid gold filigree & golden hardware for Legendary
+function Apply-LegendaryGoldInlay($bmp) {
+    # 1. Continuous Inlaid Gold Filigree Border along the S-Curve Rim
+    for ($ox = 24; $ox -le 94; $ox++) {
+        $botY = -1
+        for ($oy = 53; $oy -ge 20; $oy--) {
+            $pMatch = $bmp.GetPixel($ox + $offX, $oy + $offY)
+            if ($pMatch.A -eq 255) { $botY = $oy; break }
+        }
+        if ($botY -gt 20) {
+            # Inlaid gold border: 2-pixel fine gold strip with pinstripe highlights
+            SetPx $bmp ($ox + $offX) ($botY + $offY) "D97706"     # Gold shadow
+            SetPx $bmp ($ox + $offX) ($botY + $offY - 1) "FBBF24" # Pure gold
+            SetPx $bmp ($ox + $offX) ($botY + $offY - 2) "FEF08A" # Polished gold highlight
+            # Periodic rosette inlays every 6 pixels
+            if (($ox % 6) -eq 0 -and $ox -ge 40) {
+                SetPx $bmp ($ox + $offX) ($botY + $offY - 3) "FEF08A"
+                SetPx $bmp ($ox + $offX) ($botY + $offY - 4) "F59E0B"
+            }
+        }
+    }
+
+    # 2. Inlaid Gold Border along the Grand Lid Edge
+    for ($ox = 43; $ox -le 94; $ox++) {
+        $ly = (Get-LidBottomY $ox) + $offY
+        SetPx $bmp ($ox + $offX) $ly "D97706"
+        SetPx $bmp ($ox + $offX) ($ly - 1) "FBBF24"
+        if (($ox % 4) -eq 0) {
+            SetPx $bmp ($ox + $offX) ($ly - 2) "FEF08A"
+        }
+    }
+
+    # 3. Gold Inlaid Music Desk Crest & Lyre Border
+    for ($oy = 13; $oy -le 37; $oy++) {
+        SetPx $bmp (32 + $offX) ($oy + $offY) "FBBF24"
+        SetPx $bmp (33 + $offX) ($oy + $offY) "FEF08A"
+    }
+    # Royal gold crown emblem at top of music desk (ox=33..37, oy=11..13)
+    $crownPx = @(
+        @(33,13,"B45309"), @(34,13,"FBBF24"), @(35,13,"FEF08A"), @(36,13,"FBBF24"), @(37,13,"B45309"),
+        @(33,12,"FBBF24"), @(34,12,"FEF08A"), @(35,12,"FEF08A"), @(36,12,"FEF08A"), @(37,12,"FBBF24"),
+        @(33,11,"FEF08A"), @(35,11,"FFFBEB"), @(37,11,"FEF08A")
+    )
+    foreach ($cp in $crownPx) { SetPx $bmp ($cp[0] + $offX) ($cp[1] + $offY) $cp[2] }
+
+    # 4. Polished 24K Gold Pedals & Lyre Posts
+    for ($dx = 38; $dx -le 42; $dx++) {
+        SetPx $bmp ($dx + $offX) (59 + $offY) "FEF08A"
+        SetPx $bmp ($dx + $offX) (60 + $offY) "FBBF24"
+        SetPx $bmp ($dx + $offX) (61 + $offY) "D97706"
+    }
+
+    # 5. Polished Gold Leg Ferrules & Castors
+    for ($dx = 37; $dx -le 42; $dx++) {
+        SetPx $bmp ($dx + $offX) (66 + $offY) "FEF08A"
+        SetPx $bmp ($dx + $offX) (67 + $offY) "FBBF24"
+    }
+    for ($dx = 88; $dx -le 92; $dx++) {
+        SetPx $bmp ($dx + $offX) (40 + $offY) "FEF08A"
+        SetPx $bmp ($dx + $offX) (41 + $offY) "FBBF24"
+    }
 }
 
 $outDirWorking = "I:\Shared drives\Pitch Quest Shared Drive\Working Files\Music Store\Export\Instruments"
-$outDirFinalized = "I:\Shared drives\Pitch Quest Shared Drive\Finalized Files\Instruments"
 $localOutDir = "C:\Users\leero\Source\Repos\aseprite2\ref_instruments\grand_piano"
 New-Item -ItemType Directory -Force -Path $localOutDir | Out-Null
 
@@ -510,7 +663,6 @@ foreach ($v in $variations) {
                     $c = LerpColor (Hex $v.KeyB[0]) (Hex $v.KeyB[1]) ([Math]::Min(1.0, $lum * 2.5)) $a
                 }
                 "PLAQUE" {
-                    # Ornate border + emblem core on plaque
                     if ($ox -eq 39 -or $ox -eq 40) { $c = Hex $v.Plaque[2] $a }
                     elseif ($oy -eq 48 -or $oy -eq 51 -or $ox -eq 35 -or $ox -eq 44) { $c = Hex $v.Plaque[1] $a }
                     else { $c = Hex $v.Plaque[0] $a }
@@ -575,8 +727,6 @@ foreach ($v in $variations) {
                     $c = Hex $v.RimHi $a
                 }
                 default {
-                    # RIM (outer curved case body)
-                    # Add a top bevel highlight & lower trim molding along the S-curve
                     $adjLum = [Math]::Min(1.0, $lum * 3.2)
                     $r = $v.Rim
                     $c = PaletteRamp $r[0] $r[1] $r[2] $r[3] $r[4] $adjLum $a
@@ -585,144 +735,49 @@ foreach ($v in $variations) {
             $bmp.SetPixel($x, $y, $c)
         }
 
-        # Add crisp S-Curve Rim Molding / Accent Line for Rare, Epic, and Legendary (and subtle wood bevel for Common 2-4)
-        for ($ox = 24; $ox -le 94; $ox++) {
-            # Find bottom-most non-shadow pixel of the piano body (excluding legs x=36..43 and x=87..92)
-            $botY = -1
-            $maxSearchY = 53
-            for ($oy = $maxSearchY; $oy -ge 20; $oy--) {
-                $pMatch = $bmp.GetPixel($ox + $offX, $oy + $offY)
-                if ($pMatch.A -eq 255) {
-                    $botY = $oy
-                    break
+        # Subtly accent the lower rim edge for Common & Rare
+        if ($v.RarityIdx -le 2) {
+            for ($ox = 24; $ox -le 94; $ox++) {
+                $botY = -1
+                for ($oy = 53; $oy -ge 20; $oy--) {
+                    $pMatch = $bmp.GetPixel($ox + $offX, $oy + $offY)
+                    if ($pMatch.A -eq 255) { $botY = $oy; break }
                 }
-            }
-            if ($botY -gt 20) {
-                if ($v.RarityIdx -eq 2) {
-                    # Rare: Glowing neon LED strip along the lower rim edge & top lid edge
+                if ($botY -gt 20) {
                     SetPx $bmp ($ox + $offX) ($botY + $offY - 1) $v.RimHi
-                }
-                elseif ($v.RarityIdx -eq 3) {
-                    # Epic: Ornate double baroque gold filigree molding on S-rim (top & bottom border of rim)
-                    SetPx $bmp ($ox + $offX) ($botY + $offY) $v.Rim[3]
-                    SetPx $bmp ($ox + $offX) ($botY + $offY - 1) $v.RimHi
-                    if (($ox % 4) -eq 0) {
-                        SetPx $bmp ($ox + $offX) ($botY + $offY - 3) $v.RimHi
-                    }
-                }
-                elseif ($v.RarityIdx -eq 4) {
-                    # Legendary: Celestial golden armor trim & gem studs along S-rim
-                    SetPx $bmp ($ox + $offX) ($botY + $offY) $v.Lid[1]
-                    SetPx $bmp ($ox + $offX) ($botY + $offY - 1) $v.Lid[3]
-                    SetPx $bmp ($ox + $offX) ($botY + $offY - 2) $v.RimHi
-                    if (($ox % 6) -eq 0 -and $ox -ge 52) {
-                        SetPx $bmp ($ox + $offX) ($botY + $offY - 4) $v.Studs
-                    }
                 }
             }
         }
 
-        # Rarity-specific structural pixel-art details:
-        if ($v.RareMode -eq "CYAN_LED") {
-            # Glowing cyan LED equalizer bars on music desk & lid rim
-            for ($oy = 15; $oy -le 35; $oy += 3) {
-                SetPx $bmp (37 + $offX) ($oy + $offY) "00E5FF"
-                SetPx $bmp (38 + $offX) ($oy + $offY) "7DD3FC"
+        # Apply Rare physical additions
+        if ($v.RarityIdx -eq 2) {
+            if ($v.RareItem -eq "SHEET_MUSIC_AND_METRONOME") {
+                Draw-SheetMusic $bmp
+                Draw-Metronome $bmp
             }
-        }
-        elseif ($v.RareMode -eq "SAPPHIRE_ICE") {
-            # Frost-crystal nodes along lid hinge & rim
-            for ($ox = 44; $ox -le 92; $ox += 6) {
-                $ly = (Get-LidBottomY $ox) + $offY
-                SetPx $bmp ($ox + $offX) $ly "E0F2FE"
-                SetPx $bmp ($ox + $offX + 1) $ly "38BDF8"
+            elseif ($v.RareItem -eq "BRASS_CANDLESTICKS") {
+                Draw-CandlestickSconces $bmp
+                Draw-SheetMusic $bmp
             }
-        }
-        elseif ($v.RareMode -eq "EMERALD_MATRIX") {
-            # Cyber emerald circuit nodes on lid & desk
-            for ($ox = 46; $ox -le 90; $ox += 5) {
-                SetPx $bmp ($ox + $offX) (6 + $offY) "34D399"
-                SetPx $bmp ($ox + $offX + 1) (6 + $offY) "10B981"
+            elseif ($v.RareItem -eq "EMERALD_VELVET_MAT") {
+                Draw-VelvetPedalMat $bmp "064E3B" "FBBF24"
+                Draw-SheetMusic $bmp
             }
-        }
-        elseif ($v.RareMode -eq "CRYSTAL_PEARL") {
-            # Diamond crystal glints on white pearl lid
-            Draw-Sparkle $bmp (64 + $offX) (7 + $offY) "FFFFFF" "38BDF8"
-            Draw-Sparkle $bmp (82 + $offX) (6 + $offY) "FFFFFF" "00E5FF"
+            elseif ($v.RareItem -eq "IVORY_SCORE_HOLDER") {
+                Draw-OrnateDesk $bmp "FBBF24"
+                Draw-Metronome $bmp
+                Draw-SheetMusic $bmp
+            }
         }
 
+        # Apply Epic subtle glowing lights along the edges
         if ($v.RarityIdx -eq 3) {
-            # Epic: Baroque gold lid border & gemstone crown on music desk (x=32..37, y=4..6)
-            for ($ox = 43; $ox -le 93; $ox++) {
-                $ly = (Get-LidBottomY $ox) + $offY
-                SetPx $bmp ($ox + $offX) $ly "FBBF24"
-                if (($ox % 5) -eq 0) { SetPx $bmp ($ox + $offX) ($ly - 1) "FEF08A" }
-            }
-            # Royal Crown Crest at top of Music Desk (ox=32..38, oy=2..4)
-            $crownGem = $(if ($v.EpicMode -eq "CRIMSON_BAROQUE") { "EF4444" } elseif ($v.EpicMode -eq "ARCANE_RUNES") { "E879F9" } else { "9333EA" })
-            $crownPx = @(
-                @(33,4,"B45309"), @(34,4,"FBBF24"), @(35,4,$crownGem), @(36,4,"FBBF24"), @(37,4,"B45309"),
-                @(33,3,"FBBF24"), @(34,3,"FEF08A"), @(35,3,"FBBF24"), @(36,3,"FEF08A"), @(37,3,"FBBF24"),
-                @(33,2,"FEF08A"), @(35,2,"FFFBEB"), @(37,2,"FEF08A")
-            )
-            foreach ($cp in $crownPx) { SetPx $bmp ($cp[0] + $offX) ($cp[1] + $offY) $cp[2] }
-            if ($v.EpicMode -eq "ARCANE_RUNES") {
-                Draw-Sparkle $bmp (62 + $offX) (2 + $offY) "FFFFFF" "E879F9"
-                Draw-Sparkle $bmp (84 + $offX) (1 + $offY) "FEF08A" "C084FC"
-            }
+            Apply-EpicEdgeGlow $bmp $v.GlowColor $v.GlowHi
         }
 
+        # Apply Legendary reddish wood inlaid 24K gold filigree
         if ($v.RarityIdx -eq 4) {
-            # Legendary: Sweeping Wings + Royal Crest + Halo & Sparkle Aura
-            if ($v.LegendaryMode -eq "SERAPHIM") {
-                Draw-Wings $bmp "78350F" "B45309" "F59E0B" "FEF08A" "FFFFFF" "EF4444"
-                # Golden Halo over Music Desk (x=35..41, y=7..9)
-                foreach ($hx in 32..38) { SetPx $bmp ($hx + $offX) (2 + $offY) "FEF08A" }
-                SetPx $bmp (35 + $offX) (1 + $offY) "FFFFFF"
-                Draw-Sparkle $bmp 40 4 "FFFFFF" "FEF08A"
-                Draw-Sparkle $bmp 68 2 "FFFFFF" "FEF08A"
-                Draw-Sparkle $bmp 98 4 "FFFFFF" "FDE047"
-                Draw-Sparkle $bmp 18 32 "FFFFFF" "FEF08A"
-            }
-            elseif ($v.LegendaryMode -eq "PHOENIX") {
-                Draw-Wings $bmp "7F1D1D" "C2410C" "F97316" "FDE047" "FFFFFF" "EF4444"
-                # Solar Phoenix Flame Crest over Music Desk
-                $crest = @(
-                    @(34,3,"EA580C"), @(35,3,"FEF08A"), @(36,3,"EA580C"),
-                    @(33,2,"EF4444"), @(34,2,"FDE047"), @(35,2,"FFFFFF"), @(36,2,"FDE047"), @(37,2,"EF4444"),
-                    @(35,1,"FEF08A"), @(35,0,"FFFFFF")
-                )
-                foreach ($cp in $crest) { SetPx $bmp ($cp[0] + $offX) ($cp[1] + $offY) $cp[2] }
-                Draw-Sparkle $bmp 38 3 "FFFFFF" "F97316"
-                Draw-Sparkle $bmp 65 2 "FFFFFF" "FEF08A"
-                Draw-Sparkle $bmp 96 3 "FEF08A" "EF4444"
-                Draw-Sparkle $bmp 16 33 "FEF08A" "F97316"
-            }
-            elseif ($v.LegendaryMode -eq "ARCHANGEL") {
-                Draw-Wings $bmp "0369A1" "38BDF8" "BAE6FD" "FEF08A" "FFFFFF" "00E5FF"
-                # Levitating Astral Sapphire-Gold Halo
-                foreach ($hx in 31..39) { SetPx $bmp ($hx + $offX) (2 + $offY) "38BDF8" }
-                foreach ($hx in 33..37) { SetPx $bmp ($hx + $offX) (1 + $offY) "FFFFFF" }
-                Draw-Sparkle $bmp 39 3 "FFFFFF" "38BDF8"
-                Draw-Sparkle $bmp 64 2 "FFFFFF" "FEF08A"
-                Draw-Sparkle $bmp 85 1 "FFFFFF" "38BDF8"
-                Draw-Sparkle $bmp 99 5 "FFFFFF" "FEF08A"
-                Draw-Sparkle $bmp 17 32 "FFFFFF" "38BDF8"
-            }
-            elseif ($v.LegendaryMode -eq "DRAGON") {
-                Draw-Wings $bmp "064E3B" "78350F" "D97706" "FDE047" "6EE7B7" "10B981"
-                # Imperial Dragon Horned Emerald Crown
-                $dragonCrown = @(
-                    @(32,3,"78350F"), @(33,3,"F59E0B"), @(34,3,"10B981"), @(35,3,"6EE7B7"), @(36,3,"10B981"), @(37,3,"F59E0B"), @(38,3,"78350F"),
-                    @(31,2,"F59E0B"), @(32,2,"FEF08A"), @(35,2,"FFFFFF"), @(38,2,"FEF08A"), @(39,2,"F59E0B"),
-                    @(31,1,"FEF08A"), @(35,1,"34D399"), @(39,1,"FEF08A")
-                )
-                foreach ($cp in $dragonCrown) { SetPx $bmp ($cp[0] + $offX) ($cp[1] + $offY) $cp[2] }
-                Draw-Sparkle $bmp 40 4 "FFFFFF" "34D399"
-                Draw-Sparkle $bmp 66 2 "FEF08A" "10B981"
-                Draw-Sparkle $bmp 97 4 "FFFFFF" "6EE7B7"
-                Draw-Sparkle $bmp 17 32 "FEF08A" "10B981"
-            }
+            Apply-LegendaryGoldInlay $bmp
         }
     }
 
@@ -730,13 +785,12 @@ foreach ($v in $variations) {
     $bmp.Save("$localOutDir\GrandPiano_Var$id.png", [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Save("$outDirWorking\Grand Piano - Variation $id ($($v.Rarity) $($v.VarIdx)).png", [System.Drawing.Imaging.ImageFormat]::Png)
 
-    # Also save primary 4 rarity tier files (Var 1 = Common 1, Var 5 = Rare 1, Var 9 = Epic 1, Var 13 = Legendary 1)
     if ($v.VarIdx -eq 1) {
         $rNum = $v.RarityIdx
         $bmp.Save("$outDirWorking\Grand Piano$rNum.png", [System.Drawing.Imaging.ImageFormat]::Png)
         $bmp.Save("$localOutDir\Grand Piano$rNum.png", [System.Drawing.Imaging.ImageFormat]::Png)
 
-        # 4x Nearest-Neighbor Preview for primary rarity representative
+        # 4x Nearest-Neighbor Preview
         $p4 = New-Object System.Drawing.Bitmap(($W * 4), ($H * 4))
         for ($sy = 0; $sy -lt $H; $sy++) {
             for ($sx = 0; $sx -lt $W; $sx++) {
@@ -758,7 +812,7 @@ foreach ($v in $variations) {
     $generatedBitmaps += $bmp
 }
 
-# Build 3x Nearest-Neighbor 4x4 Master Grid Preview Sheet (4 Rarities Rows x 4 Variations Columns)
+# Build 3x Nearest-Neighbor 4x4 Master Grid Preview Sheet
 $scale = 3
 $cellW = $W * $scale
 $cellH = $H * $scale
@@ -800,7 +854,7 @@ for ($r = 0; $r -lt 4; $r++) {
     $g.DrawString($rh.Name, $fontTitle, $brushR, 14, ($ry + [int]($cellH / 2) - 18))
     $g.DrawString("Tier $($r + 1) (4 Vars)", $fontSub, $brushWhite, 14, ($ry + [int]($cellH / 2) + 4))
 
-    # Also build a per-rarity 4-variation strip (3x upscaled)
+    # Per-rarity 4-variation strip
     $stripW = 4 * $cellW + 5 * $pad
     $stripH = $cellH + 2 * $pad
     $rStrip = New-Object System.Drawing.Bitmap($stripW, $stripH)
@@ -817,12 +871,10 @@ for ($r = 0; $r -lt 4; $r++) {
         $g.DrawRectangle($penBorder, $cx, $ry, $cellW, $cellH)
         $gr.DrawRectangle($penBorder, $scx, $pad, $cellW, $cellH)
 
-        # Manual pixel-perfect nearest-neighbor blit onto both sheet and rarity strip
         for ($sy = 0; $sy -lt $H; $sy++) {
             for ($sx = 0; $sx -lt $W; $sx++) {
                 $px = $curBmp.GetPixel($sx, $sy)
                 if ($px.A -gt 0) {
-                    # Alpha composite over cell bg
                     $bgC = Hex $rh.Bg
                     $alpha = $px.A / 255.0
                     $outR = [int]([Math]::Round($px.R * $alpha + $bgC.R * (1.0 - $alpha)))

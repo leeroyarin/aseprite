@@ -103,3 +103,30 @@ C++ phases. The existing agent-mesh-hub Worker stays the cloud middleman; agents
 See that folder's PLAN.md and docs/USER-REQUIREMENTS.md for the six gated parts. Part 1 is
 implemented and awaiting review in codex/agent-hub-v2-step1. No merge/deploy/secrets/token
 changes are authorized. The earlier local-server/tunnel architecture is superseded.
+
+## Smart Object tag states (Arin, 2026-11-23)
+
+Smart Object Layer Properties has an Animation states entry and Apply states button.
+A schedule such as `1=Idle;25=Attack;41=Idle` selects source tag names at one-based
+host frames, restarting each tag when its cue begins. A single `1=Idle` selects one tag.
+Loop follows the tag direction and repeat count (0 repeats indefinitely). Finite repetitions
+hold the final cycle frame until the next cue. Hold plays one cycle and holds. Fixed displays
+the selected tag's initial frame. Reverse and both ping-pong directions are supported.
+
+Frame advancement uses host frame timing. Tags are matched by exact names. A missing tag
+after a source rename/reload shows source frame 1 while retaining the cue for repair.
+An empty schedule restores the existing whole-source mapping. Lua/MCP exec_lua exposes
+`layer.smartObjectAnimationStates` with the same string format and undoable changes.
+Schedules persist in Smart Object user data and clone with the layer.
+
+Layer Properties > New animation state also accepts an inclusive first and last host frame,
+a tag from the linked sprite and an explicit Loop option. A loop repeats through the range.
+With Loop off, the tag plays once and holds through the range. Outside explicit ranges the
+layer uses its ordinary source mapping unless a legacy open-ended cue applies. A new state
+with the same start replaces the previous one. Overlapping ranges are rejected.
+
+Choose Transform frame in Layer Properties to edit angle, X/Y scale and flips for that
+frame without selecting timeline cels. In the main editor with the Move tool, drag the top
+handle to rotate, the bottom-right handle to scale uniformly, or the cel body to reposition.
+Handle drags apply on mouse release and affect the active frame only. Transforms are
+stored in the host document and applied when the linked source is rendered.

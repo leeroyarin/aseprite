@@ -1,28 +1,15 @@
-local micPath = "I:/Shared drives/Pitch Quest Shared Drive/Working Files/Music Store/Export/Instruments/Mic.aseprite"
-local celloPath = "I:/Shared drives/Pitch Quest Shared Drive/Working Files/Music Store/Export/Instruments/Cello.aseprite"
-
-local out = io.open("c:/Users/leero/Source/Repos/aseprite2/tools/inspect_out.txt", "w")
-
-local function inspect(path)
-  local spr = app.open(path)
-  if not spr then
-    out:write("Failed to open " .. path .. "\n")
+local spr = app.open([[I:\Shared drives\Pitch Quest Shared Drive\Working Files\Music Store\Export\Instruments\Mic.aseprite]])
+if not spr then
+    print("FAILED TO OPEN Mic.aseprite")
     return
-  end
-  out:write("--- " .. path .. " ---\n")
-  out:write("Size: " .. spr.width .. "x" .. spr.height .. "\n")
-  out:write("ColorMode: " .. tostring(spr.colorMode) .. "\n")
-  out:write("Frames: " .. #spr.frames .. "\n")
-  out:write("Layers: " .. #spr.layers .. "\n")
-  for i, l in ipairs(spr.layers) do
-    out:write("  Layer " .. i .. ": " .. l.name .. " (visible=" .. tostring(l.isVisible) .. ", opacity=" .. l.opacity .. ")\n")
-  end
-  for i, f in ipairs(spr.frames) do
-    out:write("  Frame " .. i .. " duration: " .. f.duration .. "\n")
-  end
-  spr:close()
 end
-
-inspect(micPath)
-inspect(celloPath)
-out:close()
+print("Frames: " .. #spr.frames)
+print("Layers: " .. #spr.layers)
+for i, l in ipairs(spr.layers) do
+    print("  Layer " .. i .. ": " .. l.name)
+end
+print("Tags: " .. #spr.tags)
+for i, t in ipairs(spr.tags) do
+    print("  Tag " .. i .. ": " .. t.name .. " (" .. t.fromFrame.frameNumber .. ".." .. t.toFrame.frameNumber .. ")")
+end
+spr:close()

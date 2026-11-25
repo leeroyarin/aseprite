@@ -11,6 +11,7 @@
 
 #include "app/cmd/set_layer_blend_mode.h"
 #include "app/cmd/set_layer_flags.h"
+#include "app/cmd/set_user_data.h"
 #include "app/cmd/set_layer_name.h"
 #include "app/cmd/set_layer_opacity.h"
 #include "app/cmd/set_layer_tileset.h"
@@ -509,6 +510,34 @@ int Layer_set_smartObjectLastModified(lua_State* L)
   uint64_t t = static_cast<uint64_t>(luaL_checkinteger(L, 2));
   auto sm = static_cast<LayerSmartObject*>(layer);
   sm->setLastModifiedTime(t);
+  return 0;
+}
+
+int Layer_get_smartObjectAnimationStates(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject())
+    return lua_pushnil(L), 1;
+  lua_pushstring(L, static_cast<LayerSmartObject*>(layer)->animationStates().c_str());
+  return 1;
+}
+
+int Layer_set_smartObjectAnimationStates(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (!layer->isSmartObject() || !layer->isEditable())
+    return luaL_error(L, "An editable Smart Object is required");
+  const std::string states = luaL_checkstring(L, 2);
+  auto sm = static_cast<LayerSmartObject*>(layer);
+  if (!sm->validateAnimationStates(states))
+    return luaL_error(L, "Use increasing host frames starting at 1 and existing source tags");
+  auto data = sm->userData();
+  data.properties("smart_object")["animation_states"] = states;
+  auto doc = static_cast<app::Doc*>(layer->sprite()->document());
+  Tx tx(doc);
+  tx(new cmd::SetUserData(layer, data, doc));
+  tx.commit();
+  notify_layer_update(layer);
   return 0;
 }
 
@@ -1128,6 +1157,7 @@ const Property Layer_properties[] = {
   { "flipH",            Layer_get_flipH,                Layer_set_flipH                },
   { "flipV",            Layer_get_flipV,                Layer_set_flipV                },
   { "pivot",            Layer_get_pivot,                Layer_set_pivot                },
+  { "smartObjectAnimationStates", Layer_get_smartObjectAnimationStates, Layer_set_smartObjectAnimationStates },
   { "smartObjectTimelineMapping", Layer_get_smartObjectTimelineMapping, Layer_set_smartObjectTimelineMapping },
   { "timelineMapping",  Layer_get_timelineMapping,      Layer_set_timelineMapping      },
   { "linkedFrameCount", Layer_get_linkedFrameCount,     nullptr                        },

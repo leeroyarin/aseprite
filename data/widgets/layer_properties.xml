@@ -19,6 +19,9 @@
       <label id="uuid_label" text="@.uuid" visible="false" for="uuid" />
       <entry id="uuid" readonly="true" maxsize="36" cell_hspan="2" visible="false"/>
 
+      <label id="sm_frame_label" text="@.sm_frame" visible="false" for="sm_frame" />
+      <entry id="sm_frame" visible="false" maxsize="9" cell_hspan="2" />
+
       <label id="sm_angle_label" text="@.sm_angle" visible="false" for="sm_angle" />
       <entry id="sm_angle" visible="false" maxsize="16" minwidth="64" cell_align="horizontal" cell_hspan="2" />
 
@@ -28,6 +31,14 @@
         <label text="×" />
         <entry id="sm_scale_y" maxsize="16" minwidth="44" />
       </hbox>
+
+      <label id="sm_states_label" text="@.sm_states" visible="false" />
+      <hbox id="sm_states_box" visible="false" cell_hspan="2">
+        <entry id="sm_states" maxsize="4096" minwidth="180" />
+        <button id="sm_states_new" text="@.sm_states_new" />
+        <button id="sm_states_apply" text="@.sm_states_apply" />
+      </hbox>
+      <label id="sm_states_help" text="@.sm_states_help" visible="false" cell_hspan="3" />
 
       <label id="sm_actions_label" text="" visible="false" />
       <hbox id="sm_actions_box" visible="false" cell_hspan="2">

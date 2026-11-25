@@ -35,6 +35,7 @@
 #include "app/ui_context.h"
 #include "base/convert_to.h"
 #include "base/scoped_value.h"
+#include "doc/document.h"
 #include "doc/layer.h"
 #include "doc/layer_smart_object.h"
 #include "doc/layer_tilemap.h"
@@ -42,7 +43,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include "doc/sprite.h"
+#include "doc/tag.h"
+#include "doc/tags.h"
+#include "ui/int_entry.h"
+#include <sstream>
 #include "doc/tileset.h"
 #include "doc/tilesets.h"
 #include "doc/user_data.h"
@@ -131,11 +137,30 @@ public:
     name()->Change.connect([this] { onStartTimer(); });
     mode()->Change.connect([this] { onStartTimer(); });
     opacity()->Change.connect([this] { onStartTimer(); });
+    smFrame()->Change.connect([this] {
+      if (!m_layer || !m_layer->isSmartObject())
+        return;
+      const int frame = smFrame()->textInt();
+      if (frame < 1 || frame > m_layer->sprite()->totalFrames())
+        return;
+      onCommitChange();
+      m_transformFrame = doc::frame_t(frame - 1);
+      smFrame()->setText(std::to_string(frame));
+      const auto transform =
+        static_cast<const doc::LayerSmartObject*>(m_layer)->transformForFrame(m_transformFrame);
+      smAngle()->setText(formatNumber(transform.angle));
+      smScaleX()->setText(formatNumber(transform.scale.x));
+      smScaleY()->setText(formatNumber(transform.scale.y));
+      smFlipH()->setSelected(transform.flipH);
+      smFlipV()->setSelected(transform.flipV);
+    });
     smAngle()->Change.connect([this] { onStartTimer(); });
     smScaleX()->Change.connect([this] { onStartTimer(); });
     smScaleY()->Change.connect([this] { onStartTimer(); });
     smFlipH()->Click.connect([this] { onStartTimer(); });
     smFlipV()->Click.connect([this] { onStartTimer(); });
+    smStatesApply()->Click.connect([this] { applyAnimationStates(smStates()->text()); });
+    smStatesNew()->Click.connect([this] { onNewAnimationState(); });
     smReset()->Click.connect([this] { onResetSmartTransform(); });
     m_timer.Tick.connect([this] { onCommitChange(); });
     userData()->Click.connect([this] { onToggleUserData(); });
@@ -278,21 +303,22 @@ private:
     bool newSmFlipV = false;
     if (count == 1 && m_layer && m_layer->isSmartObject() && m_layer->isEditable()) {
       const auto* sm = static_cast<const doc::LayerSmartObject*>(m_layer);
-      newSmAngle = parseDoubleOr(smAngle()->text(), sm->angle());
-      double sx = parseDoubleOr(smScaleX()->text(), sm->scale().x);
-      double sy = parseDoubleOr(smScaleY()->text(), sm->scale().y);
+      const auto transform = sm->transformForFrame(m_transformFrame);
+      newSmAngle = parseDoubleOr(smAngle()->text(), transform.angle);
+      double sx = parseDoubleOr(smScaleX()->text(), transform.scale.x);
+      double sy = parseDoubleOr(smScaleY()->text(), transform.scale.y);
       if (std::abs(sx) < 0.01)
-        sx = sm->scale().x;
+        sx = transform.scale.x;
       if (std::abs(sy) < 0.01)
-        sy = sm->scale().y;
+        sy = transform.scale.y;
       newSmScale = gfx::PointF(sx, sy);
       newSmFlipH = smFlipH()->isSelected();
       newSmFlipV = smFlipV()->isSelected();
-      smartChanged = (std::abs(newSmAngle - sm->angle()) > 1e-6 ||
-                      std::abs(newSmScale.x - sm->scale().x) > 1e-6 ||
-                      std::abs(newSmScale.y - sm->scale().y) > 1e-6 ||
-                      newSmFlipH != sm->flipH() ||
-                      newSmFlipV != sm->flipV());
+      smartChanged = (std::abs(newSmAngle - transform.angle) > 1e-6 ||
+                      std::abs(newSmScale.x - transform.scale.x) > 1e-6 ||
+                      std::abs(newSmScale.y - transform.scale.y) > 1e-6 ||
+                      newSmFlipH != transform.flipH ||
+                      newSmFlipV != transform.flipV);
     }
 
     if ((count > 1) ||
@@ -343,13 +369,15 @@ private:
 
         if (smartChanged && m_layer && m_layer->isSmartObject()) {
           auto* sm = static_cast<doc::LayerSmartObject*>(m_layer);
-          tx(new cmd::SetSmartObjectTransform(sm,
-                                              sm->position(),
-                                              newSmScale,
-                                              newSmAngle,
-                                              newSmFlipH,
-                                              newSmFlipV,
-                                              sm->pivot()));
+          auto transform = sm->transformForFrame(m_transformFrame);
+          transform.angle = newSmAngle;
+          transform.scale = newSmScale;
+          transform.flipH = newSmFlipH;
+          transform.flipV = newSmFlipV;
+          auto data = sm->userData();
+          sm->writeFrameTransform(data, m_transformFrame, transform);
+          tx(new cmd::SetUserData(sm, data, m_document));
+          m_userDataView.configureAndSet(sm->userData(), propertiesGrid());
         }
 
         // Redraw timeline because the layer's name/user data/color
@@ -381,6 +409,7 @@ private:
   void onActiveSiteChange(const Site& site) override
   {
     onCommitChange();
+    m_transformFrame = site.frame();
     if (isVisible())
       setLayer(const_cast<Doc*>(site.document()), const_cast<Layer*>(site.layer()));
     else if (m_layer)
@@ -416,7 +445,7 @@ private:
   {
     if (m_layer) {
       m_userDataView.toggleVisibility();
-      expandWindow(gfx::Size(bounds().w, sizeHint().h));
+      expandWindow(gfx::Size(std::max(bounds().w, sizeHint().w), sizeHint().h));
     }
   }
 
@@ -426,7 +455,7 @@ private:
       return;
 
     auto tilemap = static_cast<LayerTilemap*>(m_layer);
-    expandWindow(gfx::Size(bounds().w, sizeHint().h));
+    expandWindow(gfx::Size(std::max(bounds().w, sizeHint().w), sizeHint().h));
 
     auto tileset = tilemap->tileset();
 
@@ -503,6 +532,108 @@ private:
     return std::string(buf);
   }
 
+  bool applyAnimationStates(const std::string& states)
+  {
+    if (!m_layer || !m_layer->isSmartObject() || !m_layer->isEditable())
+      return false;
+    auto* smart = static_cast<doc::LayerSmartObject*>(m_layer);
+    if (!smart->validateAnimationStates(states)) {
+      smStatesHelp()->setText(Strings::layer_properties_sm_states_error());
+      return false;
+    }
+    try {
+      ContextWriter writer(UIContext::instance());
+      auto data = smart->userData();
+      data.properties("smart_object")["animation_states"] = states;
+      Tx tx(writer, "Set Smart Object Animation States");
+      tx(new cmd::SetUserData(smart, data, m_document));
+      tx.commit();
+      m_userDataView.configureAndSet(smart->userData(), propertiesGrid());
+      smStates()->setText(smart->animationStates());
+      smStatesHelp()->setText(Strings::layer_properties_sm_states_help());
+      update_screen_for_document(m_document);
+      return true;
+    }
+    catch (const std::exception& e) {
+      Console::showException(e);
+      return false;
+    }
+  }
+
+  void onNewAnimationState()
+  {
+    if (!m_layer || !m_layer->isSmartObject() || !m_layer->isEditable())
+      return;
+    auto* smart = static_cast<doc::LayerSmartObject*>(m_layer);
+    const auto* source = smart->linkedDoc();
+    if (!source || !source->sprite() ||
+        source->sprite()->tags().begin() == source->sprite()->tags().end()) {
+      smStatesHelp()->setText(Strings::layer_properties_sm_states_no_tags());
+      return;
+    }
+
+    ui::Window window(ui::Window::WithTitleBar, Strings::layer_properties_sm_states_title());
+    ui::VBox rows;
+    ui::Label firstLabel(Strings::layer_properties_sm_states_first());
+    ui::Label lastLabel(Strings::layer_properties_sm_states_last());
+    ui::Label tagLabel(Strings::layer_properties_sm_states_tag());
+    ui::Label error("");
+    const int frames = smart->sprite()->totalFrames();
+    ui::IntEntry first(1, frames);
+    ui::IntEntry last(1, frames);
+    first.useSlider(false);
+    last.useSlider(false);
+    first.setId("sm_state_first");
+    last.setId("sm_state_last");
+    first.setValue(1);
+    last.setValue(frames);
+    ui::ComboBox tags;
+    tags.setId("sm_state_tag");
+    std::vector<std::string> names;
+    for (const auto* tag : source->sprite()->tags()) {
+      names.push_back(tag->name());
+      tags.addItem(tag->name());
+    }
+    tags.setSelectedItemIndex(0);
+    ui::CheckBox loop(Strings::layer_properties_sm_states_loop());
+    loop.setSelected(true);
+    ui::Button save(Strings::layer_properties_sm_states_save());
+    for (ui::Widget* widget : std::initializer_list<ui::Widget*>{
+           &firstLabel, &first, &lastLabel, &last, &tagLabel, &tags, &loop, &error, &save })
+      rows.addChild(widget);
+    window.addChild(&rows);
+    save.Click.connect([&] {
+      const int start = first.getValue();
+      const int end = last.getValue();
+      const int selected = tags.getSelectedItemIndex();
+      if (start > end || selected < 0 || selected >= int(names.size())) {
+        error.setText(Strings::layer_properties_sm_states_invalid_range());
+        window.layout();
+        return;
+      }
+
+      std::map<int, std::string> states;
+      std::istringstream existing(smart->animationStates());
+      for (std::string cue; std::getline(existing, cue, ';');)
+        states.emplace(std::stoi(cue), cue);
+      states[start] = std::to_string(start) + "-" + std::to_string(end) +
+                      (loop.isSelected() ? "L=" : "H=") + names[selected];
+      std::string schedule;
+      for (const auto& pair : states) {
+        if (!schedule.empty())
+          schedule += ';';
+        schedule += pair.second;
+      }
+      if (applyAnimationStates(schedule))
+        window.closeWindow(&save);
+      else {
+        error.setText(Strings::layer_properties_sm_states_invalid_range());
+        window.layout();
+      }
+    });
+    window.openWindowInForeground();
+  }
+
   void onResetSmartTransform()
   {
     if (!m_layer || !m_layer->isSmartObject() || !m_layer->isEditable())
@@ -515,13 +646,14 @@ private:
       base::ScopedValue switchSelf(m_selfUpdate, true);
       ContextWriter writer(UIContext::instance());
       Tx tx(writer, "Reset Smart Object Transform");
-      tx(new cmd::SetSmartObjectTransform(sm,
-                                          sm->position(),
-                                          gfx::PointF(1.0, 1.0),
-                                          0.0,
-                                          false,
-                                          false,
-                                          gfx::PointF(0.5, 0.5)));
+      auto data = sm->userData();
+      auto transform = sm->transformForFrame(m_transformFrame);
+      transform.scale = gfx::PointF(1, 1);
+      transform.angle = 0;
+      transform.flipH = transform.flipV = false;
+      sm->writeFrameTransform(data, m_transformFrame, transform);
+      tx(new cmd::SetUserData(sm, data, m_document));
+      m_userDataView.configureAndSet(sm->userData(), propertiesGrid());
       tx.commit();
     }
     catch (const std::exception& e) {
@@ -590,6 +722,11 @@ private:
     if (uuidVisible)
       uuid()->setText(m_layer ? base::convert_to<std::string>(m_layer->uuid()) : std::string());
 
+    smStatesLabel()->setVisible(smartVisibility);
+    smStatesBox()->setVisible(smartVisibility);
+    smStatesHelp()->setVisible(smartVisibility);
+    smFrameLabel()->setVisible(smartVisibility);
+    smFrame()->setVisible(smartVisibility);
     smAngleLabel()->setVisible(smartVisibility);
     smAngle()->setVisible(smartVisibility);
     smScaleLabel()->setVisible(smartVisibility);
@@ -600,15 +737,21 @@ private:
     if (smartVisibility) {
       const auto* sm = static_cast<const doc::LayerSmartObject*>(m_layer);
       const bool editable = m_layer->isEditable();
-      smAngle()->setText(formatNumber(sm->angle()));
+      const auto transform = sm->transformForFrame(m_transformFrame);
+      smFrame()->setText(std::to_string(int(m_transformFrame) + 1));
+      smStates()->setText(sm->animationStates());
+      smStates()->setEnabled(editable);
+      smStatesApply()->setEnabled(editable);
+      smStatesNew()->setEnabled(editable);
+      smAngle()->setText(formatNumber(transform.angle));
       smAngle()->setEnabled(editable);
-      smScaleX()->setText(formatNumber(sm->scale().x));
+      smScaleX()->setText(formatNumber(transform.scale.x));
       smScaleX()->setEnabled(editable);
-      smScaleY()->setText(formatNumber(sm->scale().y));
+      smScaleY()->setText(formatNumber(transform.scale.y));
       smScaleY()->setEnabled(editable);
-      smFlipH()->setSelected(sm->flipH());
+      smFlipH()->setSelected(transform.flipH);
       smFlipH()->setEnabled(editable);
-      smFlipV()->setSelected(sm->flipV());
+      smFlipV()->setSelected(transform.flipV);
       smFlipV()->setEnabled(editable);
       smReset()->setEnabled(editable);
     }
@@ -618,9 +761,10 @@ private:
       tileset()->parent()->layout();
     }
 
-    expandWindow(gfx::Size(bounds().w, sizeHint().h));
+    expandWindow(gfx::Size(std::max(bounds().w, sizeHint().w), sizeHint().h));
   }
 
+  doc::frame_t m_transformFrame = UIContext::instance()->activeSite().frame();
   Timer m_timer;
   bool m_pendingChanges = false;
   Doc* m_document = nullptr;

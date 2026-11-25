@@ -22,6 +22,8 @@
 #include "doc/primitives.h"
 #include "doc/render_plan.h"
 #include "doc/sprite.h"
+#include "doc/tag.h"
+#include "doc/tags.h"
 #include "base/fs.h"
 #include "base/time.h"
 
@@ -29,6 +31,7 @@
 #include <cmath>
 #include <ctime>
 #include <map>
+#include <sstream>
 #include <memory>
 
 namespace doc {
@@ -173,6 +176,7 @@ LayerSmartObject* LayerSmartObject::clone(Sprite* sprite) const
   cloned->m_flipV = m_flipV;
   cloned->m_pivot = m_pivot;
   cloned->m_timelineMapping = m_timelineMapping;
+  cloned->m_animationStates = m_animationStates;
   cloned->m_sourceSize = m_sourceSize;
   cloned->m_lastModifiedTime = m_lastModifiedTime;
   cloned->m_linkedDoc = m_linkedDoc;
@@ -466,8 +470,121 @@ frame_t LayerSmartObject::linkedFrameCount() const
   return frame_t(1);
 }
 
+namespace {
+struct AnimationCue {
+  int first;
+  int last;
+  char playback; // Legacy cue: ' ', explicit range: 'L' or 'H'.
+  std::string tag;
+};
+using AnimationCues = std::vector<AnimationCue>;
+
+int parseHostFrame(const std::string& text)
+{
+  if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos)
+    return 0;
+  try {
+    return std::stoi(text);
+  }
+  catch (const std::out_of_range&) {
+    return 0;
+  }
+}
+
+bool parseAnimationCues(const std::string& text, AnimationCues& cues)
+{
+  if (text.empty())
+    return true;
+  std::istringstream stream(text);
+  std::string item;
+  int previous = 0;
+  while (std::getline(stream, item, ';')) {
+    const auto eq = item.find('=');
+    if (eq == std::string::npos)
+      return false;
+    const auto head = item.substr(0, eq);
+    const auto dash = head.find('-');
+    const int first = parseHostFrame(head.substr(0, dash));
+    int last = 0;
+    char playback = ' ';
+    if (dash != std::string::npos) {
+      if (head.size() < dash + 3)
+        return false;
+      playback = head.back();
+      last = parseHostFrame(head.substr(dash + 1, head.size() - dash - 2));
+      if (last < first || (playback != 'L' && playback != 'H'))
+        return false;
+    }
+    else if (cues.empty() && first != 1) {
+      return false;
+    }
+    if (first <= previous || eq + 1 == item.size())
+      return false;
+    cues.push_back({ first, last, playback, item.substr(eq + 1) });
+    previous = last ? last : first;
+  }
+  return !cues.empty() && text.back() != ';';
+}
+} // namespace
+
+bool LayerSmartObject::validateAnimationStates(const std::string& text) const
+{
+  AnimationCues cues;
+  if (!parseAnimationCues(text, cues))
+    return false;
+  Document* source = linkedDoc();
+  for (const auto& cue : cues) {
+    if (!source || !source->sprite() || !source->sprite()->tags().getByName(cue.tag))
+      return false;
+  }
+  return true;
+}
+
 frame_t LayerSmartObject::mapTimelineFrame(frame_t hostFrame) const
 {
+  if (!m_animationStates.empty()) {
+    AnimationCues cues;
+    if (parseAnimationCues(m_animationStates, cues) && !cues.empty()) {
+      const AnimationCue* active = nullptr;
+      for (const auto& cue : cues) {
+        if (cue.first - 1 > hostFrame)
+          break;
+        if (!cue.last || hostFrame < cue.last)
+          active = &cue;
+      }
+      if (active) {
+        Document* source = linkedDoc();
+        const Tag* tag = source && source->sprite() ?
+                           source->sprite()->tags().getByName(active->tag) : nullptr;
+        // A renamed/deleted source tag retains the cue and shows frame 1.
+        if (!tag)
+          return frame_t(0);
+        const int first = std::clamp(int(tag->fromFrame()), 0, int(linkedFrameCount()) - 1);
+        const int last = std::clamp(int(tag->toFrame()), first, int(linkedFrameCount()) - 1);
+        const int n = last - first + 1;
+        const bool ping = tag->aniDir() == AniDir::PING_PONG ||
+                          tag->aniDir() == AniDir::PING_PONG_REVERSE;
+        const bool reverse = tag->aniDir() == AniDir::REVERSE ||
+                             tag->aniDir() == AniDir::PING_PONG_REVERSE;
+        const int period = ping && n > 1 ? 2 * (n - 1) : n;
+        long long step = std::max(0, int(hostFrame) - (active->first - 1));
+        if (active->playback == 'H')
+          step = std::min(step, static_cast<long long>(period - 1));
+        else if (active->playback == ' ') {
+          if (m_timelineMapping == TimelineMapping::Fixed)
+            step = 0;
+          else if (m_timelineMapping == TimelineMapping::Hold)
+            step = std::min(step, static_cast<long long>(period - 1));
+          else if (tag->repeat() > 0)
+            step = std::min(step, static_cast<long long>(period) * tag->repeat() - 1);
+        }
+        int phase = int(step % period);
+        if (ping && phase >= n)
+          phase = period - phase;
+        return frame_t(first + (reverse ? n - 1 - phase : phase));
+      }
+    }
+  }
   frame_t M = linkedFrameCount();
   if (M <= 1)
     return frame_t(0);
@@ -487,11 +604,68 @@ frame_t LayerSmartObject::mapTimelineFrame(frame_t hostFrame) const
   }
 }
 
+namespace {
+const doc::UserData::Properties& frameTransforms(const doc::UserData& data)
+{
+  static const doc::UserData::Properties empty;
+  const auto& maps = data.propertiesMaps();
+  auto it = maps.find("smart_object_frame_transforms");
+  return it == maps.end() ? empty : it->second;
+}
+} // namespace
+
+LayerSmartObject::FrameTransform LayerSmartObject::transformForFrame(frame_t frame) const
+{
+  FrameTransform transform{ m_position, m_scale, m_angle, m_flipH, m_flipV };
+  const auto& props = frameTransforms(userData());
+  auto it = props.find(std::to_string(int(frame)));
+  if (it == props.end())
+    return transform;
+  const auto* values = std::get_if<UserData::Vector>(&it->second);
+  if (!values || values->size() != 7)
+    return transform;
+  double parts[7];
+  for (int i = 0; i < 7; ++i) {
+    const auto* value = std::get_if<double>(&(*values)[i]);
+    if (!value || !std::isfinite(*value))
+      return transform;
+    parts[i] = *value;
+  }
+  return { gfx::PointF(parts[0], parts[1]), gfx::PointF(parts[2], parts[3]),
+           parts[4], parts[5] != 0, parts[6] != 0 };
+}
+
+void LayerSmartObject::writeFrameTransform(UserData& data, frame_t frame,
+                                           const FrameTransform& transform) const
+{
+  data.properties("smart_object_frame_transforms")[std::to_string(int(frame))] =
+    UserData::Vector{ double(transform.position.x), double(transform.position.y),
+                      double(transform.scale.x), double(transform.scale.y), transform.angle,
+                      double(transform.flipH), double(transform.flipV) };
+}
+
 void LayerSmartObject::syncFrames(frame_t totalFrames)
 {
   if (totalFrames <= 0)
     return;
 
+  if (!m_animationStates.empty() || !frameTransforms(userData()).empty()) {
+    // Tag cues and frame transforms can give repeated source frames different pixels.
+    std::vector<Cel*> stale;
+    for (Cel* c : cels()) {
+      if (c->frame() < 0 || c->frame() >= totalFrames)
+        stale.push_back(c);
+    }
+    const Document* document = sprite() ? sprite()->document() : nullptr;
+    for (Cel* c : stale) {
+      removeCel(c);
+      if (!document || !document->isUndoing())
+        delete c;
+    }
+    for (frame_t f = 0; f < totalFrames; ++f)
+      renderCel(f, mapTimelineFrame(f));
+    return;
+  }
   const frame_t M = linkedFrameCount();
   const frame_t canonicalCount = (m_timelineMapping == TimelineMapping::Fixed ?
                                   frame_t(1) : std::min(M, totalFrames));
@@ -692,8 +866,13 @@ int LayerSmartObject::getMemSize() const
 
 void LayerSmartObject::setUserData(const UserData& userData)
 {
+  const auto previous = m_animationStates;
+  const auto previousTransforms = frameTransforms(this->userData());
   Layer::setUserData(userData);
   readPropertiesFromUserData();
+  if (sprite() && (previous != m_animationStates ||
+                   previousTransforms != frameTransforms(this->userData())))
+    renderAllCels();
 }
 
 void LayerSmartObject::syncPropertiesToUserData()
@@ -715,6 +894,7 @@ void LayerSmartObject::syncPropertiesToUserData()
   else if (m_timelineMapping == TimelineMapping::Fixed)
     modeStr = "Fixed";
   props["timeline_mapping"] = std::string(modeStr);
+  props["animation_states"] = m_animationStates;
   props["src_w"] = int32_t(m_sourceSize.w);
   props["src_h"] = int32_t(m_sourceSize.h);
   props["last_modified"] = int64_t(m_lastModifiedTime);
@@ -775,6 +955,15 @@ void LayerSmartObject::readPropertiesFromUserData()
   m_sourceSize.w = get_int("src_w", m_sourceSize.w);
   m_sourceSize.h = get_int("src_h", m_sourceSize.h);
 
+  m_animationStates.clear();
+  auto states = props.find("animation_states");
+  if (states != props.end()) {
+    if (auto value = std::get_if<std::string>(&states->second)) {
+      AnimationCues cues;
+      if (parseAnimationCues(*value, cues))
+        m_animationStates = *value;
+    }
+  }
   auto pMap = props.find("timeline_mapping");
   if (pMap != props.end()) {
     if (auto s = std::get_if<std::string>(&pMap->second)) {
@@ -923,7 +1112,8 @@ static CornerBounds calcCornerBounds(int W, int H, const gfx::PointF& pivotNorm,
 
 void LayerSmartObject::renderTransformedImage(const Image* srcImg,
                                               ImageRef& dstImg,
-                                              gfx::Point& celPos) const
+                                              gfx::Point& celPos,
+                                              const FrameTransform& transform) const
 {
   if (!srcImg)
     return;
@@ -934,23 +1124,23 @@ void LayerSmartObject::renderTransformedImage(const Image* srcImg,
     return;
 
   // 1. Identity transform: bit-identical copy
-  const bool isIdentity = (std::abs(m_scale.x - 1.0) < 1e-9 &&
-                           std::abs(m_scale.y - 1.0) < 1e-9 &&
-                           std::fmod(std::abs(m_angle), 360.0) < 1e-9 &&
-                           !m_flipH &&
-                           !m_flipV);
+  const bool isIdentity = (std::abs(transform.scale.x - 1.0) < 1e-9 &&
+                           std::abs(transform.scale.y - 1.0) < 1e-9 &&
+                           std::fmod(std::abs(transform.angle), 360.0) < 1e-9 &&
+                           !transform.flipH &&
+                           !transform.flipV);
   if (isIdentity) {
     dstImg.reset(Image::createCopy(srcImg));
-    celPos = gfx::Point(static_cast<int>(std::floor(m_position.x)),
-                        static_cast<int>(std::floor(m_position.y)));
+    celPos = gfx::Point(static_cast<int>(std::floor(transform.position.x)),
+                        static_cast<int>(std::floor(transform.position.y)));
     return;
   }
 
   // 2. Base image with flips applied (folding negative scale signs)
-  const bool effFlipH = (m_flipH != (m_scale.x < 0.0));
-  const bool effFlipV = (m_flipV != (m_scale.y < 0.0));
-  const double absScaleX = std::abs(m_scale.x);
-  const double absScaleY = std::abs(m_scale.y);
+  const bool effFlipH = (transform.flipH != (transform.scale.x < 0.0));
+  const bool effFlipV = (transform.flipV != (transform.scale.y < 0.0));
+  const double absScaleX = std::abs(transform.scale.x);
+  const double absScaleY = std::abs(transform.scale.y);
 
   ImageRef baseImg;
   if (effFlipH || effFlipV) {
@@ -970,15 +1160,15 @@ void LayerSmartObject::renderTransformedImage(const Image* srcImg,
     baseImg.reset(Image::createCopy(srcImg));
   }
 
-  const double normAngle = std::fmod(std::abs(m_angle), 360.0);
+  const double normAngle = std::fmod(std::abs(transform.angle), 360.0);
 
   // 3. Flips only (no scale, no rotation)
   if (normAngle < 1e-9 &&
       std::abs(absScaleX - 1.0) < 1e-9 &&
       std::abs(absScaleY - 1.0) < 1e-9) {
     dstImg = baseImg;
-    celPos = gfx::Point(static_cast<int>(std::floor(m_position.x)),
-                        static_cast<int>(std::floor(m_position.y)));
+    celPos = gfx::Point(static_cast<int>(std::floor(transform.position.x)),
+                        static_cast<int>(std::floor(transform.position.y)));
     return;
   }
 
@@ -995,8 +1185,8 @@ void LayerSmartObject::renderTransformedImage(const Image* srcImg,
                                  nullptr,
                                  baseImg->maskColor());
 
-    celPos = gfx::Point(static_cast<int>(std::floor(m_position.x)),
-                        static_cast<int>(std::floor(m_position.y)));
+    celPos = gfx::Point(static_cast<int>(std::floor(transform.position.x)),
+                        static_cast<int>(std::floor(transform.position.y)));
     return;
   }
 
@@ -1006,7 +1196,7 @@ void LayerSmartObject::renderTransformedImage(const Image* srcImg,
 
   if (isRightAngle) {
     int angleInt = static_cast<int>(std::round(normAngle)) % 360;
-    if (m_angle < 0.0 && angleInt != 0) {
+    if (transform.angle < 0.0 && angleInt != 0) {
       angleInt = 360 - angleInt;
     }
 
@@ -1029,9 +1219,9 @@ void LayerSmartObject::renderTransformedImage(const Image* srcImg,
                                    baseImg->maskColor());
     }
 
-    CornerBounds b = calcCornerBounds(W, H, m_pivot, absScaleX, absScaleY, m_angle);
-    celPos = gfx::Point(static_cast<int>(std::floor(m_position.x + b.localX)),
-                        static_cast<int>(std::floor(m_position.y + b.localY)));
+    CornerBounds b = calcCornerBounds(W, H, m_pivot, absScaleX, absScaleY, transform.angle);
+    celPos = gfx::Point(static_cast<int>(std::floor(transform.position.x + b.localX)),
+                        static_cast<int>(std::floor(transform.position.y + b.localY)));
 
     if (angleInt == 0) {
       dstImg = scaledImg;
@@ -1055,10 +1245,10 @@ void LayerSmartObject::renderTransformedImage(const Image* srcImg,
   }
 
   // 6. Arbitrary angle
-  CornerBounds b = calcCornerBounds(W, H, m_pivot, absScaleX, absScaleY, m_angle);
+  CornerBounds b = calcCornerBounds(W, H, m_pivot, absScaleX, absScaleY, transform.angle);
 
-  celPos = gfx::Point(static_cast<int>(std::floor(m_position.x + b.localX)),
-                      static_cast<int>(std::floor(m_position.y + b.localY)));
+  celPos = gfx::Point(static_cast<int>(std::floor(transform.position.x + b.localX)),
+                      static_cast<int>(std::floor(transform.position.y + b.localY)));
 
   dstImg.reset(Image::create(baseImg->pixelFormat(), b.dstW, b.dstH));
   doc::clear_image(dstImg.get(), baseImg->maskColor());
@@ -1121,23 +1311,27 @@ bool LayerSmartObject::renderCel(frame_t hostFrame, frame_t linkedFrame)
 
   ImageRef dstImg;
   gfx::Point celPos;
-  renderTransformedImage(srcImg.get(), dstImg, celPos);
+  renderTransformedImage(srcImg.get(), dstImg, celPos, transformForFrame(hostFrame));
   if (!dstImg)
     return false;
 
   Cel* c = cel(hostFrame);
   if (c) {
-    if (c->link()) {
+    if (c->data()->refs() > 1 &&
+        (!m_animationStates.empty() || !frameTransforms(userData()).empty())) {
+      auto data = std::make_shared<CelData>(*c->data());
+      c->setDataRef(data);
+    }
+    else if (c->link()) {
       removeCel(c);
       delete c;
       c = new Cel(hostFrame, dstImg);
       c->setPosition(celPos);
       addCel(c);
+      return true;
     }
-    else {
-      c->data()->setImage(dstImg, this);
-      c->setPosition(celPos);
-    }
+    c->data()->setImage(dstImg, this);
+    c->setPosition(celPos);
   }
   else {
     c = new Cel(hostFrame, dstImg);
@@ -1151,6 +1345,8 @@ void LayerSmartObject::renderAllCels()
 {
   if (sprite()) {
     syncFrames(sprite()->totalFrames());
+    if (!m_animationStates.empty() || !frameTransforms(userData()).empty())
+      return;
   }
   else if (cels().empty()) {
     renderCel(frame_t(0), frame_t(0));
