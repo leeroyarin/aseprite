@@ -11,6 +11,7 @@
 
 #include "app/app.h"
 #include "app/cmd/set_cel_bounds.h"
+#include "app/cmd/set_smart_object_transform.h"
 #include "app/commands/cmd_rotate.h"
 #include "app/commands/params.h"
 #include "app/doc_api.h"
@@ -27,14 +28,48 @@
 #include "doc/cel.h"
 #include "doc/cels_range.h"
 #include "doc/image.h"
+#include "doc/layer.h"
+#include "doc/layer_smart_object.h"
 #include "doc/mask.h"
 #include "doc/sprite.h"
 
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
 namespace app {
+
+namespace {
+
+void collect_smart_objects_recursive(doc::LayerGroup* group,
+                                     std::vector<doc::LayerSmartObject*>& out)
+{
+  if (!group)
+    return;
+  for (doc::Layer* lay : group->layers()) {
+    if (lay->isSmartObject()) {
+      out.push_back(static_cast<doc::LayerSmartObject*>(lay));
+    }
+    else if (lay->isGroup()) {
+      collect_smart_objects_recursive(static_cast<doc::LayerGroup*>(lay), out);
+    }
+  }
+}
+
+double wrap_angle_deg(double deg)
+{
+  double wrapped = std::fmod(deg, 360.0);
+  if (std::abs(wrapped) < 1e-9 || std::abs(std::abs(wrapped) - 360.0) < 1e-9)
+    return 0.0;
+  return wrapped;
+}
+
+} // namespace
 
 class RotateJob : public SpriteJob {
   int m_angle;
   CelList m_cels;
+  std::vector<doc::LayerSmartObject*> m_smartLayers;
   bool m_rotateSprite;
 
 public:
@@ -43,10 +78,12 @@ public:
             const std::string& jobName,
             int angle,
             const CelList& cels,
+            const std::vector<doc::LayerSmartObject*>& smartLayers,
             const bool rotateSprite,
             const bool showProgress)
     : SpriteJob(ctx, doc, jobName, showProgress)
     , m_cels(cels)
+    , m_smartLayers(smartLayers)
     , m_rotateSprite(rotateSprite)
   {
     m_angle = angle;
@@ -116,12 +153,63 @@ protected:
         api.replaceImage(sprite(), cel->imageRef(), new_image);
       }
 
-      jobProgress((float)i / m_cels.size());
+      jobProgress(m_cels.empty() ? 1.0f : (float)i / m_cels.size());
       ++i;
 
       // cancel all the operation?
       if (isCanceled())
         return; // Tx destructor will undo all operations
+    }
+
+    // 3) Rotate Smart Object transforms non-destructively
+    for (doc::LayerSmartObject* sm : m_smartLayers) {
+      if (!sm)
+        continue;
+
+      const double newAngle = wrap_angle_deg(sm->angle() + m_angle);
+      gfx::PointF newPos = sm->position();
+
+      if (m_rotateSprite) {
+        double srcW = static_cast<double>(sm->sourceSize().w);
+        double srcH = static_cast<double>(sm->sourceSize().h);
+        if ((srcW <= 0.0 || srcH <= 0.0) && !sm->cels().empty()) {
+          if (doc::Cel* c0 = sm->cels().front()) {
+            if (c0->image()) {
+              srcW = static_cast<double>(c0->image()->width());
+              srcH = static_cast<double>(c0->image()->height());
+            }
+          }
+        }
+        const double ox = sm->pivot().x * srcW;
+        const double oy = sm->pivot().y * srcH;
+        const double px = sm->position().x + ox;
+        const double py = sm->position().y + oy;
+        double npx = px;
+        double npy = py;
+        switch (m_angle) {
+          case 180:
+            npx = sprite()->width() - px;
+            npy = sprite()->height() - py;
+            break;
+          case 90:
+            npx = sprite()->height() - py;
+            npy = px;
+            break;
+          case -90:
+            npx = py;
+            npy = sprite()->width() - px;
+            break;
+        }
+        newPos = gfx::PointF(npx - ox, npy - oy);
+      }
+
+      tx(new cmd::SetSmartObjectTransform(sm,
+                                          newPos,
+                                          sm->scale(),
+                                          newAngle,
+                                          sm->flipH(),
+                                          sm->flipV(),
+                                          sm->pivot()));
     }
 
     // rotate mask
@@ -187,12 +275,18 @@ void RotateCommand::onLoadParams(const Params& params)
 
 bool RotateCommand::onEnabled(Context* context)
 {
-  // Because we use the toolbar & editor to transform the selection, this won't work without a UI
-  if (m_flipMask && !context->isUIAvailable())
+  if (!context->checkFlags(ContextFlags::ActiveDocumentIsWritable |
+                             ContextFlags::HasActiveSprite))
     return false;
 
-  return context->checkFlags(ContextFlags::ActiveDocumentIsWritable |
-                             ContextFlags::HasActiveSprite);
+  // Transforming a visible marquee selection needs an active editor/UI
+  if (m_flipMask && !context->isUIAvailable()) {
+    const Site site = context->activeSite();
+    if (site.document() && site.document()->isMaskVisible())
+      return false;
+  }
+
+  return true;
 }
 
 void RotateCommand::onExecute(Context* context)
@@ -201,17 +295,18 @@ void RotateCommand::onExecute(Context* context)
     Site site = context->activeSite();
     Doc* doc = site.document();
     CelList cels;
+    std::vector<doc::LayerSmartObject*> smartLayers;
     bool rotateSprite = false;
 
     Timeline* timeline = App::instance()->timeline();
     LockTimelineRange lockRange(timeline);
 
-    // Flip the mask or current cel
+    // Rotate the mask, current cel, or Smart Object layer
     if (m_flipMask) {
       // If we want to rotate the visible mask, we can go to
       // MovingPixelsState (even when the range is enabled, because
       // now PixelsMovement support ranges).
-      if (doc->isMaskVisible()) {
+      if (doc->isMaskVisible() && context->isUIAvailable()) {
         // Select marquee tool
         if (tools::Tool* tool = App::instance()->toolBox()->getToolById(
               tools::WellKnownTools::RectangularMarquee)) {
@@ -223,19 +318,39 @@ void RotateCommand::onExecute(Context* context)
       }
 
       cels = site.selectedUniqueCelsToEditPixels();
-      if (cels.empty()) {
-        StatusBar::instance()->showTip(1000, Strings::statusbar_tips_all_layers_are_locked());
+
+      auto addSmartIfEditable = [&](doc::Layer* lay) {
+        if (lay && lay->isSmartObject() && lay->isEditable() &&
+            std::find(smartLayers.begin(), smartLayers.end(), lay) == smartLayers.end()) {
+          smartLayers.push_back(static_cast<doc::LayerSmartObject*>(lay));
+        }
+      };
+      if (site.range().enabled()) {
+        for (doc::Layer* lay : site.range().selectedLayers())
+          addSmartIfEditable(lay);
+      }
+      else {
+        addSmartIfEditable(const_cast<doc::Layer*>(site.layer()));
+      }
+
+      if (cels.empty() && smartLayers.empty()) {
+        if (context->isUIAvailable())
+          StatusBar::instance()->showTip(1000, Strings::statusbar_tips_all_layers_are_locked());
         return;
       }
     }
-    // Flip the whole sprite (even locked layers)
+    // Rotate the whole sprite (even locked layers)
     else if (site.sprite()) {
-      cels = site.sprite()->uniqueCels().toList();
+      for (Cel* c : site.sprite()->uniqueCels()) {
+        if (c && c->layer() && !c->layer()->isSmartObject())
+          cels.push_back(c);
+      }
+      collect_smart_objects_recursive(site.sprite()->root(), smartLayers);
       rotateSprite = true;
     }
 
     {
-      RotateJob job(context, doc, friendlyName(), m_angle, cels, rotateSprite, m_ui);
+      RotateJob job(context, doc, friendlyName(), m_angle, cels, smartLayers, rotateSprite, m_ui);
       job.startJob();
       job.waitJob();
     }

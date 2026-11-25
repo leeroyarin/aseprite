@@ -6569,7 +6569,6 @@ static bool sculptDepthDabOnDoc(app::Doc* doc, doc::frame_t fr, int face,
 }
 
 void switchStudioSource(DocView* view, bool model);
-
 class EasymetricMultiPaneView : public ui::Widget,
                                 public EditorObserver,
                                 public DocUndoObserver {
@@ -11741,7 +11740,6 @@ Command* CommandFactory::createEasymetricModelStudioCommand()
 {
   return new EasymetricModelStudioCommand;
 }
-
 Command* CommandFactory::createEasymetricStudioCommand()
 {
   return new EasymetricStudioCommand;

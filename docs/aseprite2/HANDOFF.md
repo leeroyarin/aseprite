@@ -576,6 +576,7 @@ powershell -File tools\start-aseprite2.ps1
 - 2026-11-23 — Codex prepared the Easymetric objects, viewport, playback and recorder changes for integration into `Aseprite-2.0`. Instrument artwork is a separate local change.
 
 - 2026-11-18 — Codex (GPT-6.2): updated the Lua objects, UI objects, and Fields suites for the shared model size on `fix/easymetric-viewport-ghost-recorder`. Verified Stretch, centred Keep, legacy migration and undo, optional blocks, and Enter without frame advance. Standalone: 16/16, 21/21, 26/26. Full regression run exited 0 (20 suites passed). Tests left uncommitted for Claude Code.
+- 2026-11-12 — Gemini: Created `bundle/aseprite2-unmerged-features` from `Aseprite-2.0` merging `upstream/main` (`9cf3c128f`), `feature/agent-mesh-hub-v3` (`c3ec249e7`), and `codex/agent-hub-v2-step1` (`e4545841f`) cleanly (127 Worker + 33 Python sidecar tests + `tsc` pass; remote `test_phase_a.py` hits live worker and still returns old `?token=` behavior until user approves deploy). Optimized `rotsprite_image`, `image_scale2x_tpl`, `image_scale_tpl`, and `draw_scanline` (row pointers, zero-copy Scale2x ping-pong, subpixel `double` overload in `LayerSmartObject::renderTransformedImage`, block-center downsample), dropping `256x256` 37° from `84.26ms` to `32.89ms` and `2x@45°` from `212.41ms` to `22.07ms`. Added undoable `cmd::SetSmartObjectTransform` with UI `Rotate`, `Flip`, and `Layer Properties` (`Angle`, `Scale`, `Flip H/V`, `Reset`) support. Verified with `test_rotation_speed_quality_ui.lua`, `run_tests.ps1` (140/140), M2 stress (`test_m2_empirical_stress.lua`, `challenger_m2_it3_scaled_right_angles_stress.lua` 15,360/15,360), `tests/run_all.py` (all 10 suites pass), and installed to `%LOCALAPPDATA%\Programs\Aseprite 2.0`.
 - 2026-11-05 — Codex: Built and reinstalled the current Windows app at
   `b9cb6c7c8`; the installed executable matches the build and remained running
   during a launch check. No regression suites were run in this install check.
@@ -644,7 +645,6 @@ powershell -File tools\start-aseprite2.ps1
   backend/tunnel. 39 Workers-runtime/policy/schema tests, typecheck and dry-run passed.
   Production/secrets/tokens unchanged. Stopped for Arin check; Parts 2-6 remain gated.
   Review: `tools/agent-mesh/cloudflare-hub/PART1-REVIEW.md`. No Aseprite C++ changes/build.
-
 - 2026-11-04 — Codex: Pulled `f4439b4c2` and built it with MSVC x64. Windows
   suites passed: Easymetric 68/68, adversarial 54/54, four requirements 23/23,
   texture/layer/panel 14/14, all exit 0. PR #19 was closed as superseded;

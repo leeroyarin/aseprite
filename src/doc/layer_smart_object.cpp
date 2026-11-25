@@ -1063,33 +1063,47 @@ void LayerSmartObject::renderTransformedImage(const Image* srcImg,
   dstImg.reset(Image::create(baseImg->pixelFormat(), b.dstW, b.dstH));
   doc::clear_image(dstImg.get(), baseImg->maskColor());
 
-  int x1 = static_cast<int>(std::round(b.transformed[0].x - b.localX));
-  int y1 = static_cast<int>(std::round(b.transformed[0].y - b.localY));
-  int x2 = static_cast<int>(std::round(b.transformed[1].x - b.localX));
-  int y2 = static_cast<int>(std::round(b.transformed[1].y - b.localY));
-  int x4 = static_cast<int>(std::round(b.transformed[3].x - b.localX));
-  int y4 = static_cast<int>(std::round(b.transformed[3].y - b.localY));
-  int x3 = x2 + x4 - x1;
-  int y3 = y2 + y4 - y1;
+  const double fx1 = b.transformed[0].x - b.localX;
+  const double fy1 = b.transformed[0].y - b.localY;
+  const double fx2 = b.transformed[1].x - b.localX;
+  const double fy2 = b.transformed[1].y - b.localY;
+  const double fx4 = b.transformed[3].x - b.localX;
+  const double fy4 = b.transformed[3].y - b.localY;
+  const double fx3 = fx2 + fx4 - fx1;
+  const double fy3 = fy2 + fy4 - fy1;
 
   if (isRightAngle) {
     doc::algorithm::parallelogram(dstImg.get(),
                                   baseImg.get(),
                                   nullptr,
-                                  x1, y1, x2, y2, x3, y3, x4, y4);
+                                  static_cast<int>(std::round(fx1)),
+                                  static_cast<int>(std::round(fy1)),
+                                  static_cast<int>(std::round(fx2)),
+                                  static_cast<int>(std::round(fy2)),
+                                  static_cast<int>(std::round(fx3)),
+                                  static_cast<int>(std::round(fy3)),
+                                  static_cast<int>(std::round(fx4)),
+                                  static_cast<int>(std::round(fy4)));
   }
   else {
     try {
       doc::algorithm::rotsprite_image(dstImg.get(),
                                       baseImg.get(),
                                       nullptr,
-                                      x1, y1, x2, y2, x3, y3, x4, y4);
+                                      fx1, fy1, fx2, fy2, fx3, fy3, fx4, fy4);
     }
     catch (const std::bad_alloc&) {
       doc::algorithm::parallelogram(dstImg.get(),
                                     baseImg.get(),
                                     nullptr,
-                                    x1, y1, x2, y2, x3, y3, x4, y4);
+                                    static_cast<int>(std::round(fx1)),
+                                    static_cast<int>(std::round(fy1)),
+                                    static_cast<int>(std::round(fx2)),
+                                    static_cast<int>(std::round(fy2)),
+                                    static_cast<int>(std::round(fx3)),
+                                    static_cast<int>(std::round(fy3)),
+                                    static_cast<int>(std::round(fx4)),
+                                    static_cast<int>(std::round(fy4)));
     }
   }
 }
