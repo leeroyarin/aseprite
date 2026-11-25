@@ -9,9 +9,9 @@ export { FeatureFailure } from "./errors";
 import { Enrollment } from "./enrollment";
 import { Governance, USAGE_FRESH_MS } from "./governance";
 type Data = Record<string, unknown>;
-interface Project { id:string; name:string; description:string; agents_json:string; roles_json:string; created_at:number }
+interface Project { id:string; name:string; description:string; agents_json:string; roles_json:string; created_at:number; archived_at?:number|null }
 interface Channel { id:string; project_id:string; type:"announce"|"group"|"dm"; name:string; topic:string; members_json:string }
-interface Agent { id:string; name:string; role:string; last_seen:number; health:string; status_json:string; checked_at:number; registered_at:number }
+interface Agent { id:string; name:string; role:string; last_seen:number; health:string; status_json:string; checked_at:number; registered_at:number; archived_at?:number|null }
 interface Task { id:string; project_id:string; title:string; owner:string; assignee:string; state:string }
 interface Doc { project_id:string; doc_id:string; title:string; purpose:string; body:string; version:number; updated_by:string; updated_at:number }
 interface Suggestion {id:string; project_id:string; doc_id:string; author:string; body:string; status:string}
@@ -173,8 +173,11 @@ export class ProjectFeatures {
   async route(request:Request,p:V2Principal,b:Data={}):Promise<Response>{
     const url=new URL(request.url),admin=p.isAdmin,actor=this.identity(p).actor;
     let path:string[];try{path=url.pathname.replace(/^\/api\/v2(?:\/admin)?/,"").split("/").filter(Boolean).map(decodeURIComponent);}catch{return fail(400,"Invalid path encoding");}
-    const get=request.method==="GET",post=request.method==="POST";
-    if(!get&&!post)fail(405,"Method not allowed");
+    const get=request.method==="GET",post=request.method==="POST",del=request.method==="DELETE";
+    const update=request.method==="PATCH"||request.method==="PUT";
+    if(!get&&!post&&!del&&!update)fail(405,"Method not allowed");
+    if(del&&!(path[0]==="projects"&&path[1]&&path.length===2))fail(405,"Method not allowed");
+    if(update&&!(path[0]==="projects"&&path[1]&&path.length===2))fail(405,"Method not allowed");
     await this.flush();
     const enrolled=await this.enrollment.route(request,p,b,path);
     if(enrolled){await this.reconcileEnrollment();await this.flush();return enrolled;}
@@ -189,13 +192,55 @@ export class ProjectFeatures {
       return new Response(stream,{headers:{"Content-Type":"text/event-stream","Cache-Control":"no-store","X-Accel-Buffering":"no"}});
     }
     if(path[0]==="projects"&&path.length===1){
-      if(get){const all=await this.rows<Project>("SELECT * FROM projects ORDER BY id");const visible=[];for(const x of all){try{await this.project(x.id,p);visible.push({...x,agents:JSON.parse(x.agents_json),desc:x.description});}catch(e){if(!(e instanceof FeatureFailure)||e.status!==403)throw e;}}return Response.json({projects:visible});}
+      if(get){let all:Project[]=[];try{const inc=url.searchParams.get("include_archived")==="1";all=await this.rows<Project>(inc?"SELECT * FROM projects ORDER BY id":"SELECT * FROM projects WHERE archived_at IS NULL OR archived_at = 0 ORDER BY id");}catch(_){all=await this.rows<Project>("SELECT * FROM projects ORDER BY id");}const visible=[];for(const x of all){try{await this.project(x.id,p);visible.push({...x,agents:JSON.parse(x.agents_json),desc:x.description,archived:!!x.archived_at});}catch(e){if(!(e instanceof FeatureFailure)||e.status!==403)throw e;}}return Response.json({projects:visible});}
       this.owner(p);const id=str(b,"id"),name=str(b,"name"),agents=list(b,"agents"),description=typeof b.desc==="string"?b.desc.slice(0,2000):"";
       if(await this.statement("SELECT id FROM projects WHERE id=?",id).first())fail(409,"Project exists");
       const now=Date.now(),members=JSON.stringify(agents),ops=[this.statement("INSERT INTO projects(id,name,description,agents_json,created_at) VALUES(?,?,?,?,?)",id,name,description,members,now)];
       for(const [key,type] of [["general","group"],["announcements","announce"]] as const)ops.push(this.statement("INSERT INTO channels(id,project_id,type,name,members_json,created_at) VALUES(?,?,?,?,?,?)",id+":"+key,id,type,key,members,now));
       ops.push(...this.event(id,actor,"project.created",name));await this.write(ops);return Response.json({id},{status:201});
     }
+    if(path[0]==="projects"&&path[1]&&path.length===2&&del){
+      this.owner(p);
+      const id=path[1];
+      await this.db.batch([
+        this.statement("DELETE FROM message_seen WHERE message_id IN (SELECT id FROM messages WHERE project_id=?)", id),
+        this.statement("DELETE FROM doc_acks WHERE project_id=?", id),
+        this.statement("DELETE FROM doc_suggestions WHERE project_id=?", id),
+        this.statement("DELETE FROM docs WHERE project_id=?", id),
+        this.statement("DELETE FROM task_events WHERE task_id IN (SELECT id FROM tasks WHERE project_id=?)", id),
+        this.statement("DELETE FROM tasks WHERE project_id=?", id),
+        this.statement("DELETE FROM channels WHERE project_id=?", id),
+        this.statement("DELETE FROM projects WHERE id=?", id),
+      ]);
+      await this.write(this.event(id,actor,"project.deleted","Project "+id+" deleted"));
+      return Response.json({ok:true});
+    }
+    if(path[0]==="projects"&&path[1]&&path.length===3&&path[2]==="archive"&&post){
+      this.owner(p);
+      const id=path[1];
+      await this.project(id,p);
+      const archived = b.archived !== false;
+      const now = archived ? Date.now() : 0;
+      await this.write([
+        this.statement("UPDATE projects SET archived_at=? WHERE id=?", now, id),
+        ...this.event(id,actor,archived ? "project.archived" : "project.unarchived","Project "+id+(archived ? " archived" : " unarchived"))
+      ]);
+      return Response.json({id, archived});
+    }
+    if(path[0]==="projects"&&path[1]&&((path.length===3&&path[2]==="members"&&post)||(path.length===2&&update))){
+      this.owner(p);
+      const id=path[1];
+      await this.project(id,p);
+      const agents=list(b,"agents");
+      const members=JSON.stringify(agents);
+      await this.write([
+        this.statement("UPDATE projects SET agents_json=? WHERE id=?", members, id),
+        this.statement("UPDATE channels SET members_json=? WHERE project_id=? AND (name='general' OR name='announcements')", members, id),
+        ...this.event(id,actor,"project.members_updated","Project "+id+" members updated: "+agents.join(", "))
+      ]);
+      return Response.json({id, agents});
+    }
+
     if(path[0]==="projects"&&path[1]&&path[2]==="onboarding"){
       await this.project(path[1],p);const project=path[1];
       const rule=await this.statement("SELECT * FROM rulebook_revisions ORDER BY version DESC LIMIT 1").first<{version:number;sha256:string;body:string}>();
@@ -254,8 +299,14 @@ export class ProjectFeatures {
       if(!admin&&path[1]!==p.agent)fail(403,"Status report owner required");
       const {limit,cursor}=page(url);const rows=await this.rows<{seq:number}>("SELECT * FROM status_reports WHERE agent=? AND seq>? ORDER BY seq LIMIT ?",path[1],cursor,limit+1);return Response.json(paged(rows,limit,x=>x.seq));
     }
-    if(path[0]==="agents"&&(path.length===1||(path.length===2&&path[1]==="status"&&!get))){
-      if(get){const all=await this.rows<Agent>("SELECT * FROM agent_registry ORDER BY id");if(admin)return Response.json({agents:all.map(a=>({...a,status:JSON.parse(a.status_json)}))});const projects=await this.rows<Project>("SELECT * FROM projects");const peers=new Set([p.agent!]);for(const x of projects){try{await this.project(x.id,p);for(const a of JSON.parse(x.agents_json))peers.add(a);}catch(e){if(!(e instanceof FeatureFailure))throw e;}}return Response.json({agents:all.filter(a=>peers.has(a.id)).map(({id,name,role,last_seen,health})=>({id,name,role,last_seen,health}))});}
+    if(path[0]==="agents"&&(path.length===1||(path.length===2&&path[1]==="status"&&!get)||(path.length===3&&path[2]==="archive"&&post))){
+      if(get){let all:Agent[]=[];try{const inc=url.searchParams.get("include_archived")==="1";all=await this.rows<Agent>(inc?"SELECT * FROM agent_registry ORDER BY id":"SELECT * FROM agent_registry WHERE archived_at IS NULL OR archived_at = 0 ORDER BY id");}catch(_){all=await this.rows<Agent>("SELECT * FROM agent_registry ORDER BY id");}if(admin)return Response.json({agents:all.map(a=>({...a,status:JSON.parse(a.status_json),archived:!!a.archived_at}))});const projects=await this.rows<Project>("SELECT * FROM projects");const peers=new Set([p.agent!]);for(const x of projects){try{await this.project(x.id,p);for(const a of JSON.parse(x.agents_json))peers.add(a);}catch(e){if(!(e instanceof FeatureFailure))throw e;}}return Response.json({agents:all.filter(a=>peers.has(a.id)).map(({id,name,role,last_seen,health})=>({id,name,role,last_seen,health}))});}
+      if(path[2]==="archive"&&post){
+        this.owner(p);const agent=path[1];const archived=b.archived!==false;const now=archived?Date.now():0;
+        await this.statement("UPDATE agent_registry SET archived_at=? WHERE id=?",now,agent).run();
+        await this.write(this.event("_hub",actor,archived?"agent.archived":"agent.unarchived","Agent "+agent+(archived?" archived":" unarchived")));
+        return Response.json({id:agent,archived});
+      }
       if(path[1]==="status"){if(admin)fail(403,"An agent identity is required");const report=JSON.stringify(b);if(report.length>8192)fail(413,"Status report too large");await this.db.batch([this.statement("INSERT INTO status_reports(agent,ts,body) VALUES(?,?,?)",actor,Date.now(),report),this.statement("UPDATE agent_registry SET status_json=? WHERE id=?",report,actor)]);await this.write(this.event("_hub",actor,"agent.status",actor+" reported status"));return Response.json({ok:true});}
       this.owner(p);const agent=str(b,"id"),name=str(b,"name"),role=str(b,"role");if(["arin","hub","admin","hub-supervisor"].includes(agent))fail(400,"Reserved identity");await this.statement("INSERT INTO agent_registry(id,name,role,registered_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role=excluded.role",agent,name,role,Date.now()).run();await this.write(this.event("_hub",actor,"agent.registered",agent+" / "+role));return Response.json({id:agent},{status:201});
     }

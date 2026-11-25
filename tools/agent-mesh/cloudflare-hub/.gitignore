@@ -1,6 +1,7 @@
 node_modules/
 .wrangler/
 .test-build/
+web-dist/
 __pycache__/
 .dev.vars
 .dev.vars.*

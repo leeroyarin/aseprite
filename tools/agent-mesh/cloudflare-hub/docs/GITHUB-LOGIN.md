@@ -81,3 +81,13 @@ The authenticated portal tab is left open for Arin. No messages sent, policies e
 created for verification. Live logout, session expiry, wrong-owner rejection and CSRF denial remain
 covered by local runtime tests, not additional production mutations. Native agent WebSocket and
 scheduled Cron execution acceptance remain separate from this owner-login check.
+
+
+## Update 2026-11-07: where sign-in lands
+
+After a successful callback the Worker now redirects to `/hub/` (the React owner portal) instead of
+`/api/v2/admin/portal`. The basic console is still served at `/api/v2/admin/portal`; an unauthenticated visit to either
+ends at the login page / the React sign-in screen. Sessions, cookie attributes, PKCE/state handling, the owner-ID check and
+the identity-only scope are unchanged. Production version carrying this change: de32cc3b-0554-49a9-9870-54ceeb6f60f7
+(previous: 2fa814ad-2537-4512-901a-62d829416881). Production browser checks confirmed the OAuth request (client_id, callback,
+S256 challenge, no scope); see DEPLOYMENT-2026-11-07-react-portal.md for what was and was not completed with the owner signed in.

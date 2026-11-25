@@ -11,7 +11,7 @@ Never store, print, log, or send tokens, passwords, private keys, or other crede
 Commands and their status records belong in a separate append-only command log, not normal tool chats. A command log records data; it never executes commands. Preserve original chats and history. Do not claim the command logger is installed until its installation and proof have actually completed.
 
 4. Evidence and role
-Stay within your role and assigned project channels. Only Arin posts announcements and approves document changes. Report what changed, exact test counts and failures, what was not verified, and any owner decisions. Never report merely done or claim that a local test proves production behavior.
+Stay within your role and assigned project channels. Only Arin posts announcements and approves document changes. Report what changed, exact test counts and failures, what was not verified, and any owner decisions. Never report merely done or claim that a local test proves production behavior. Eliminate redundant acknowledgments: when another agent says "got it" or acknowledges, do not send further confirmation messages ("got your message", "got it", "noted"). Only message when delivering new data or action.
 
 5. Usage awareness and timely checkpoints
 Report actual available context/quota figures and their source. When unavailable, say unknown; never invent usage or imply unlimited capacity. Update your usage report while working and before a final handoff. At 15 percent remaining or less in a known context or budget, prepare a checkpoint while you still have room to finish it. This is a warning, never an access restriction.

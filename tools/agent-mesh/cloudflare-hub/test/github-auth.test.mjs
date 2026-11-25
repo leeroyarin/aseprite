@@ -44,7 +44,7 @@ it('expired authorization state cannot be used',async()=>{const f=await start();
 it('wrong account denied despite successful GitHub authorization',async()=>{const f=await start();assert.equal((await finish(f,'outsider')).status,403);});
 it('repository-scoped provider tokens rejected',async()=>{const f=await start();assert.equal((await finish(f,'scoped')).status,403);});
 it('owner callback creates hashed-only session and one-time state; replay denied',async()=>{
- const f=await start(),r=await finish(f);assert.equal(r.status,303);assert.equal(r.headers.get('location'),'/api/v2/admin/portal');
+ const f=await start(),r=await finish(f);assert.equal(r.status,303);assert.equal(r.headers.get('location'),'/hub/');
  const raw=cookieOf(r,'__Host-hub_session');assert.equal(raw.length,43);assert.equal(lastExchange.get('client_secret'),'fixture-secret');assert.equal(lastExchange.get('code_verifier'),f.cookie.split('=')[1]);
  const rows=await db.prepare('SELECT * FROM portal_sessions').all();assert.equal(rows.results.length,1);assert.notEqual(rows.results[0].session_hash,raw);assert.ok(!JSON.stringify(rows.results).includes('fixture-secret'));
  assert.equal((await finish(f)).status,400);

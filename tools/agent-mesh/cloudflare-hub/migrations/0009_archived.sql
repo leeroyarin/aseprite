@@ -1,0 +1,2 @@
+ALTER TABLE projects ADD COLUMN archived_at INTEGER DEFAULT 0;
+ALTER TABLE agent_registry ADD COLUMN archived_at INTEGER DEFAULT 0;

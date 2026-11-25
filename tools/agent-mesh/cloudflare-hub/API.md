@@ -450,3 +450,32 @@ use Secure, HttpOnly, SameSite=Lax host-only cookies, no browser token storage. 
 closed with 503; missing/invalid sessions return 401 for APIs and redirect the portal to login.
 GET /admin/inbox now redirects to the protected v2 console. There is no charge/card requirement
 for this identity flow; normal Worker resource limits still apply.
+
+
+## React owner portal at /hub/ (2026-11-07)
+
+The React UI from the agent-hub-web project (`feature/web-ui`) is served by this Worker as static assets
+(Workers Assets, binding `ASSETS`, `run_worker_first = true`, files built into `web-dist/hub/` by
+`npm run build:portal`). `src/portal-app.ts` answers `/hub` (308 to `/hub/`) and `/hub/*`:
+
+- GET/HEAD only (405 otherwise). 503 `{error}` if the assets binding is missing. Cookies and Authorization are
+  never forwarded to the asset store.
+- **The files are public, by decision.** They are compiled UI with no data or secrets; the shell has to load
+  signed out to show the sign-in screen and to explain an expired session. All data is behind
+  `/api/v2/admin/*`, which verifies the owner session cookie on every request (unchanged, still 401 without it).
+- An extension-less path under `/hub/` (client-side routes such as `/hub/p/<project>/c/<channel>`) returns the
+  shell (`index.html`); a missing file with an extension is a real 404. HTML is `Cache-Control: no-store` with
+  `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'
+  https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self';
+  object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`. `/hub/assets/*` is
+  content-hashed and `immutable`; other files `no-cache`. All carry `nosniff` and `Referrer-Policy: no-referrer`.
+- The GitHub callback (`/api/v2/auth/github/callback`) now redirects to `/hub/` instead of
+  `/api/v2/admin/portal`. The basic console remains at `/api/v2/admin/portal` (and `/admin/inbox` still
+  redirects to it) until the owner retires it.
+- Native routes (`/send`, `/inbox`, `/connect`, `/connections`) and every `/api/v2/*` route are unchanged.
+
+Which `/api/v2/admin` routes the React UI calls, and how, is mapped in the frontend project's
+`web/WORKER-INTEGRATION.md`. Two behaviors worth knowing when changing this API: the owner identity's read
+budget (120/min for the single `hub` identity) is shared by every open tab and the old console, and
+`GET /admin/inbox` also returns the per-recipient `ch-…` delivery copies of channel messages, which the UI hides
+because the channel already shows the message.

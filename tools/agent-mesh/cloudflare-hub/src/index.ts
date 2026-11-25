@@ -1,5 +1,6 @@
 import { githubAuthRoute, verifyGithubSession, GithubAuthFailure } from "./github-auth";
 import { redact } from "./redaction";
+import { portalApp } from "./portal-app";
 import { V2Transport, fetchV2 } from "./v2";
 
 export interface Env {
@@ -1704,6 +1705,9 @@ export default {
     const url = new URL(request.url);
     const authResponse=await githubAuthRoute(request,env);
     if(authResponse)return authResponse;
+    // The React owner portal (static, public shell; all data stays behind the session cookie).
+    const app=await portalApp(request,env);
+    if(app)return app;
     if(env.PORTAL_AUTH_PROVIDER==="github"&&request.method==="GET") {
       if(url.pathname==="/admin/inbox")return new Response(null,{status:303,headers:{Location:"/api/v2/admin/portal","Cache-Control":"no-store"}});
       if(url.pathname==="/api/v2/admin/portal") {

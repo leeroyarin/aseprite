@@ -328,17 +328,31 @@ export class V2Transport {
     const visibility=principal.isAdmin ? scope : `${scope} AND (to_agent='all' OR to_agent=? OR from_agent=?) AND (NOT EXISTS (SELECT 1 FROM feature_outbox o WHERE o.id=mesh_messages.id) OR to_agent=?)`;
     const visibleBindings=principal.isAdmin ? bindings : [...bindings,principal.agent!,principal.agent!,principal.agent!];
     const since=(url.searchParams.get("since") || "0").trim();
-    let cursor=0;
-    if (since!=="0") {
-      const found=await this.db.prepare(`SELECT seq FROM mesh_messages WHERE id=? AND ${visibility}`).bind(since,...visibleBindings).first<{seq:number}>();
+    const before=(url.searchParams.get("before") || "").trim();
+    const tail=["1","true"].includes(url.searchParams.get("tail") || "");
+    if ((tail || before) && since!=="0") throw new Failure(400,"since cannot be combined with tail or before");
+    if (tail && before) throw new Failure(400,"tail cannot be combined with before");
+    const seqOf=async (id:string)=>{
+      const found=await this.db.prepare(`SELECT seq FROM mesh_messages WHERE id=? AND ${visibility}`).bind(id,...visibleBindings).first<{seq:number}>();
       if (!found) throw new Failure(400,"Invalid inbox cursor");
-      cursor=found.seq;
+      return found.seq;
+    };
+    if (tail || before) {
+      // Backward paging: the newest page (tail) or the page just before a message (before).
+      // Messages stay oldest-first; has_more means older messages exist.
+      const upper=before ? await seqOf(before) : Number.MAX_SAFE_INTEGER;
+      const result=await this.db.prepare(`SELECT * FROM mesh_messages WHERE seq<? AND ${visibility} ORDER BY seq DESC LIMIT ?`).bind(upper,...visibleBindings,limit+1).all<Row>();
+      const page=result.results.slice(0,limit).reverse().map(message);
+      const more=result.results.length>limit || moreLegacy;
+      return Response.json({messages:page,latest_id:page.length ? page[page.length-1].id : null,oldest_id:page.length ? page[0].id : null,
+        has_more:more,next_cursor:more && page.length ? page[0].id : null,legacy_sync_pending:moreLegacy});
     }
+    const cursor=since==="0" ? 0 : await seqOf(since);
     const result=await this.db.prepare(`SELECT * FROM mesh_messages WHERE seq>? AND ${visibility} ORDER BY seq ASC LIMIT ?`).bind(cursor,...visibleBindings,limit+1).all<Row>();
     const page=result.results.slice(0,limit).map(message);
     const more=result.results.length>limit || moreLegacy;
     const last=page.length ? page[page.length-1].id : since==="0" ? null : since;
-    return Response.json({messages:page,latest_id:last,has_more:more,next_cursor:more ? last || "0" : null,legacy_sync_pending:moreLegacy});
+    return Response.json({messages:page,latest_id:last,oldest_id:page.length ? page[0].id : null,has_more:more,next_cursor:more ? last || "0" : null,legacy_sync_pending:moreLegacy});
   }
 }
 

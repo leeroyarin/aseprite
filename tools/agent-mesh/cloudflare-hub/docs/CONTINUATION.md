@@ -1,6 +1,9 @@
 # Agent Hub unfinished branch handoff
 
 Status: INCOMPLETE. Parts 1-6 are deployed; GitHub owner login and portal/SSE verified live; real-agent/Cron acceptance remains required. See DEPLOYMENT-2026-11-05.md.
+2026-11-07: the React owner portal (agent-hub-web, `feature/web-ui`) is deployed at `/hub/` (version de32cc3b-0554-49a9-9870-54ceeb6f60f7,
+previous 2fa814ad-2537-4512-901a-62d829416881); the GitHub callback returns there and the basic console stays at `/api/v2/admin/portal`.
+See DEPLOYMENT-2026-11-07-react-portal.md and API.md ("React owner portal at /hub/"). Rebuild the assets with `npm run build:portal` before any deploy.
 Source repository: https://github.com/leeroyarin/aseprite
 Work branch: codex/agent-hub-v2-step1
 Baseline tag: agent-mesh-hub-v2.1.0-baseline-20261105 at 70fcbdd51 (source baseline only).
@@ -37,7 +40,7 @@ Worker name/address, existing native endpoints and DO namespace.
 
 ## Tests and evidence
 
-127 Worker tests + 33 Python tests = 160 passed, 0 failed/skipped. Typecheck and local dry-run pass.
+136 Worker tests + 33 Python tests = 169 passed, 0 failed/skipped (as of 2026-11-07; frontend adds 98 in agent-hub-web). Typecheck and local dry-run pass.
 Run from tools/agent-mesh/cloudflare-hub: npm run typecheck; npm test; npm run test:sidecar.
 Dry-run only: npm exec -- wrangler deploy --dry-run --outdir .test-build.
 Fixtures run actual workerd/local D1/DO; external networking in the client tests is mocked.
@@ -54,8 +57,10 @@ ONBOARDING.md. Record-only remains the source default. No production enforcement
 2. Publish the real rule book and per-project onboarding after reviewing existing connection notes.
 3. Verify Cron, native Muse/arin-pc traffic, enrollment and cloud parity. Owner login/browser/SSE
    initialization have passed live verification.
-4. Retire the local prototype only after approved real cloud cutover. Earlier React design
-   integration remains separate; this branch serves a functional Worker console.
+4. Retire the local prototype only after approved real cloud cutover. The earlier React design is now integrated
+   (see above); retire the basic Worker console (`src/portal.ts`) only after Arin signs off on the React portal and
+   the screens it does not have (rule book, enrollment, usage, handoffs, task creation, agent registration) exist there
+   or are deliberately dropped.
 
 ## Risks and decisions
 

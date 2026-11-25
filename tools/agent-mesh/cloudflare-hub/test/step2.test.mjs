@@ -90,6 +90,16 @@ describe('Part 2 project features in workerd',()=>{
     assert.deepEqual(channels.map(x=>x.type).sort(),['announce','group']);
     assert.equal((await adminPost('/api/v2/admin/projects',{id:'alpha',name:'Changed',agents:['alice']})).status,409);
   });
+  it('lets the owner assign agents to a project and shows them in project and channel members',async()=>{
+    const r=await adminPost('/api/v2/admin/projects/alpha/members',{agents:['alice','bob','carol']});
+    assert.equal(r.status,200,'members save: '+r.status+' '+(await r.clone().text()));
+    assert.deepEqual((await r.json()).agents,['alice','bob','carol']);
+    const projects=(await (await adminApi('/api/v2/admin/projects')).json()).projects;
+    assert.deepEqual(projects.find(x=>x.id==='alpha').agents,['alice','bob','carol']);
+    const channels=(await (await adminApi('/api/v2/admin/projects/alpha/channels')).json()).channels;
+    for(const c of channels)assert.ok(c.members.includes('carol'),c.name+' members include the new agent');
+    assert.equal((await adminPost('/api/v2/admin/projects/alpha/members',{agents:['alice','bob']})).status,200);
+  });
   it('requires membership even with a wildcard token and filters project lists',async()=>{
     assert.equal((await api('/api/v2/projects/alpha/channels',{token:tokens.wild})).status,403);
     assert.deepEqual((await (await api('/api/v2/projects',{token:tokens.outsider})).json()).projects,[]);

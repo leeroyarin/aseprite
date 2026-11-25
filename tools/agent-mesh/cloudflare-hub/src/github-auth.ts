@@ -87,7 +87,8 @@ export async function githubAuthRoute(request:Request,env:GithubConfig):Promise<
       if(String(owner.id)!==env.GITHUB_OWNER_ID)throw new GithubAuthFailure(403,'This GitHub account is not the portal owner');
       const session=random(),now=Date.now();
       await env.HUB_DB.prepare('INSERT INTO portal_sessions(session_hash,owner_id,created_at,expires_at) VALUES(?,?,?,?)').bind(await hash(session),env.GITHUB_OWNER_ID,now,now+SESSION_MS).run();
-      const result=redirect('/api/v2/admin/portal',{'Set-Cookie':setCookie(SESSION,session,SESSION_MS/1000)});
+      // The React owner portal. The basic console stays reachable at /api/v2/admin/portal.
+      const result=redirect('/hub/',{'Set-Cookie':setCookie(SESSION,session,SESSION_MS/1000)});
       result.headers.append('Set-Cookie',setCookie(FLOW,'',0));
       return result;
     }

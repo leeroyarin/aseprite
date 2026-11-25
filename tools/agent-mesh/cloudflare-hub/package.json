@@ -8,6 +8,7 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "build:logger": "python scripts/build_logger_artifact.py",
+    "build:portal": "node scripts/sync-portal.mjs --build",
     "pretest": "python scripts/build_logger_artifact.py --check",
     "test:sidecar": "python -m unittest discover -s test -p test_*.py -v",
     "test": "node --test --test-concurrency=1 test/*.test.mjs"

@@ -154,6 +154,27 @@ describe('Part 1 foundation in workerd with real D1/DO',()=>{
     assert.equal(new Set(seen).size,seen.length);
     assert.ok(seen.includes('legacy-first')&&seen.includes('dedup'));
   });
+  it('returns the newest page with tail=1 and pages back with before=<id>',async()=>{
+    const all=[];let cursor='0';
+    for(let i=0;i<50;i++){const p=await(await api('/api/v2/inbox?projects=alpha&limit=200&since='+encodeURIComponent(cursor))).json();all.push(...p.messages.map(m=>m.id));if(!p.has_more)break;cursor=p.next_cursor;}
+    const tail=await api('/api/v2/inbox?projects=alpha&limit=2&tail=1');assert.equal(tail.status,200);
+    const page=await tail.json();
+    assert.deepEqual(page.messages.map(m=>m.id),all.slice(-2),'tail is the newest messages, oldest first');
+    assert.equal(page.oldest_id,all.at(-2));assert.equal(page.latest_id,all.at(-1));assert.equal(page.has_more,all.length>2);
+    const back=[...page.messages.map(m=>m.id)];let oldest=page.oldest_id,more=page.has_more;
+    for(let i=0;i<50&&more;i++){
+      const r=await api('/api/v2/inbox?projects=alpha&limit=2&before='+encodeURIComponent(oldest));assert.equal(r.status,200);
+      const p=await r.json();back.unshift(...p.messages.map(m=>m.id));oldest=p.oldest_id;more=p.has_more;
+    }
+    assert.deepEqual(back,all,'paging back from the tail covers every message once, in order');
+  });
+  it('rejects mixing since with tail or before, and private before cursors',async()=>{
+    assert.equal((await api('/api/v2/inbox?projects=alpha&tail=1&since=legacy-first')).status,400);
+    assert.equal((await api('/api/v2/inbox?projects=alpha&tail=1&before=legacy-first')).status,400);
+    assert.equal((await api('/api/v2/inbox?projects=alpha&before=does-not-exist')).status,400);
+    await send({id:'private-before-cursor',to:'bob'});
+    assert.equal((await api('/api/v2/inbox?projects=alpha&before=private-before-cursor',{token:tokens.wild})).status,400);
+  });
   it('rejects invalid limits and unknown cursors',async()=>{
     for(const limit of ['0','201','NaN','1.5','1e2']) assert.equal((await api('/api/v2/inbox?limit='+limit)).status,400);
     assert.equal((await api('/api/v2/inbox?since=does-not-exist')).status,400);
