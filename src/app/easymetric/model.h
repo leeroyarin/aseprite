@@ -8,6 +8,7 @@
 #define APP_EASYMETRIC_MODEL_H_INCLUDED
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -21,6 +22,10 @@ namespace app::easymetric {
 constexpr std::size_t kMaxGlbBytes = 32 * 1024 * 1024;
 constexpr int kMinSize = 8;
 constexpr int kMaxSize = 512;
+constexpr int kMinShades = 2;
+constexpr int kMaxShades = 8;
+constexpr int kMinOutlineWidth = 1;
+constexpr int kMaxOutlineWidth = 8;
 
 struct Vec3 {
   float x = 0, y = 0, z = 0;
@@ -54,6 +59,12 @@ struct Settings {
   float ambient = 0.35f;
   float shadowStrength = 1.0f;
   bool groundShadow = true;
+  bool shadesEnabled = false;
+  int shades = 3;
+  bool outlineEnabled = false;
+  int outlineWidth = 1;
+  std::array<uint8_t, 4> outlineColor{ 0, 0, 0, 255 };
+  bool outlineSeparateLayer = false;
   std::vector<Light> lights{ Light{} };
   int clip = -1;
   int start = 0, end = 1000; // Milliseconds in the source clip.
@@ -79,6 +90,12 @@ struct Sample {
 struct Image {
   int width = 0, height = 0;
   std::vector<uint8_t> rgba;
+};
+
+struct RenderResult {
+  Image model;
+  Image outline;
+  Image combined;
 };
 
 using Canceled = std::function<bool()>;
@@ -107,6 +124,9 @@ public:
   void fit(Settings& settings, bool sequence, const Canceled& canceled = {}) const;
   bool fitIfClipped(Settings& settings, const Canceled& canceled = {}) const;
   Image render(const Settings& settings, double time, const Canceled& canceled = {}) const;
+  RenderResult renderLayers(const Settings& settings,
+                            double time,
+                            const Canceled& canceled = {}) const;
 
 private:
   std::unique_ptr<Data> m_data;

@@ -960,6 +960,9 @@ void Model::validate(const Settings& s) const
           "easymetric_model.issue_invalid_model_or_camera_settings");
   require(std::isfinite(s.shadowStrength) && s.shadowStrength >= 0 && s.shadowStrength <= 1,
           "easymetric_model.issue_invalid_lighting_settings");
+  require(s.shades >= kMinShades && s.shades <= kMaxShades &&
+            s.outlineWidth >= kMinOutlineWidth && s.outlineWidth <= kMaxOutlineWidth,
+          "easymetric_model.issue_invalid_shading_or_outline_settings");
   require(s.lights.size() <= 4, "easymetric_model.issue_at_most_four_lights_are_supported");
   for (const auto& light : s.lights)
     require(finite(light.position) && finite(light.color) && light.intensity >= 0 &&
@@ -1385,6 +1388,95 @@ Vec3 illuminate(const Model::Data& data,
   return result;
 }
 
+float luminance(Vec3 c)
+{
+  return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+}
+
+std::pair<float, float> sceneLightBounds(const Settings& s)
+{
+  const float minLum = std::max(0.0f, s.ambient);
+  float pointDirect = 0.0f;
+  struct DirLight {
+    Vec3 dir;
+    float weight;
+  };
+  std::vector<DirLight> dirLights;
+  for (const auto& light : s.lights) {
+    if (!light.enabled || light.intensity <= 0)
+      continue;
+    const float w = std::max(0.0f, luminance(light.color)) * light.intensity;
+    if (w <= 0.0f)
+      continue;
+    if (light.point)
+      pointDirect += w;
+    else
+      dirLights.push_back({ unit(lightDirection(light)), w });
+  }
+  float dirDirect = 0.0f;
+  if (!dirLights.empty()) {
+    std::vector<Vec3> candidates;
+    candidates.reserve(dirLights.size() + 26);
+    for (const auto& dl : dirLights)
+      candidates.push_back(dl.dir);
+    for (int iz = -1; iz <= 1; ++iz)
+      for (int iy = -1; iy <= 1; ++iy)
+        for (int ix = -1; ix <= 1; ++ix)
+          if (ix || iy || iz)
+            candidates.push_back(unit(Vec3{ float(ix), float(iy), float(iz) }));
+    for (const Vec3& n : candidates) {
+      float sum = 0.0f;
+      for (const auto& dl : dirLights)
+        sum += std::max(0.0f, dot(n, dl.dir)) * dl.weight;
+      dirDirect = std::max(dirDirect, sum);
+    }
+  }
+  return { minLum, minLum + pointDirect + dirDirect };
+}
+
+Vec3 quantizeLight(Vec3 light, float minLum, float maxLum, int shades)
+{
+  const float span = maxLum - minLum;
+  if (span <= 1e-6f || shades < 2)
+    return light;
+  const float l = luminance(light);
+  const float f = std::clamp((l - minLum) / span, 0.0f, 1.0f);
+  const float p = std::pow(f, 1.0f / 2.2f);
+  const float q = std::round(p * float(shades - 1)) / float(shades - 1);
+  const float target = minLum + std::pow(q, 2.2f) * span;
+  if (l > 1e-6f)
+    return light * (target / l);
+  return { target, target, target };
+}
+
+void blendPixelOver(uint8_t* dst, const std::array<uint8_t, 4>& src)
+{
+  const uint8_t sa8 = src[3];
+  if (sa8 == 0)
+    return;
+  if (sa8 == 255 || dst[3] == 0) {
+    dst[0] = src[0];
+    dst[1] = src[1];
+    dst[2] = src[2];
+    dst[3] = src[3];
+    return;
+  }
+  const float sa = sa8 / 255.0f;
+  const float da = dst[3] / 255.0f;
+  const float outA = sa + da * (1.0f - sa);
+  if (outA <= 0.0f) {
+    dst[0] = dst[1] = dst[2] = dst[3] = 0;
+    return;
+  }
+  for (int c = 0; c < 3; ++c) {
+    const float sc = src[c] / 255.0f;
+    const float dc = dst[c] / 255.0f;
+    const float outC = (sc * sa + dc * da * (1.0f - sa)) / outA;
+    dst[c] = uint8_t(std::round(std::clamp(outC, 0.0f, 1.0f) * 255.0f));
+  }
+  dst[3] = uint8_t(std::round(std::clamp(outA, 0.0f, 1.0f) * 255.0f));
+}
+
 uint8_t groundShadowAlpha(const Model::Data& data,
                           const Settings& settings,
                           const std::vector<PosedMesh>& meshes,
@@ -1415,9 +1507,7 @@ uint8_t groundShadowAlpha(const Model::Data& data,
     }
     if (direction.y <= 1e-4f)
       continue;
-    const float lum =
-      (0.2126f * light.color.x + 0.7152f * light.color.y + 0.0722f * light.color.z) *
-      light.intensity * attenuation * direction.y;
+    const float lum = luminance(light.color) * light.intensity * attenuation * direction.y;
     if (lum <= 0.0f)
       continue;
     totalDirect += lum;
@@ -1538,6 +1628,11 @@ bool Model::fitIfClipped(Settings& s, const Canceled& canceled) const
 
 Image Model::render(const Settings& s, double time, const Canceled& canceled) const
 {
+  return renderLayers(s, time, canceled).combined;
+}
+
+RenderResult Model::renderLayers(const Settings& s, double time, const Canceled& canceled) const
+{
   validate(s);
   struct HitPixel {
     int mesh = -1;
@@ -1550,7 +1645,8 @@ Image Model::render(const Settings& s, double time, const Canceled& canceled) co
     bool unlit = false;
   };
   const std::size_t pixelCount = std::size_t(s.width) * s.height;
-  Image result{ s.width, s.height, std::vector<uint8_t>(pixelCount * 4) };
+  Image modelImg{ s.width, s.height, std::vector<uint8_t>(pixelCount * 4) };
+  Image outlineImg{ s.width, s.height, std::vector<uint8_t>(pixelCount * 4) };
   std::vector<float> depth(pixelCount, -std::numeric_limits<float>::infinity());
   std::vector<HitPixel> hits(pixelCount);
   const auto axes = camera(s);
@@ -1659,6 +1755,7 @@ Image Model::render(const Settings& s, double time, const Canceled& canceled) co
                           !bvh.nodes.empty() && !posedBounds.empty;
   const float groundY = posedBounds.empty ? 0.0f : posedBounds.min.y;
   const float invScale = s.framing / std::min(s.width, s.height);
+  const auto [minLightLum, maxLightLum] = sceneLightBounds(s);
 
   for (int y = 0; y < s.height; ++y) {
     if ((y & 7) == 0)
@@ -1669,23 +1766,25 @@ Image Model::render(const Settings& s, double time, const Canceled& canceled) co
       const auto& hit = hits[index];
       const auto p = index * 4;
       if (hit.mesh >= 0) {
-        const Vec3 light = hit.unlit ? Vec3{ 1, 1, 1 } :
-                                       illuminate(*m_data,
-                                                  s,
-                                                  meshes,
-                                                  bvh,
-                                                  shadowBias,
-                                                  detEps,
-                                                  hit.mesh,
-                                                  hit.tri,
-                                                  hit.point,
-                                                  hit.shadowPoint,
-                                                  hit.normal,
-                                                  hit.faceNormal);
-        result.rgba[p] = linearToSrgb(hit.color[0] * light.x);
-        result.rgba[p + 1] = linearToSrgb(hit.color[1] * light.y);
-        result.rgba[p + 2] = linearToSrgb(hit.color[2] * light.z);
-        result.rgba[p + 3] = 255;
+        Vec3 light = hit.unlit ? Vec3{ 1, 1, 1 } :
+                                 illuminate(*m_data,
+                                            s,
+                                            meshes,
+                                            bvh,
+                                            shadowBias,
+                                            detEps,
+                                            hit.mesh,
+                                            hit.tri,
+                                            hit.point,
+                                            hit.shadowPoint,
+                                            hit.normal,
+                                            hit.faceNormal);
+        if (!hit.unlit && s.shadesEnabled)
+          light = quantizeLight(light, minLightLum, maxLightLum, s.shades);
+        modelImg.rgba[p] = linearToSrgb(hit.color[0] * light.x);
+        modelImg.rgba[p + 1] = linearToSrgb(hit.color[1] * light.y);
+        modelImg.rgba[p + 2] = linearToSrgb(hit.color[2] * light.z);
+        modelImg.rgba[p + 3] = 255;
       }
       else if (drawGround) {
         const float u = (x + 0.5f - s.width * 0.5f) * invScale;
@@ -1696,12 +1795,47 @@ Image Model::render(const Settings& s, double time, const Canceled& canceled) co
           const uint8_t alpha =
             groundShadowAlpha(*m_data, s, meshes, bvh, shadowBias, detEps, groundY, g);
           if (alpha > 0)
-            result.rgba[p + 3] = alpha;
+            modelImg.rgba[p + 3] = alpha;
         }
       }
     }
   }
-  return result;
+
+  Image combined = modelImg;
+  if (s.outlineEnabled && s.outlineColor[3] > 0) {
+    const int r = s.outlineWidth;
+    std::vector<std::pair<int, int>> offsets;
+    offsets.reserve(std::size_t((2 * r + 1) * (2 * r + 1)));
+    for (int dy = -r; dy <= r; ++dy) {
+      for (int dx = -r; dx <= r; ++dx) {
+        if ((dx != 0 || dy != 0) && dx * dx + dy * dy <= r * r)
+          offsets.emplace_back(dx, dy);
+      }
+    }
+    for (int y = 0; y < s.height; ++y) {
+      for (int x = 0; x < s.width; ++x) {
+        const auto index = std::size_t(y) * s.width + x;
+        if (hits[index].mesh >= 0)
+          continue;
+        bool adjacent = false;
+        for (const auto& [dx, dy] : offsets) {
+          const int nx = x + dx;
+          const int ny = y + dy;
+          if (nx >= 0 && nx < s.width && ny >= 0 && ny < s.height &&
+              hits[std::size_t(ny) * s.width + nx].mesh >= 0) {
+            adjacent = true;
+            break;
+          }
+        }
+        if (adjacent) {
+          const auto p = index * 4;
+          std::copy_n(s.outlineColor.data(), 4, outlineImg.rgba.data() + p);
+          blendPixelOver(combined.rgba.data() + p, s.outlineColor);
+        }
+      }
+    }
+  }
+  return { std::move(modelImg), std::move(outlineImg), std::move(combined) };
 }
 
 } // namespace app::easymetric
