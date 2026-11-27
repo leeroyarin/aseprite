@@ -549,6 +549,12 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-27 — Codex (GPT-6): Fetched and fast-forwarded `Aseprite-2.0` from
+  `0e479a376` to `3c61cebee` (PR #39). The two incoming commits add only
+  `.agents/environment.json` for Linux setup; no merge conflicts occurred.
+  Preserved the local Wrangler cache, scratch images, `third_party/fmt` untracked
+  Gradle data, and the existing recovery stash. No installer or build ran.
+
 - 2026-11-26 — Antigravity: Added reusable Model Studio JSON configuration files (`Save Config...`, `Load Config...`, `Copy Config`, `Paste Config`) in `src/app/easymetric/model_project.{h,cpp}`, `model_studio.cpp`, `data/strings/en.ini`:
   - Pretty-printed `.json` config format (`encodeConfig` / `applyConfig`) with independent `model` (orientation, heading, `modelScale`, `basePivot`), `camera`, `lighting` (`ambient`, `shadowStrength`, `groundShadow`, `lights`), and `output` sections.
   - Supports partial configs (e.g. only `model` scale + `lighting` copied/edited by hand) and preserves the target model's per-GLB animation `clip`, `start`/`end`, and keyframe tracks.
