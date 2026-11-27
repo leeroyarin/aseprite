@@ -52,13 +52,17 @@ struct Settings {
   float framing = 1;
   int width = 64, height = 64;
   float ambient = 0.35f;
+  float shadowStrength = 1.0f;
+  bool groundShadow = true;
   std::vector<Light> lights{ Light{} };
   int clip = -1;
   int start = 0, end = 1000; // Milliseconds in the source clip.
   float speed = 1;
   int fps = 12;
+  int exportFrames = 0; // 0 = auto from fps and duration; 1..256 = explicit sequence frame count.
   bool loop = true;
   bool turntable = false;
+  bool fitSequenceOnBake = true;
   std::vector<MotionKey> position, rotation, scale;
 };
 
@@ -101,6 +105,7 @@ public:
   const std::vector<std::string>& warnings() const;
   void validate(const Settings& settings) const;
   void fit(Settings& settings, bool sequence, const Canceled& canceled = {}) const;
+  bool fitIfClipped(Settings& settings, const Canceled& canceled = {}) const;
   Image render(const Settings& settings, double time, const Canceled& canceled = {}) const;
 
 private:

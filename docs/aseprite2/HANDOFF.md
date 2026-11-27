@@ -549,6 +549,39 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-26 — Antigravity: Added reusable Model Studio JSON configuration files (`Save Config...`, `Load Config...`, `Copy Config`, `Paste Config`) in `src/app/easymetric/model_project.{h,cpp}`, `model_studio.cpp`, `data/strings/en.ini`:
+  - Pretty-printed `.json` config format (`encodeConfig` / `applyConfig`) with independent `model` (orientation, heading, `modelScale`, `basePivot`), `camera`, `lighting` (`ambient`, `shadowStrength`, `groundShadow`, `lights`), and `output` sections.
+  - Supports partial configs (e.g. only `model` scale + `lighting` copied/edited by hand) and preserves the target model's per-GLB animation `clip`, `start`/`end`, and keyframe tracks.
+  - Default folder `%APPDATA%\Aseprite2\easymetric\configs\` via `ResourceFinder`, plus clipboard copy/paste via `app::Clipboard` and undoable apply.
+  - Verified: MSVC `aseprite.exe` build, `model_tests.cpp` 14/14 PASS (via temp gtest shim), GUI E2E `Copy Config` / `Paste Config` across two models preserving target `clip` (PASS), `tests/run_all.py --no-ui` (8 Lua suites + 3 goldens PASS), and `tools/install-aseprite2.ps1`.
+- 2026-11-26 — Antigravity: Fixed app crash in `SessionRecorder::checkViews` (`src/app/session_recorder.cpp`, `src/app/ui/editor/editor.cpp`) and added configurable export frame count + anti-clipping sequence export (`src/app/easymetric/model.{h,cpp}`, `model_project.cpp`, `model_studio.cpp`, `data/strings/en.ini`):
+  1. Crash fix (from `Aseprite 2.0-crash-2.0-dev+aaba7dc8b.dmp` at `ui::View::getView` / `session_recorder.cpp:501`): `SessionRecorder` now implements `EditorObserver::onDestroyEditor`, clears `Editor::m_activeEditor` in `Editor::~Editor()`, and validates editor liveness before dereferencing `ed->sprite()` / `View::getView(ed)`. Verified via `recorder_test.py` (15/15) + live UAF tab-close/GC UI repro (`ASEPRITE_RECORD=1`).
+  2. Export frame count & unclipped animation: added `Settings::exportFrames` (`0` = auto from FPS, `1..256` = explicit count) exposed as `Frames (0=Auto)` in Output (`ModelEntry` also consumes `Enter` so typing numbers applies cleanly without triggering `PlayAnimation`). Resampling spans full `[start, end]` range without temporal clipping. Added `Settings::fitSequenceOnBake` (default `true`, checkbox `Fit Full Animation (No Clipping)`) calling `Model::fitIfClipped` before sequence bake so moving limbs/keyframes/turntable never clip off frame edges.
+  Verified: MSVC `aseprite.exe` build, `model_tests.cpp` 13/13 (via `%TEMP%` gtest shim), `recorder_test.py` 15/15, live GUI UAF repro + Model Studio E2E sequence bake (`6 frames`, `1000 ms`, unclipped bounds `15,10,11,12`), `tests/run_all.py --no-ui` (8 Lua suites + 3 goldens PASS), and `tools/install-aseprite2.ps1`.
+- 2026-11-26 — Claude (Review & Hardening): Fixed two shadow-casting defects in `src/app/easymetric/model.cpp`
+  and expanded `model_tests.cpp` to 11/11 cases:
+  1. Smooth-mesh shadow terminator acne: added convex tangent-plane `shadowPoint` offset in `Model::render`
+     plus light-facing culling for `!doubleSided` shadow triangles in `occluded()` (repro convex sphere
+     self-shadowing dropped from 114 bogus pixels / max -127 RGB to 0).
+  2. Scale-invariant shadow thresholds: scaled `detEps`, `diagEps`, and `shadowBias` floor (`1e-12f`) by
+     `sceneExtent` so finely tessellated models at `modelScale=0.01 * scale=0.01` still cast shadows.
+  Verified: MSVC `aseprite.exe` build (exit 0), 11/11 `model_tests.cpp` (via temp gtest shim),
+  100k-triangle 2-light 256x256 render benchmark (~136 ms), GUI E2E + visual screenshot inspection
+  of smooth sphere + torso/arm self-shadows and ground shadows via `uitest.py`, and
+  `tests/run_all.py --no-ui` (8 Lua suites + 3 goldens PASS).
+
+- 2026-11-26 — Claude: Added cast shadow support and configurable shadow strength to Easymetric
+  Model Studio (`src/app/easymetric/model.{h,cpp}`, `model_project.cpp`, `model_studio.cpp`,
+  `data/strings/en.ini`). `Model::render` now runs a deferred G-buffer + BVH any-hit shadow ray
+  pass for directional and point lights (supporting alpha-masked textures and skinned/animated
+  geometry) plus an optional shadow-catcher ground plane (`groundShadow`, default true) below the
+  model. Added `shadowStrength` (0..1, default 1.0) and `groundShadow` to `Settings`, persisted in
+  project JSON with backward-compatible decoding for legacy files, and exposed **Shadow Strength**
+  and **Ground Shadow** in the Lighting tab. Verified: Windows MSVC build (`aseprite.exe`), 9/9
+  native `model_tests.cpp` cases (compiled via temp gtest shim because `third_party/gtest` is not
+  checked out), real GUI E2E test via `uitest.py` (Render Pose pixel/alpha checks across
+  strength/ground toggles), and `tests/run_all.py --no-ui` (8 Lua suites + 3 goldens PASS).
+
 - 2026-11-25 — Codex (GPT-6): Switched the main checkout to `Aseprite-2.0` and
   integrated the smart-object/mesh branch plus the pending React Agent Hub Worker
   portal source. Kept the old checkout's uncommitted work with a recovery stash and

@@ -14,11 +14,13 @@
 #include "app/file_selector.h"
 #include "app/i18n/strings.h"
 #include "app/job.h"
+#include "app/resource_finder.h"
 #include "app/tx.h"
 #include "app/ui/button_set.h"
 #include "app/ui/doc_view.h"
 #include "app/ui/editor/editor.h"
 #include "app/ui_context.h"
+#include "app/util/clipboard.h"
 #include "app/util/conversion_to_surface.h"
 #include "base/file_handle.h"
 #include "base/fs.h"
@@ -40,6 +42,7 @@
 #include "ui/combobox.h"
 #include "ui/entry.h"
 #include "ui/graphics.h"
+#include "ui/keys.h"
 #include "ui/label.h"
 #include "ui/message.h"
 #include "ui/paint_event.h"
@@ -55,6 +58,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <future>
 #include <limits>
 #include <optional>
@@ -346,8 +350,50 @@ private:
   Drag m_drag = Drag::None;
 };
 
+class ModelEntry : public ui::Entry {
+public:
+  ModelEntry() : ui::Entry(16, "%s", "0") {}
+  obs::signal<void()> Enter;
+
+protected:
+  bool onProcessMessage(ui::Message* msg) override
+  {
+    switch (msg->type()) {
+      case ui::kKeyDownMessage:
+        if (hasFocus()) {
+          const ui::KeyScancode sc = static_cast<ui::KeyMessage*>(msg)->scancode();
+          if (sc == ui::kKeyEnter || sc == ui::kKeyEnterPad) {
+            selectAllText();
+            Enter();
+            return true;
+          }
+        }
+        break;
+      case ui::kFocusEnterMessage: m_selectOnRelease = true; break;
+      case ui::kMouseDownMessage:
+        m_downPos = static_cast<ui::MouseMessage*>(msg)->position();
+        break;
+      case ui::kMouseUpMessage: {
+        const bool result = ui::Entry::onProcessMessage(msg);
+        const gfx::Point d = static_cast<ui::MouseMessage*>(msg)->position() - m_downPos;
+        const int slop = 6 * ui::guiscale();
+        if (m_selectOnRelease && std::abs(d.x) <= slop && std::abs(d.y) <= slop)
+          selectAllText();
+        m_selectOnRelease = false;
+        return result;
+      }
+      default: break;
+    }
+    return ui::Entry::onProcessMessage(msg);
+  }
+
+private:
+  bool m_selectOnRelease = false;
+  gfx::Point m_downPos;
+};
+
 struct Number {
-  ui::Entry* entry;
+  ModelEntry* entry;
   float min, max;
 
   float value() const
@@ -447,6 +493,12 @@ public:
     m_tools = new ui::VBox;
     m_tools->setChildSpacing(4 * ui::guiscale());
     controls->addChild(m_tools);
+    auto& cfgFiles = row(*m_tools);
+    button(cfgFiles, MODEL_TEXT(save_config), [this] { saveConfig(); });
+    button(cfgFiles, MODEL_TEXT(load_config), [this] { loadConfig(); });
+    auto& cfgClip = row(*m_tools);
+    button(cfgClip, MODEL_TEXT(copy_config), [this] { copyConfig(); });
+    button(cfgClip, MODEL_TEXT(paste_config), [this] { pasteConfig(); });
     auto* tabs = new ButtonSet(3, true);
     tabs->addItem(MODEL_TEXT(model))->initTheme();
     tabs->addItem(MODEL_TEXT(lighting))->initTheme();
@@ -557,10 +609,15 @@ private:
   {
     if (!name.empty())
       label(parent, name);
-    auto* entry = new ui::Entry(16, "%s", "0");
+    auto* entry = new ModelEntry;
     entry->setExpansive(true);
     parent.addChild(entry);
     return { entry, min, max };
+  }
+
+  void bindEnter(const Number& field, Callback work)
+  {
+    field.entry->Enter.connect([this, work = std::move(work)] { action(work); });
   }
 
   std::array<Number, 3> vectorFields(ui::Box& parent, const Text& title, float min, float max)
@@ -644,11 +701,13 @@ private:
 
     auto& framing = row(panel);
     m_framing = number(framing, MODEL_TEXT(framing), 1e-12f, 1e15f);
-    button(framing, MODEL_TEXT(apply), [this] {
+    const auto applyFraming = [this] {
       Settings next = m_settings;
       next.framing = m_framing.value();
       apply(std::move(next));
-    });
+    };
+    button(framing, MODEL_TEXT(apply), applyFraming);
+    bindEnter(m_framing, applyFraming);
     auto& fit = row(panel);
     button(fit, MODEL_TEXT(fit_model), [this] { fitScene(false); });
     button(fit, MODEL_TEXT(fit_sequence), [this] { fitScene(true); });
@@ -683,10 +742,29 @@ private:
     });
     auto& ambient = row(panel);
     m_ambient = number(ambient, MODEL_TEXT(ambient), 0, 2);
-    button(ambient, MODEL_TEXT(apply), [this] {
+    const auto applyAmbient = [this] {
       Settings next = m_settings;
       next.ambient = m_ambient.value();
       apply(std::move(next));
+    };
+    button(ambient, MODEL_TEXT(apply), applyAmbient);
+    bindEnter(m_ambient, applyAmbient);
+    auto& shadow = row(panel);
+    m_shadowStrength = number(shadow, MODEL_TEXT(shadow_strength), 0, 1);
+    const auto applyShadow = [this] {
+      Settings next = m_settings;
+      next.shadowStrength = m_shadowStrength.value();
+      apply(std::move(next));
+    };
+    button(shadow, MODEL_TEXT(apply), applyShadow);
+    bindEnter(m_shadowStrength, applyShadow);
+    m_groundShadow = check(panel, MODEL_TEXT(ground_shadow));
+    m_groundShadow->Click.connect([this] {
+      action([this] {
+        Settings next = m_settings;
+        next.groundShadow = m_groundShadow->isSelected();
+        apply(std::move(next));
+      });
     });
 
     m_lightControls = new ui::VBox;
@@ -763,14 +841,17 @@ private:
         commit();
       });
     });
-    button(panel, MODEL_TEXT(apply_timing), [this] {
+    const auto applyTiming = [this] {
       Settings next = m_settings;
       next.start = m_start.integer();
       next.end = m_end.integer();
       next.speed = m_speed.value();
       next.fps = m_fps.integer();
       apply(std::move(next));
-    });
+    };
+    button(panel, MODEL_TEXT(apply_timing), applyTiming);
+    for (const auto* f : { &m_start, &m_end, &m_speed, &m_fps })
+      bindEnter(*f, applyTiming);
     button(panel, MODEL_TEXT(turntable), [this] {
       Settings next = m_settings;
       next.turntable = !next.turntable;
@@ -857,11 +938,31 @@ private:
     auto& custom = row(panel);
     m_width = number(custom, MODEL_TEXT(width), kMinSize, kMaxSize);
     m_height = number(custom, MODEL_TEXT(height), kMinSize, kMaxSize);
-    button(custom, MODEL_TEXT(apply), [this] {
+    const auto applySize = [this] {
       Settings next = m_settings;
       next.width = m_width.integer();
       next.height = m_height.integer();
       apply(std::move(next));
+    };
+    button(custom, MODEL_TEXT(apply), applySize);
+    bindEnter(m_width, applySize);
+    bindEnter(m_height, applySize);
+    auto& seqRow = row(panel);
+    m_exportFrames = number(seqRow, MODEL_TEXT(export_frames), 0, 256);
+    const auto applyFrames = [this] {
+      Settings next = m_settings;
+      next.exportFrames = m_exportFrames.integer();
+      apply(std::move(next));
+    };
+    button(seqRow, MODEL_TEXT(apply), applyFrames);
+    bindEnter(m_exportFrames, applyFrames);
+    m_fitSequenceOnBake = check(panel, MODEL_TEXT(fit_sequence_on_bake));
+    m_fitSequenceOnBake->Click.connect([this] {
+      action([this] {
+        Settings next = m_settings;
+        next.fitSequenceOnBake = m_fitSequenceOnBake->isSelected();
+        apply(std::move(next));
+      });
     });
     m_destination = combo(panel, { MODEL_TEXT(new_sprite), MODEL_TEXT(active_sprite) });
     auto& bake = row(panel);
@@ -1020,6 +1121,94 @@ private:
     setStatus(m_model->warnings().empty() ? MODEL_TEXT(imported) : MODEL_TEXT(imported_warnings));
   }
 
+  std::string configDir() const
+  {
+    ResourceFinder rf(false);
+    rf.includeUserDir("easymetric/configs");
+    const std::string dir = rf.defaultFilename();
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::u8path(dir), ec);
+    return dir;
+  }
+
+  void saveConfig()
+  {
+    if (!m_model)
+      return;
+    const std::string stem = m_name.empty() ? "model" : base::get_file_title(m_name);
+    const std::string initial = base::join_path(configDir(), stem + ".json");
+    base::paths selection;
+    if (!show_file_selector(MODEL_TEXT(save_config),
+                            initial,
+                            { "json" },
+                            FileSelectorType::Save,
+                            selection) ||
+        selection.empty())
+      return;
+    std::string path = selection.front();
+    if (!base::has_file_extension(path, { "json" }))
+      path += ".json";
+    const std::string text = encodeConfig(m_settings);
+    auto file = base::open_file_with_exception(path, "wb");
+    if (std::fwrite(text.data(), 1, text.size(), file.get()) != text.size() ||
+        std::fflush(file.get()) != 0)
+      throw std::runtime_error(MODEL_TEXT(config_write_failed));
+    setStatus(MODEL_TEXT(config_saved));
+  }
+
+  void loadConfig()
+  {
+    if (!m_model)
+      return;
+    const std::string initial = base::join_path(configDir(), "");
+    base::paths selection;
+    if (!show_file_selector(MODEL_TEXT(load_config),
+                            initial,
+                            { "json" },
+                            FileSelectorType::Open,
+                            selection) ||
+        selection.empty())
+      return;
+    const std::string path = selection.front();
+    auto file = base::open_file_with_exception(path, "rb");
+    std::array<char, 4096> buf;
+    std::string contents;
+    for (;;) {
+      const std::size_t n = std::fread(buf.data(), 1, buf.size(), file.get());
+      if (contents.size() + n > 64 * 1024)
+        throw ModelIssue("easymetric_model.issue_the_saved_easymetric_model_or_settings_are_unr");
+      contents.append(buf.data(), n);
+      if (n < buf.size()) {
+        if (std::ferror(file.get()))
+          throw std::runtime_error(MODEL_TEXT(read_failed));
+        break;
+      }
+    }
+    apply(applyConfig(m_settings, contents));
+    setStatus(MODEL_TEXT(config_loaded));
+  }
+
+  void copyConfig()
+  {
+    if (!m_model)
+      return;
+    if (auto* clipboard = Clipboard::instance())
+      clipboard->setClipboardText(encodeConfig(m_settings));
+    setStatus(MODEL_TEXT(config_copied));
+  }
+
+  void pasteConfig()
+  {
+    if (!m_model)
+      return;
+    std::string text;
+    auto* clipboard = Clipboard::instance();
+    if (!clipboard || !clipboard->getClipboardText(text) || text.empty())
+      throw std::runtime_error(MODEL_TEXT(config_clipboard_empty));
+    apply(applyConfig(m_settings, text));
+    setStatus(MODEL_TEXT(config_pasted));
+  }
+
   void refreshCamera()
   {
     m_yaw->setValue(int(std::round(std::remainder(m_settings.yaw - m_settings.heading, 360.0f))));
@@ -1061,6 +1250,8 @@ private:
       m_marker = m_lightIndex;
     refreshLight();
     m_ambient.set(m_settings.ambient);
+    m_shadowStrength.set(m_settings.shadowStrength);
+    m_groundShadow->setSelected(m_settings.groundShadow);
 
     m_clips->deleteAllItems();
     m_clips->addItem(MODEL_TEXT(rest_pose));
@@ -1076,6 +1267,8 @@ private:
     refreshKeys();
     m_width.set(float(m_settings.width));
     m_height.set(float(m_settings.height));
+    m_exportFrames.set(float(m_settings.exportFrames));
+    m_fitSequenceOnBake->setSelected(m_settings.fitSequenceOnBake);
     int preset = 5;
     for (int i = 0; i < 5; ++i)
       if (m_settings.width == (16 << i) && m_settings.height == m_settings.width)
@@ -1118,7 +1311,10 @@ private:
     m_scrub->setRange(0, total);
     m_scrub->setValue(int(m_time));
     m_play->setText(m_playing ? MODEL_TEXT(pause) : MODEL_TEXT(play));
-    const int count = int(std::ceil(total * double(m_settings.fps) / 1000));
+    const int count =
+      m_settings.exportFrames > 0 ?
+        m_settings.exportFrames :
+        int(std::max(1.0, std::ceil(total * double(m_settings.fps) / 1000)));
     m_sequence->setText(Strings::easymetric_model_sequence_info(int(m_time), total, count));
   }
 
@@ -1237,10 +1433,19 @@ private:
     if (!m_model)
       return;
     m_playing = false;
+    {
+      Settings edited = m_settings;
+      edited.width = m_width.integer();
+      edited.height = m_height.integer();
+      edited.exportFrames = m_exportFrames.integer();
+      if (edited.width != m_settings.width || edited.height != m_settings.height ||
+          edited.exportFrames != m_settings.exportFrames)
+        apply(std::move(edited));
+    }
     refreshTime();
     commit();
     const auto model = m_model;
-    const Settings setup = m_settings;
+    Settings setup = m_settings;
     const bool append = m_destination->getSelectedItemIndex() == 1;
     if (append && (sprite().pixelFormat() != IMAGE_RGB || sprite().width() != setup.width ||
                    sprite().height() != setup.height))
@@ -1256,6 +1461,8 @@ private:
     std::vector<doc::ImageRef> images;
     WorkJob job(sequence ? MODEL_TEXT(bake_sequence) : MODEL_TEXT(render_pose),
                 [&](const Canceled& canceled, const auto& progress) {
+                  if (sequence && setup.fitSequenceOnBake)
+                    model->fitIfClipped(setup, canceled);
                   for (const auto& frame : frames) {
                     if (canceled())
                       return;
@@ -1397,15 +1604,16 @@ private:
   ui::Label *m_assetLabel = nullptr, *m_status = nullptr, *m_heading = nullptr,
             *m_sequence = nullptr;
   ui::Slider *m_yaw = nullptr, *m_pitch = nullptr, *m_scrub = nullptr;
-  ui::CheckBox *m_basePivot = nullptr, *m_lightEnabled = nullptr, *m_loop = nullptr;
+  ui::CheckBox *m_basePivot = nullptr, *m_groundShadow = nullptr, *m_lightEnabled = nullptr,
+               *m_loop = nullptr, *m_fitSequenceOnBake = nullptr;
   ui::ComboBox *m_lights = nullptr, *m_clips = nullptr, *m_tracks = nullptr, *m_keys = nullptr,
                *m_preset = nullptr, *m_destination = nullptr;
   ui::VBox *m_lightControls = nullptr, *m_pointControls = nullptr, *m_directionControls = nullptr;
   ui::Button* m_play = nullptr;
   std::array<Number, 3> m_orientation{}, m_lightPosition{}, m_lightColor{}, m_keyValues{};
-  Number m_modelScale{}, m_framing{}, m_ambient{}, m_lightIntensity{}, m_lightRange{},
-    m_lightAzimuth{}, m_lightElevation{}, m_start{}, m_end{}, m_speed{}, m_fps{}, m_width{},
-    m_height{};
+  Number m_modelScale{}, m_framing{}, m_ambient{}, m_shadowStrength{}, m_lightIntensity{},
+    m_lightRange{}, m_lightAzimuth{}, m_lightElevation{}, m_start{}, m_end{}, m_speed{}, m_fps{},
+    m_width{}, m_height{}, m_exportFrames{};
   int m_lightIndex = -1, m_marker = -1;
   bool m_playing = false, m_previewPending = false, m_refreshing = false;
   double m_time = 0;

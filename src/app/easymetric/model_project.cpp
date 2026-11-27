@@ -135,6 +135,153 @@ std::vector<MotionKey> decodeKeys(const Json& array)
   return result;
 }
 
+std::vector<Light> decodeLights(const Json& lights)
+{
+  if (!lights.is_array() || lights.array_items().size() > 4)
+    invalid();
+  std::vector<Light> result;
+  for (const auto& item : lights.array_items()) {
+    if (!item.is_object())
+      invalid();
+    Light light;
+    light.enabled = boolean(item["enabled"]);
+    light.point = boolean(item["point"]);
+    light.color = vec(item["color"]);
+    light.intensity = number(item["intensity"]);
+    light.position = vec(item["position"]);
+    light.range = number(item["range"]);
+    light.azimuth = number(item["azimuth"]);
+    light.elevation = number(item["elevation"]);
+    result.push_back(light);
+  }
+  return result;
+}
+
+Json::array encodeLights(const std::vector<Light>& src)
+{
+  Json::array lights;
+  for (const auto& light : src) {
+    lights.emplace_back(Json::object{
+      { "enabled",   light.enabled       },
+      { "point",     light.point         },
+      { "color",     vec(light.color)    },
+      { "intensity", light.intensity     },
+      { "position",  vec(light.position) },
+      { "range",     light.range         },
+      { "azimuth",   light.azimuth       },
+      { "elevation", light.elevation     }
+    });
+  }
+  return lights;
+}
+
+void writePrettyJson(std::string& out, const Json& value, int indent)
+{
+  if (value.is_object()) {
+    const auto& items = value.object_items();
+    if (items.empty()) {
+      out += "{}";
+      return;
+    }
+    out += "{\n";
+    std::size_t idx = 0;
+    for (const auto& kv : items) {
+      out.append(indent + 2, ' ');
+      out += Json(kv.first).dump();
+      out += ": ";
+      writePrettyJson(out, kv.second, indent + 2);
+      if (++idx < items.size())
+        out += ',';
+      out += '\n';
+    }
+    out.append(indent, ' ');
+    out += '}';
+  }
+  else if (value.is_array()) {
+    const auto& items = value.array_items();
+    const bool simple = std::all_of(items.begin(), items.end(), [](const Json& item) {
+      return !item.is_object() && !item.is_array();
+    });
+    if (items.empty()) {
+      out += "[]";
+    }
+    else if (simple) {
+      out += '[';
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        if (i > 0)
+          out += ", ";
+        out += items[i].dump();
+      }
+      out += ']';
+    }
+    else {
+      out += "[\n";
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        out.append(indent + 2, ' ');
+        writePrettyJson(out, items[i], indent + 2);
+        if (i + 1 < items.size())
+          out += ',';
+        out += '\n';
+      }
+      out.append(indent, ' ');
+      out += ']';
+    }
+  }
+  else {
+    out += value.dump();
+  }
+}
+
+void applyModelFields(Settings& s, const Json::object& obj)
+{
+  if (obj.count("orientation"))
+    s.orientation = vec(obj.at("orientation"));
+  if (obj.count("heading"))
+    s.heading = number(obj.at("heading"));
+  if (obj.count("modelScale"))
+    s.modelScale = number(obj.at("modelScale"));
+  if (obj.count("basePivot"))
+    s.basePivot = boolean(obj.at("basePivot"));
+}
+
+void applyCameraFields(Settings& s, const Json::object& obj)
+{
+  if (obj.count("yaw"))
+    s.yaw = number(obj.at("yaw"));
+  if (obj.count("pitch"))
+    s.pitch = number(obj.at("pitch"));
+  if (obj.count("target"))
+    s.target = vec(obj.at("target"));
+  if (obj.count("framing"))
+    s.framing = number(obj.at("framing"));
+}
+
+void applyLightingFields(Settings& s, const Json::object& obj)
+{
+  if (obj.count("ambient"))
+    s.ambient = number(obj.at("ambient"));
+  if (obj.count("shadowStrength"))
+    s.shadowStrength = number(obj.at("shadowStrength"));
+  if (obj.count("groundShadow"))
+    s.groundShadow = boolean(obj.at("groundShadow"));
+  if (obj.count("lights"))
+    s.lights = decodeLights(obj.at("lights"));
+}
+
+void applyOutputFields(Settings& s, const Json::object& obj)
+{
+  if (obj.count("width"))
+    s.width = integer(obj.at("width"));
+  if (obj.count("height"))
+    s.height = integer(obj.at("height"));
+  if (obj.count("fps"))
+    s.fps = integer(obj.at("fps"));
+  if (obj.count("exportFrames"))
+    s.exportFrames = integer(obj.at("exportFrames"));
+  if (obj.count("fitSequenceOnBake"))
+    s.fitSequenceOnBake = boolean(obj.at("fitSequenceOnBake"));
+}
+
 } // namespace
 
 bool hasEmbeddedModel(const doc::Sprite& sprite)
@@ -242,29 +389,24 @@ Settings decodeSettings(const std::string& source)
   s.width = integer(json["width"]);
   s.height = integer(json["height"]);
   s.ambient = number(json["ambient"]);
+  const auto& obj = json.object_items();
+  if (obj.count("shadowStrength"))
+    s.shadowStrength = number(json["shadowStrength"]);
+  if (obj.count("groundShadow"))
+    s.groundShadow = boolean(json["groundShadow"]);
   const auto& lights = json["lights"];
-  if (!lights.is_array() || lights.array_items().size() > 4)
-    invalid();
-  s.lights.clear();
-  for (const auto& item : lights.array_items()) {
-    Light light;
-    light.enabled = boolean(item["enabled"]);
-    light.point = boolean(item["point"]);
-    light.color = vec(item["color"]);
-    light.intensity = number(item["intensity"]);
-    light.position = vec(item["position"]);
-    light.range = number(item["range"]);
-    light.azimuth = number(item["azimuth"]);
-    light.elevation = number(item["elevation"]);
-    s.lights.push_back(light);
-  }
+  s.lights = decodeLights(lights);
   s.clip = integer(json["clip"]);
   s.start = integer(json["start"]);
   s.end = integer(json["end"]);
   s.fps = integer(json["fps"]);
+  if (obj.count("exportFrames"))
+    s.exportFrames = integer(json["exportFrames"]);
   s.speed = number(json["speed"]);
   s.loop = boolean(json["loop"]);
   s.turntable = boolean(json["turntable"]);
+  if (obj.count("fitSequenceOnBake"))
+    s.fitSequenceOnBake = boolean(json["fitSequenceOnBake"]);
   s.position = decodeKeys(json["position"]);
   s.rotation = decodeKeys(json["rotation"]);
   s.scale = decodeKeys(json["scale"]);
@@ -273,19 +415,7 @@ Settings decodeSettings(const std::string& source)
 
 std::string encodeSettings(const Settings& s)
 {
-  Json::array lights;
-  for (const auto& light : s.lights) {
-    lights.emplace_back(Json::object{
-      { "enabled",   light.enabled       },
-      { "point",     light.point         },
-      { "color",     vec(light.color)    },
-      { "intensity", light.intensity     },
-      { "position",  vec(light.position) },
-      { "range",     light.range         },
-      { "azimuth",   light.azimuth       },
-      { "elevation", light.elevation     }
-    });
-  }
+  auto lights = encodeLights(s.lights);
   const auto value = Json(Json::object{
                             { "version",     kVersion               },
                             { "orientation", vec(s.orientation)     },
@@ -298,15 +428,19 @@ std::string encodeSettings(const Settings& s)
                             { "framing",     s.framing              },
                             { "width",       s.width                },
                             { "height",      s.height               },
-                            { "ambient",     s.ambient              },
-                            { "lights",      std::move(lights)      },
+                            { "ambient",        s.ambient              },
+                            { "shadowStrength", s.shadowStrength       },
+                            { "groundShadow",   s.groundShadow         },
+                            { "lights",         std::move(lights)      },
                             { "clip",        s.clip                 },
                             { "start",       s.start                },
                             { "end",         s.end                  },
-                            { "fps",         s.fps                  },
-                            { "speed",       s.speed                },
-                            { "loop",        s.loop                 },
-                            { "turntable",   s.turntable            },
+                            { "fps",               s.fps               },
+                            { "exportFrames",      s.exportFrames      },
+                            { "speed",             s.speed             },
+                            { "loop",              s.loop              },
+                            { "turntable",         s.turntable         },
+                            { "fitSequenceOnBake", s.fitSequenceOnBake },
                             { "position",    encodeKeys(s.position) },
                             { "rotation",    encodeKeys(s.rotation) },
                             { "scale",       encodeKeys(s.scale)    }
@@ -315,6 +449,99 @@ std::string encodeSettings(const Settings& s)
   if (value.size() > kSettingsLimit)
     throw ModelIssue("easymetric_model.issue_the_easymetric_setup_exceeds_its_project_stora");
   return value;
+}
+
+std::string encodeConfig(const Settings& s)
+{
+  const Json doc = Json::object{
+    { "version", kVersion },
+    { "model",
+      Json::object{ { "orientation", vec(s.orientation) },
+                    { "heading", s.heading },
+                    { "modelScale", s.modelScale },
+                    { "basePivot", s.basePivot } } },
+    { "camera",
+      Json::object{ { "yaw", s.yaw },
+                    { "pitch", s.pitch },
+                    { "target", vec(s.target) },
+                    { "framing", s.framing } } },
+    { "lighting",
+      Json::object{ { "ambient", s.ambient },
+                    { "shadowStrength", s.shadowStrength },
+                    { "groundShadow", s.groundShadow },
+                    { "lights", encodeLights(s.lights) } } },
+    { "output",
+      Json::object{ { "width", s.width },
+                    { "height", s.height },
+                    { "fps", s.fps },
+                    { "exportFrames", s.exportFrames },
+                    { "fitSequenceOnBake", s.fitSequenceOnBake } } }
+  };
+  std::string out;
+  writePrettyJson(out, doc, 0);
+  out += '\n';
+  if (out.size() > kSettingsLimit)
+    throw ModelIssue("easymetric_model.issue_the_easymetric_setup_exceeds_its_project_stora");
+  return out;
+}
+
+Settings applyConfig(const Settings& current, const std::string& source)
+{
+  if (source.size() > kSettingsLimit)
+    invalid();
+  std::string error;
+  const auto json = Json::parse(source, error);
+  if (!error.empty() || !json.is_object())
+    invalid();
+  const auto& obj = json.object_items();
+  if (obj.count("version") && integer(obj.at("version")) != kVersion)
+    throw ModelIssue("easymetric_model.issue_the_saved_easymetric_setup_uses_an_unsupported");
+
+  Settings next = current;
+  bool appliedAny = false;
+  if (obj.count("model")) {
+    if (!obj.at("model").is_object())
+      invalid();
+    applyModelFields(next, obj.at("model").object_items());
+    appliedAny = true;
+  }
+  if (obj.count("camera")) {
+    if (!obj.at("camera").is_object())
+      invalid();
+    applyCameraFields(next, obj.at("camera").object_items());
+    appliedAny = true;
+  }
+  if (obj.count("lighting")) {
+    if (!obj.at("lighting").is_object())
+      invalid();
+    applyLightingFields(next, obj.at("lighting").object_items());
+    appliedAny = true;
+  }
+  if (obj.count("output")) {
+    if (!obj.at("output").is_object())
+      invalid();
+    applyOutputFields(next, obj.at("output").object_items());
+    appliedAny = true;
+  }
+  if (!appliedAny) {
+    // Allow flat scene/preset JSON without section wrappers.
+    for (const char* k : { "orientation", "heading", "modelScale", "basePivot", "yaw", "pitch",
+                           "target", "framing", "ambient", "shadowStrength", "groundShadow",
+                           "lights", "width", "height", "fps", "exportFrames",
+                           "fitSequenceOnBake" }) {
+      if (obj.count(k)) {
+        appliedAny = true;
+        break;
+      }
+    }
+    if (!appliedAny)
+      invalid();
+    applyModelFields(next, obj);
+    applyCameraFields(next, obj);
+    applyLightingFields(next, obj);
+    applyOutputFields(next, obj);
+  }
+  return next;
 }
 
 void setProjectAsset(Tx& tx, doc::Sprite& sprite, Props asset)

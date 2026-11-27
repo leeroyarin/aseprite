@@ -25,6 +25,7 @@
 #include "app/tools/active_tool_observer.h"
 #include "app/tools/tool.h"
 #include "app/ui/editor/editor.h"
+#include "app/ui/editor/editor_observer.h"
 #include "app/ui_context.h"
 #include "base/time.h"
 #include "doc/layer.h"
@@ -55,6 +56,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <typeinfo>
@@ -169,6 +171,7 @@ bool writePng(const std::string& path, int w, int h, const std::vector<uint8_t>&
 
 class SessionRecorder : public ui::Widget,
                         public ContextObserver,
+                        public EditorObserver,
                         public tools::ActiveToolObserver,
                         public DocUndoObserver {
 public:
@@ -214,6 +217,7 @@ public:
     if (App::instance() && App::instance()->activeToolManager())
       App::instance()->activeToolManager()->remove_observer(this);
     attachDoc(nullptr);
+    unobserveEditors();
     stopWorker();
     m_out.close();
   }
@@ -378,6 +382,7 @@ private:
             e["face"] = face;
           o["editor"] = e;
         }
+        observeEditor(ed);
         m_lastEditor = ed;
         break;
       }
@@ -425,6 +430,30 @@ private:
       requestShot("command", false);
       touch(base::current_tick());
     }
+  }
+
+  void onDestroyEditor(Editor* editor) override
+  {
+    if (editor == m_lastEditor)
+      m_lastEditor = nullptr;
+    if (m_observedEditors.erase(editor))
+      editor->remove_observer(this);
+    m_views.erase(editor);
+  }
+
+  void observeEditor(Editor* ed)
+  {
+    if (ed && m_observedEditors.insert(ed).second)
+      ed->add_observer(this);
+  }
+
+  void unobserveEditors()
+  {
+    for (Editor* ed : m_observedEditors)
+      ed->remove_observer(this);
+    m_observedEditors.clear();
+    m_lastEditor = nullptr;
+    m_views.clear();
   }
 
   void onActiveSiteChange(const Site& site) override
@@ -497,14 +526,19 @@ private:
   // editor has handled it (filters see a message before its target does).
   void checkViews()
   {
-    for (Editor* ed : { Editor::activeEditor(), m_lastEditor }) {
-      if (!ed || !ed->sprite() || !ui::View::getView(ed))
+    ui::Manager* manager = ui::Manager::getDefault();
+    ui::Widget* mouseWidget = manager ? manager->getMouse() : nullptr;
+    Editor* activeEd = Editor::activeEditor();
+    for (Editor* ed : { activeEd, m_lastEditor }) {
+      if (!ed)
         continue;
-      // m_lastEditor may be stale: only use it while it is still the editor
-      // under the mouse or the active one.
-      if (ed == m_lastEditor && ed != Editor::activeEditor() &&
-          ui::Manager::getDefault()->getMouse() != ed)
+      if (ed != activeEd && ed != mouseWidget)
         continue;
+      if (!m_observedEditors.count(ed) && ed != activeEd)
+        continue;
+      if (!ed->sprite() || !ui::View::getView(ed))
+        continue;
+      observeEditor(ed);
       const double zoom = ed->zoom().scale();
       const gfx::Point scroll = ui::View::getView(ed)->viewScroll();
       auto& last = m_views[ed];
@@ -767,6 +801,7 @@ private:
   std::string m_shotReason;
   int m_shotCount = 0;
   Editor* m_lastEditor = nullptr;
+  std::set<Editor*> m_observedEditors;
   std::map<Editor*, ViewState> m_views;
 
   std::thread m_worker;

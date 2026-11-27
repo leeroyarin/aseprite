@@ -923,17 +923,22 @@ int duration(const Settings& settings)
 std::vector<Sample> samples(const Settings& s)
 {
   const int total = duration(s);
-  require(total > 0 && s.fps >= 1 && s.fps <= 60,
+  require(total > 0 && s.fps >= 1 && s.fps <= 60 && s.exportFrames >= 0 && s.exportFrames <= 256,
           "easymetric_model.issue_set_a_valid_animation_range_and_frame_rate");
-  const int n = int(std::max(1.0, std::ceil(total * double(s.fps) / 1000)));
+  const int n = s.exportFrames > 0 ?
+                  s.exportFrames :
+                  int(std::max(1.0, std::ceil(total * double(s.fps) / 1000)));
   require(n <= 256 && s.width >= kMinSize && s.width <= kMaxSize && s.height >= kMinSize &&
             s.height <= kMaxSize && std::size_t(n) * s.width * s.height * 4 <= 128 * 1024 * 1024,
           "easymetric_model.issue_a_bake_may_contain_at_most_256_frames_and_128");
   std::vector<Sample> result;
+  result.reserve(n);
   for (int i = 0; i < n; ++i) {
-    const double t = double(i) * total / n;
+    const double t = s.exportFrames > 0 && !s.loop && n > 1 ?
+                       double(i) * total / (n - 1) :
+                       double(i) * total / n;
     const double next = double(i + 1) * total / n;
-    result.push_back({ t, int(std::round(next) - std::round(t)) });
+    result.push_back({ t, std::max(1, int(std::round(next) - std::round(t))) });
   }
   return result;
 }
@@ -945,13 +950,16 @@ void Model::validate(const Settings& s) const
     "easymetric_model.issue_output_size_must_be_8_to_512_pixels_per_side");
   require(s.clip >= -1 && s.clip < int(clips().size()) && s.start >= 0 && s.end > s.start &&
             s.end <= (s.clip < 0 ? kMaxDuration : clips()[s.clip].duration) && s.speed >= 0.25f &&
-            s.speed <= 4 && s.fps >= 1 && s.fps <= 60,
+            s.speed <= 4 && s.fps >= 1 && s.fps <= 60 && s.exportFrames >= 0 &&
+            s.exportFrames <= 256,
           "easymetric_model.issue_invalid_animation_settings");
   require(finite(s.orientation) && finite(s.target) && std::isfinite(s.heading) &&
             std::isfinite(s.yaw) && std::isfinite(s.pitch) && std::abs(s.pitch) <= 75 &&
             std::isfinite(s.framing) && s.framing >= 1e-12f && s.framing <= 1e15f &&
             s.modelScale >= 0.01f && s.modelScale <= 100 && s.ambient >= 0 && s.ambient <= 2,
           "easymetric_model.issue_invalid_model_or_camera_settings");
+  require(std::isfinite(s.shadowStrength) && s.shadowStrength >= 0 && s.shadowStrength <= 1,
+          "easymetric_model.issue_invalid_lighting_settings");
   require(s.lights.size() <= 4, "easymetric_model.issue_at_most_four_lights_are_supported");
   for (const auto& light : s.lights)
     require(finite(light.position) && finite(light.color) && light.intensity >= 0 &&
@@ -1075,14 +1083,284 @@ std::array<float, 4> baseColor(const Model::Data& data, const Material& m, Vec3 
   return color;
 }
 
-Vec3 illuminate(const Settings& settings, Vec3 point, Vec3 normal)
+struct PosedVertex {
+  Vec3 p, n, uv;
+};
+
+struct PosedMesh {
+  const Primitive* primitive = nullptr;
+  std::vector<PosedVertex> vertices;
+  bool flipped = false;
+};
+
+struct TriRef {
+  uint32_t mesh = 0;
+  uint32_t tri = 0;
+};
+
+struct BvhNode {
+  Vec3 min, max;
+  uint32_t leftFirst = 0;
+  uint32_t count = 0;
+};
+
+struct ShadowBvh {
+  std::vector<TriRef> refs;
+  std::vector<BvhNode> nodes;
+};
+
+struct BuildItem {
+  TriRef ref;
+  Vec3 min, max, centroid;
+};
+
+float axisValue(Vec3 v, int axis)
+{
+  return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
+}
+
+void subdivideBvh(std::vector<BuildItem>& items,
+                  ShadowBvh& bvh,
+                  uint32_t nodeIdx,
+                  uint32_t start,
+                  uint32_t count,
+                  int depth,
+                  float diagEps,
+                  const Canceled& canceled)
+{
+  if ((bvh.nodes.size() & 1023u) == 0)
+    checkpoint(canceled);
+  Vec3 bmin = items[start].min, bmax = items[start].max;
+  Vec3 cmin = items[start].centroid, cmax = items[start].centroid;
+  for (uint32_t i = start + 1; i < start + count; ++i) {
+    const auto& item = items[i];
+    bmin = { std::min(bmin.x, item.min.x),
+             std::min(bmin.y, item.min.y),
+             std::min(bmin.z, item.min.z) };
+    bmax = { std::max(bmax.x, item.max.x),
+             std::max(bmax.y, item.max.y),
+             std::max(bmax.z, item.max.z) };
+    cmin = { std::min(cmin.x, item.centroid.x),
+             std::min(cmin.y, item.centroid.y),
+             std::min(cmin.z, item.centroid.z) };
+    cmax = { std::max(cmax.x, item.centroid.x),
+             std::max(cmax.y, item.centroid.y),
+             std::max(cmax.z, item.centroid.z) };
+  }
+  bvh.nodes[nodeIdx].min = bmin;
+  bvh.nodes[nodeIdx].max = bmax;
+  if (count <= 4) {
+    bvh.nodes[nodeIdx].leftFirst = start;
+    bvh.nodes[nodeIdx].count = count;
+    return;
+  }
+  const Vec3 diag = cmax - cmin;
+  const int axis = (diag.x >= diag.y && diag.x >= diag.z) ? 0 : (diag.y >= diag.z ? 1 : 2);
+  if (axisValue(diag, axis) <= diagEps) {
+    bvh.nodes[nodeIdx].leftFirst = start;
+    bvh.nodes[nodeIdx].count = count;
+    return;
+  }
+  uint32_t mid = start;
+  if (depth < 24) {
+    const float split = 0.5f * (axisValue(cmin, axis) + axisValue(cmax, axis));
+    const auto it = std::partition(items.begin() + start,
+                                   items.begin() + start + count,
+                                   [axis, split](const BuildItem& item) {
+                                     return axisValue(item.centroid, axis) < split;
+                                   });
+    mid = uint32_t(it - items.begin());
+  }
+  if (depth >= 24 || mid == start || mid == start + count) {
+    mid = start + count / 2;
+    std::nth_element(items.begin() + start,
+                     items.begin() + mid,
+                     items.begin() + start + count,
+                     [axis](const BuildItem& a, const BuildItem& b) {
+                       return axisValue(a.centroid, axis) < axisValue(b.centroid, axis);
+                     });
+  }
+  const uint32_t leftIdx = uint32_t(bvh.nodes.size());
+  bvh.nodes.emplace_back();
+  bvh.nodes.emplace_back();
+  bvh.nodes[nodeIdx].leftFirst = leftIdx;
+  bvh.nodes[nodeIdx].count = 0;
+  subdivideBvh(items, bvh, leftIdx, start, mid - start, depth + 1, diagEps, canceled);
+  subdivideBvh(items, bvh, leftIdx + 1, mid, start + count - mid, depth + 1, diagEps, canceled);
+}
+
+ShadowBvh buildShadowBvh(const std::vector<PosedMesh>& meshes,
+                         float sceneExtent,
+                         const Canceled& canceled)
+{
+  ShadowBvh bvh;
+  std::size_t totalTris = 0;
+  for (const auto& mesh : meshes)
+    totalTris += mesh.primitive->indices.size() / 3;
+  if (!totalTris)
+    return bvh;
+  std::vector<BuildItem> items;
+  items.reserve(totalTris);
+  for (std::size_t m = 0; m < meshes.size(); ++m) {
+    const auto& mesh = meshes[m];
+    const auto& indices = mesh.primitive->indices;
+    const uint32_t triCount = uint32_t(indices.size() / 3);
+    for (uint32_t t = 0; t < triCount; ++t) {
+      if ((items.size() & 4095u) == 0)
+        checkpoint(canceled);
+      const Vec3& a = mesh.vertices[indices[t * 3]].p;
+      const Vec3& b = mesh.vertices[indices[t * 3 + 1]].p;
+      const Vec3& c = mesh.vertices[indices[t * 3 + 2]].p;
+      BuildItem item;
+      item.ref = { uint32_t(m), t };
+      item.min = { std::min({ a.x, b.x, c.x }),
+                   std::min({ a.y, b.y, c.y }),
+                   std::min({ a.z, b.z, c.z }) };
+      item.max = { std::max({ a.x, b.x, c.x }),
+                   std::max({ a.y, b.y, c.y }),
+                   std::max({ a.z, b.z, c.z }) };
+      item.centroid = (a + b + c) * (1.0f / 3.0f);
+      items.push_back(item);
+    }
+  }
+  bvh.nodes.reserve(items.size() * 2);
+  bvh.nodes.emplace_back();
+  const float diagEps = std::max(1e-12f * sceneExtent, 1e-24f);
+  subdivideBvh(items, bvh, 0, 0, uint32_t(items.size()), 0, diagEps, canceled);
+  bvh.refs.reserve(items.size());
+  for (const auto& item : items)
+    bvh.refs.push_back(item.ref);
+  return bvh;
+}
+
+bool occluded(const Model::Data& data,
+              const std::vector<PosedMesh>& meshes,
+              const ShadowBvh& bvh,
+              float detEps,
+              Vec3 origin,
+              Vec3 dir,
+              float tMin,
+              float tMax,
+              int skipMesh,
+              uint32_t skipTri)
+{
+  if (bvh.nodes.empty())
+    return false;
+  const float o[3] = { origin.x, origin.y, origin.z };
+  const float d[3] = { dir.x, dir.y, dir.z };
+  bool zero[3];
+  float inv[3];
+  for (int k = 0; k < 3; ++k) {
+    zero[k] = std::abs(d[k]) < 1e-12f;
+    inv[k] = zero[k] ? 0.0f : 1.0f / d[k];
+  }
+  const auto hitBox = [&](const BvhNode& node) {
+    float lo = tMin;
+    float hi = tMax;
+    const float bmin[3] = { node.min.x, node.min.y, node.min.z };
+    const float bmax[3] = { node.max.x, node.max.y, node.max.z };
+    for (int k = 0; k < 3; ++k) {
+      if (zero[k]) {
+        if (o[k] < bmin[k] || o[k] > bmax[k])
+          return false;
+      }
+      else {
+        float t0 = (bmin[k] - o[k]) * inv[k];
+        float t1 = (bmax[k] - o[k]) * inv[k];
+        if (t0 > t1)
+          std::swap(t0, t1);
+        lo = std::max(lo, t0);
+        hi = std::min(hi, t1);
+        if (lo > hi)
+          return false;
+      }
+    }
+    return true;
+  };
+  if (!hitBox(bvh.nodes[0]))
+    return false;
+  uint32_t stack[128];
+  int sp = 0;
+  stack[sp++] = 0;
+  while (sp > 0) {
+    const auto& node = bvh.nodes[stack[--sp]];
+    if (node.count > 0) {
+      for (uint32_t i = 0; i < node.count; ++i) {
+        const auto& ref = bvh.refs[node.leftFirst + i];
+        if (int(ref.mesh) == skipMesh && ref.tri == skipTri)
+          continue;
+        const auto& mesh = meshes[ref.mesh];
+        const auto& indices = mesh.primitive->indices;
+        const auto& va = mesh.vertices[indices[ref.tri * 3]];
+        const auto& vb = mesh.vertices[indices[ref.tri * 3 + 1]];
+        const auto& vc = mesh.vertices[indices[ref.tri * 3 + 2]];
+        const Vec3 e1 = vb.p - va.p;
+        const Vec3 e2 = vc.p - va.p;
+        const Vec3 pvec = cross(dir, e2);
+        const float det = dot(e1, pvec);
+        if (std::abs(det) < detEps)
+          continue;
+        // For single-sided meshes, only light-facing front triangles cast shadows;
+        // this also prevents shadow-terminator rays from hitting the inside back wall.
+        if (!mesh.primitive->material.doubleSided && (mesh.flipped ? det <= 0.0f : det >= 0.0f))
+          continue;
+        const float invDet = 1.0f / det;
+        const Vec3 tvec = origin - va.p;
+        const float u = dot(tvec, pvec) * invDet;
+        if (u < -1e-5f || u > 1.0f + 1e-5f)
+          continue;
+        const Vec3 qvec = cross(tvec, e1);
+        const float v = dot(dir, qvec) * invDet;
+        if (v < -1e-5f || u + v > 1.0f + 1e-5f)
+          continue;
+        const float t = dot(e2, qvec) * invDet;
+        if (t <= tMin || t >= tMax)
+          continue;
+        if (mesh.primitive->material.masked) {
+          const float w = 1.0f - u - v;
+          const Vec3 uv = va.uv * w + vb.uv * u + vc.uv * v;
+          const auto color = baseColor(data, mesh.primitive->material, uv);
+          if (color[3] < mesh.primitive->material.cutoff)
+            continue;
+        }
+        return true;
+      }
+    }
+    else {
+      const uint32_t left = node.leftFirst;
+      const uint32_t right = left + 1;
+      if (sp < 126) {
+        if (hitBox(bvh.nodes[left]))
+          stack[sp++] = left;
+        if (hitBox(bvh.nodes[right]))
+          stack[sp++] = right;
+      }
+    }
+  }
+  return false;
+}
+
+Vec3 illuminate(const Model::Data& data,
+                const Settings& settings,
+                const std::vector<PosedMesh>& meshes,
+                const ShadowBvh& bvh,
+                float shadowBias,
+                float detEps,
+                int meshIdx,
+                uint32_t triIdx,
+                Vec3 point,
+                Vec3 shadowPoint,
+                Vec3 normal,
+                Vec3 faceNormal)
 {
   Vec3 result{ settings.ambient, settings.ambient, settings.ambient };
   for (const auto& light : settings.lights) {
-    if (!light.enabled)
+    if (!light.enabled || light.intensity <= 0 ||
+        (light.color.x <= 0 && light.color.y <= 0 && light.color.z <= 0))
       continue;
     Vec3 direction = lightDirection(light);
     float attenuation = 1;
+    float maxDist = std::numeric_limits<float>::infinity();
     if (light.point) {
       const auto delta = light.position - point;
       const float distance = length(delta);
@@ -1091,11 +1369,69 @@ Vec3 illuminate(const Settings& settings, Vec3 point, Vec3 normal)
       direction = delta * (1 / distance);
       attenuation = 1 - distance / light.range;
       attenuation *= attenuation;
+      maxDist = std::max(0.0f, distance - shadowBias);
     }
-    result += light.color *
-              (light.intensity * attenuation * std::max(0.0f, dot(normal, direction)));
+    const float ndotl = std::max(0.0f, dot(normal, direction));
+    if (ndotl <= 0)
+      continue;
+    float shadow = 1.0f;
+    if (settings.shadowStrength > 0 && !bvh.nodes.empty() && maxDist > 0) {
+      const Vec3 rayOrigin = shadowPoint + faceNormal * shadowBias;
+      if (occluded(data, meshes, bvh, detEps, rayOrigin, direction, 0.0f, maxDist, meshIdx, triIdx))
+        shadow = 1.0f - settings.shadowStrength;
+    }
+    result += light.color * (light.intensity * attenuation * ndotl * shadow);
   }
   return result;
+}
+
+uint8_t groundShadowAlpha(const Model::Data& data,
+                          const Settings& settings,
+                          const std::vector<PosedMesh>& meshes,
+                          const ShadowBvh& bvh,
+                          float shadowBias,
+                          float detEps,
+                          float groundY,
+                          Vec3 point)
+{
+  float totalDirect = 0.0f;
+  float blockedDirect = 0.0f;
+  for (const auto& light : settings.lights) {
+    if (!light.enabled || light.intensity <= 0 ||
+        (light.color.x <= 0 && light.color.y <= 0 && light.color.z <= 0))
+      continue;
+    Vec3 direction = lightDirection(light);
+    float attenuation = 1.0f;
+    float maxDist = std::numeric_limits<float>::infinity();
+    if (light.point) {
+      const auto delta = light.position - point;
+      const float distance = length(delta);
+      if (distance >= light.range || distance < 1e-9f)
+        continue;
+      direction = delta * (1.0f / distance);
+      attenuation = 1.0f - distance / light.range;
+      attenuation *= attenuation;
+      maxDist = std::max(0.0f, distance - shadowBias);
+    }
+    if (direction.y <= 1e-4f)
+      continue;
+    const float lum =
+      (0.2126f * light.color.x + 0.7152f * light.color.y + 0.0722f * light.color.z) *
+      light.intensity * attenuation * direction.y;
+    if (lum <= 0.0f)
+      continue;
+    totalDirect += lum;
+    if (maxDist > 0.0f) {
+      const Vec3 rayOrigin{ point.x, groundY + shadowBias, point.z };
+      if (occluded(data, meshes, bvh, detEps, rayOrigin, direction, 0.0f, maxDist, -1, 0))
+        blockedDirect += lum;
+    }
+  }
+  if (totalDirect <= 0.0f || blockedDirect <= 0.0f)
+    return 0;
+  const float denom = settings.ambient + totalDirect;
+  const float alpha = std::clamp(settings.shadowStrength * (blockedDirect / denom), 0.0f, 1.0f);
+  return uint8_t(std::round(alpha * 255.0f));
 }
 
 float edge(Vec3 a, Vec3 b, Vec3 p)
@@ -1148,8 +1484,13 @@ void Model::fit(Settings& s, bool sequence, const Canceled& canceled) const
       rest);
   };
   if (sequence) {
-    for (const auto& sample : samples(s))
+    const int total = duration(s);
+    const auto seq = samples(s);
+    for (const auto& sample : seq)
       include(sample.time, false);
+    const int dense = std::max(int(seq.size()), 32);
+    for (int i = 0; i <= dense; ++i)
+      include(total > 0 ? double(i) * total / dense : 0.0, false);
   }
   else {
     include(0, true);
@@ -1159,22 +1500,79 @@ void Model::fit(Settings& s, bool sequence, const Canceled& canceled) const
   s.framing = std::max(0.001f, length(bounds.max - bounds.min) * 1.12f);
 }
 
+bool Model::fitIfClipped(Settings& s, const Canceled& canceled) const
+{
+  validate(s);
+  const int total = duration(s);
+  const auto axes = camera(s);
+  Bounds bounds;
+  bool clipped = false;
+  const auto inspect = [&](double t) {
+    scenePose(
+      *m_data,
+      s,
+      t,
+      canceled,
+      [&](const Primitive&, const auto& vertices, bool) {
+        for (const Vertex& v : vertices) {
+          bounds.add(v.p);
+          const Vec3 p = projectWithAxes(s, axes, v.p);
+          if (p.x < 0.0f || p.x > float(s.width) || p.y < 0.0f || p.y > float(s.height))
+            clipped = true;
+        }
+      },
+      false);
+  };
+  const auto seq = samples(s);
+  for (const auto& sample : seq)
+    inspect(sample.time);
+  const int dense = std::max(int(seq.size()), 32);
+  for (int i = 0; i <= dense; ++i)
+    inspect(total > 0 ? double(i) * total / dense : 0.0);
+  if (!clipped || bounds.empty)
+    return false;
+  s.target = bounds.center();
+  s.framing = std::max(0.001f, length(bounds.max - bounds.min) * 1.12f);
+  return true;
+}
+
 Image Model::render(const Settings& s, double time, const Canceled& canceled) const
 {
   validate(s);
-  Image result{ s.width, s.height, std::vector<uint8_t>(std::size_t(s.width) * s.height * 4) };
-  std::vector<float> depth(std::size_t(s.width) * s.height,
-                           -std::numeric_limits<float>::infinity());
+  struct HitPixel {
+    int mesh = -1;
+    uint32_t tri = 0;
+    Vec3 point;
+    Vec3 shadowPoint;
+    Vec3 normal;
+    Vec3 faceNormal;
+    std::array<float, 4> color{};
+    bool unlit = false;
+  };
+  const std::size_t pixelCount = std::size_t(s.width) * s.height;
+  Image result{ s.width, s.height, std::vector<uint8_t>(pixelCount * 4) };
+  std::vector<float> depth(pixelCount, -std::numeric_limits<float>::infinity());
+  std::vector<HitPixel> hits(pixelCount);
   const auto axes = camera(s);
+  std::vector<PosedMesh> meshes;
+  Bounds posedBounds;
   scenePose(*m_data,
             s,
             time,
             canceled,
             [&](const Primitive& primitive, const auto& vertices, bool flipped) {
+              const int meshIdx = int(meshes.size());
+              auto& posed = meshes.emplace_back();
+              posed.primitive = &primitive;
+              posed.flipped = flipped;
+              posed.vertices.reserve(vertices.size());
               std::vector<Vec3> screen;
               screen.reserve(vertices.size());
-              for (const Vertex& v : vertices)
+              for (const Vertex& v : vertices) {
+                posedBounds.add(v.p);
+                posed.vertices.push_back({ v.p, v.n, v.uv });
                 screen.push_back(projectWithAxes(s, axes, v.p));
+              }
               for (std::size_t i = 0; i < primitive.indices.size(); i += 3) {
                 if (((i / 3) & 255u) == 0)
                   checkpoint(canceled);
@@ -1200,6 +1598,8 @@ Image Model::render(const Settings& s, double time, const Canceled& canceled) co
                 const Vertex& vb = vertices[ib];
                 const Vertex& vc = vertices[ic];
                 const Vec3 face = unit(cross(vb.p - va.p, vc.p - va.p)) * (flipped ? -1.0f : 1.0f);
+                const Vec3 faceNormal = back ? face * -1.0f : face;
+                const uint32_t triIdx = uint32_t(i / 3);
                 for (int y = y0; y < y1; ++y) {
                   if ((y & 31) == 0)
                     checkpoint(canceled);
@@ -1220,22 +1620,87 @@ Image Model::render(const Settings& s, double time, const Canceled& canceled) co
                       continue;
                     Vec3 normal = unit(va.n * u + vb.n * v + vc.n * w);
                     if (dot(normal, normal) == 0)
-                      normal = face;
-                    if (back)
+                      normal = faceNormal;
+                    else if (back)
                       normal = normal * -1;
-                    const Vec3 light = primitive.material.unlit ?
-                                         Vec3{ 1, 1, 1 } :
-                                         illuminate(s, va.p * u + vb.p * v + vc.p * w, normal);
-                    const auto p = index * 4;
-                    result.rgba[p] = linearToSrgb(color[0] * light.x);
-                    result.rgba[p + 1] = linearToSrgb(color[1] * light.y);
-                    result.rgba[p + 2] = linearToSrgb(color[2] * light.z);
-                    result.rgba[p + 3] = 255;
+                    const Vec3 hitPoint = va.p * u + vb.p * v + vc.p * w;
+                    const float nSign = back ? -1.0f : 1.0f;
+                    const Vec3 na = va.n * nSign, nb = vb.n * nSign, nc = vc.n * nSign;
+                    const Vec3 shadowPoint =
+                      hitPoint + na * (u * std::max(0.0f, dot(va.p - hitPoint, na))) +
+                      nb * (v * std::max(0.0f, dot(vb.p - hitPoint, nb))) +
+                      nc * (w * std::max(0.0f, dot(vc.p - hitPoint, nc)));
                     depth[index] = z;
+                    hits[index] = { meshIdx,
+                                    triIdx,
+                                    hitPoint,
+                                    shadowPoint,
+                                    normal,
+                                    faceNormal,
+                                    color,
+                                    primitive.material.unlit };
                   }
                 }
               }
             });
+
+  const bool anyActiveLight = std::any_of(s.lights.begin(), s.lights.end(), [](const Light& l) {
+    return l.enabled && l.intensity > 0 &&
+           (l.color.x > 0 || l.color.y > 0 || l.color.z > 0);
+  });
+  const bool needShadows = s.shadowStrength > 0 && anyActiveLight;
+  const float sceneExtent = posedBounds.empty ? 1.0f :
+                                                std::max(length(posedBounds.max - posedBounds.min),
+                                                         1e-12f);
+  const ShadowBvh bvh = needShadows ? buildShadowBvh(meshes, sceneExtent, canceled) : ShadowBvh{};
+  const float shadowBias = std::max(1e-4f * sceneExtent, 1e-12f);
+  const float detEps = std::max(1e-12f * sceneExtent * sceneExtent, 1e-24f);
+  const bool drawGround = s.groundShadow && needShadows && axes.front.y > 1e-3f &&
+                          !bvh.nodes.empty() && !posedBounds.empty;
+  const float groundY = posedBounds.empty ? 0.0f : posedBounds.min.y;
+  const float invScale = s.framing / std::min(s.width, s.height);
+
+  for (int y = 0; y < s.height; ++y) {
+    if ((y & 7) == 0)
+      checkpoint(canceled);
+    const float v = (s.height * 0.5f - (y + 0.5f)) * invScale;
+    for (int x = 0; x < s.width; ++x) {
+      const auto index = std::size_t(y) * s.width + x;
+      const auto& hit = hits[index];
+      const auto p = index * 4;
+      if (hit.mesh >= 0) {
+        const Vec3 light = hit.unlit ? Vec3{ 1, 1, 1 } :
+                                       illuminate(*m_data,
+                                                  s,
+                                                  meshes,
+                                                  bvh,
+                                                  shadowBias,
+                                                  detEps,
+                                                  hit.mesh,
+                                                  hit.tri,
+                                                  hit.point,
+                                                  hit.shadowPoint,
+                                                  hit.normal,
+                                                  hit.faceNormal);
+        result.rgba[p] = linearToSrgb(hit.color[0] * light.x);
+        result.rgba[p + 1] = linearToSrgb(hit.color[1] * light.y);
+        result.rgba[p + 2] = linearToSrgb(hit.color[2] * light.z);
+        result.rgba[p + 3] = 255;
+      }
+      else if (drawGround) {
+        const float u = (x + 0.5f - s.width * 0.5f) * invScale;
+        const float tCam = (groundY - s.target.y - axes.right.y * u - axes.up.y * v) /
+                           axes.front.y;
+        const Vec3 g = s.target + axes.right * u + axes.up * v + axes.front * tCam;
+        if (finite(g)) {
+          const uint8_t alpha =
+            groundShadowAlpha(*m_data, s, meshes, bvh, shadowBias, detEps, groundY, g);
+          if (alpha > 0)
+            result.rgba[p + 3] = alpha;
+        }
+      }
+    }
+  }
   return result;
 }
 

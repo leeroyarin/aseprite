@@ -226,6 +226,8 @@ Editor::~Editor()
   }
 
   m_observers.notifyDestroyEditor(this);
+  if (m_activeEditor == this)
+    m_activeEditor = nullptr;
   m_document->remove_observer(this);
   App::instance()->activeToolManager()->remove_observer(this);
 

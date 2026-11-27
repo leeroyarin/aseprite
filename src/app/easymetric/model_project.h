@@ -30,6 +30,8 @@ doc::UserData::Properties encodeAsset(const std::string& name, const Model& mode
 std::string savedSettings(const doc::Sprite& sprite);
 Settings decodeSettings(const std::string& source);
 std::string encodeSettings(const Settings& settings);
+std::string encodeConfig(const Settings& settings);
+Settings applyConfig(const Settings& current, const std::string& source);
 void setProjectAsset(Tx& tx, doc::Sprite& sprite, doc::UserData::Properties asset);
 void setProjectSettings(Tx& tx, doc::Sprite& sprite, std::string settings);
 void copyProject(const doc::Sprite& original, doc::Sprite& output);
