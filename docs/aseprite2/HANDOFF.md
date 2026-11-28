@@ -549,6 +549,19 @@ powershell -File tools\start-aseprite2.ps1
 - `build/bin/data/extensions/aseprite2-bridge` mirrored from `data/extensions/aseprite2-bridge` so dev runs immediately find it.
 
 ## Log (newest first)
+- 2026-11-28 — Codex (GPT-6): Pulled `origin/Aseprite-2.0` feature commit
+  `8ae95f236` (Model Studio pixel-art shading and silhouette outline) into the
+  main Windows checkout. Local handoff commit `0e1fc79e2` had diverged; resolved
+  the sole `HANDOFF.md` conflict in an isolated worktree, retaining both entries,
+  then fast-forwarded this checkout to merge `9d6bd0161`. Recovery branch:
+  `codex/backup-aseprite2-before-shading-pull-20261128`. Preserved all local
+  untracked assets, the Wrangler cache, `third_party/fmt` data, and prior stash.
+  Windows MSVC app build passed; isolated `aseprite.exe --version` reports
+  `Aseprite 2.0 2.0-dev`. `tests/run_all.py --no-ui` passed 8 Lua suites
+  (193 assertions) and 3 goldens. Native Model Studio tests and GUI workflow
+  were not rerun on Windows; Linux 19/19 and GUI evidence are in the incoming
+  feature entry below. Installed app and remote branch were not changed.
+
 - 2026-11-27 — Codex (GPT-6): Fetched and fast-forwarded `Aseprite-2.0` from
   `0e479a376` to `3c61cebee` (PR #39). The two incoming commits add only
   `.agents/environment.json` for Linux setup; no merge conflicts occurred.
