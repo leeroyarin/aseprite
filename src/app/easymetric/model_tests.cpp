@@ -16,6 +16,13 @@
 #include "app/tx.h"
 #include "base/convert_to.h"
 #include "base/fs.h"
+#include "doc/cel.h"
+#include "doc/image.h"
+#include "doc/layer.h"
+#include "doc/primitives.h"
+#include "doc/sprite.h"
+#include "doc/tag.h"
+#include "doc/tags.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +30,7 @@
 #include <cstring>
 #include <limits>
 #include <png.h>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -895,4 +903,492 @@ TEST(EasymetricModel, ConfigFileEncodesAndAppliesScaleAndLightingAcrossModels)
   EXPECT_THROW(applyConfig(target, "{}"), std::runtime_error);
   EXPECT_THROW(applyConfig(target, R"({"version":99,"model":{"modelScale":1}})"),
                std::runtime_error);
+}
+
+TEST(EasymetricModel, ShadesQuantizeLightingAndPreserveTexturedMaterials)
+{
+  // 2x1 RGBA PNG texture: left texel = red (240,40,40), right texel = teal (40,220,220).
+  uint8_t texPixels[8] = { 240, 40, 40, 255, 40, 220, 220, 255 };
+  std::vector<uint8_t> pngBytes;
+  png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+  ASSERT_TRUE(png != nullptr);
+  png_infop info = png_create_info_struct(png);
+  ASSERT_TRUE(info != nullptr);
+  png_set_write_fn(
+    png,
+    &pngBytes,
+    [](png_structp p, png_bytep data, png_size_t len) {
+      auto* out = static_cast<std::vector<uint8_t>*>(png_get_io_ptr(p));
+      out->insert(out->end(), data, data + len);
+    },
+    nullptr);
+  png_set_IHDR(png, info, 2, 1, 8, PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE,
+               PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+  png_write_info(png, info);
+  png_bytep rows[1] = { texPixels };
+  png_write_image(png, rows);
+  png_write_end(png, nullptr);
+  png_destroy_write_struct(&png, &info);
+
+  // Build two curved hemisphere primitives (left u=0.25 red, right u=0.75 teal) + an unlit quad.
+  std::vector<float> pos, norm, uv;
+  std::vector<uint32_t> leftIdx, rightIdx, unlitIdx;
+  const int stacks = 12, slices = 16;
+  const float pi = 3.14159265358979323846f;
+  const auto addHemisphere = [&](float uCoord, float thetaStart, float thetaEnd,
+                                 std::vector<uint32_t>& outIdx) {
+    const uint32_t base = uint32_t(pos.size() / 3);
+    for (int i = 0; i <= stacks; ++i) {
+      const float phi = pi * i / stacks;
+      for (int j = 0; j <= slices / 2; ++j) {
+        const float theta = thetaStart + (thetaEnd - thetaStart) * j / (slices / 2);
+        const float x = std::sin(phi) * std::cos(theta);
+        const float y = std::cos(phi);
+        const float z = std::sin(phi) * std::sin(theta);
+        pos.insert(pos.end(), { x, y, z });
+        norm.insert(norm.end(), { x, y, z });
+        uv.insert(uv.end(), { uCoord, 0.5f });
+      }
+    }
+    const int rowStride = slices / 2 + 1;
+    for (int i = 0; i < stacks; ++i) {
+      for (int j = 0; j < slices / 2; ++j) {
+        const uint32_t a = base + i * rowStride + j;
+        const uint32_t b = base + (i + 1) * rowStride + j;
+        const uint32_t c = b + 1;
+        const uint32_t d = a + 1;
+        if (i != stacks - 1)
+          outIdx.insert(outIdx.end(), { a, c, b });
+        if (i != 0)
+          outIdx.insert(outIdx.end(), { a, d, c });
+      }
+    }
+  };
+  addHemisphere(0.25f, pi * 0.5f, pi * 1.5f, leftIdx);  // -X half
+  addHemisphere(0.75f, -pi * 0.5f, pi * 0.5f, rightIdx); // +X half
+
+  // Unlit green marker quad tucked in front bottom-right.
+  const uint32_t unlitBase = uint32_t(pos.size() / 3);
+  pos.insert(pos.end(), { 0.8f, -0.9f, 1.1f, 1.0f, -0.9f, 1.1f, 1.0f, -0.7f, 1.1f, 0.8f, -0.7f, 1.1f });
+  for (int i = 0; i < 4; ++i) {
+    norm.insert(norm.end(), { 0.0f, 0.0f, 1.0f });
+    uv.insert(uv.end(), { 0.0f, 0.0f });
+  }
+  unlitIdx = { unlitBase, unlitBase + 1, unlitBase + 2, unlitBase, unlitBase + 2, unlitBase + 3 };
+
+  std::vector<uint8_t> bin;
+  for (float f : pos)
+    floats(bin, { f });
+  const std::size_t normOff = bin.size();
+  for (float f : norm)
+    floats(bin, { f });
+  const std::size_t uvOff = bin.size();
+  for (float f : uv)
+    floats(bin, { f });
+  const std::size_t leftOff = bin.size();
+  for (uint32_t id : leftIdx)
+    word(bin, id);
+  const std::size_t rightOff = bin.size();
+  for (uint32_t id : rightIdx)
+    word(bin, id);
+  const std::size_t unlitOff = bin.size();
+  for (uint32_t id : unlitIdx)
+    word(bin, id);
+  const std::size_t pngOff = bin.size();
+  bin.insert(bin.end(), pngBytes.begin(), pngBytes.end());
+
+  const std::size_t vCount = pos.size() / 3;
+  std::string json =
+    R"({"asset":{"version":"2.0"},"extensionsUsed":["KHR_materials_unlit"],
+        "scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+        "images":[{"bufferView":6,"mimeType":"image/png"}],
+        "textures":[{"source":0,"sampler":0}],
+        "samplers":[{"magFilter":9728,"minFilter":9728,"wrapS":33071,"wrapT":33071}],
+        "materials":[
+          {"pbrMetallicRoughness":{"baseColorTexture":{"index":0}}},
+          {"extensions":{"KHR_materials_unlit":{}},"pbrMetallicRoughness":{"baseColorFactor":[0.15,0.85,0.2,1]}}
+        ],
+        "meshes":[{"primitives":[
+          {"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":0},
+          {"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":4,"material":0},
+          {"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":5,"material":1}
+        ]}],
+        "buffers":[{"byteLength":)" + std::to_string(bin.size()) + R"(}],
+        "bufferViews":[
+          {"buffer":0,"byteOffset":0,"byteLength":)" + std::to_string(normOff) + R"(},
+          {"buffer":0,"byteOffset":)" + std::to_string(normOff) + R"(,"byteLength":)" + std::to_string(uvOff - normOff) + R"(},
+          {"buffer":0,"byteOffset":)" + std::to_string(uvOff) + R"(,"byteLength":)" + std::to_string(leftOff - uvOff) + R"(},
+          {"buffer":0,"byteOffset":)" + std::to_string(leftOff) + R"(,"byteLength":)" + std::to_string(rightOff - leftOff) + R"(},
+          {"buffer":0,"byteOffset":)" + std::to_string(rightOff) + R"(,"byteLength":)" + std::to_string(unlitOff - rightOff) + R"(},
+          {"buffer":0,"byteOffset":)" + std::to_string(unlitOff) + R"(,"byteLength":)" + std::to_string(pngOff - unlitOff) + R"(},
+          {"buffer":0,"byteOffset":)" + std::to_string(pngOff) + R"(,"byteLength":)" + std::to_string(pngBytes.size()) + R"(}
+        ],
+        "accessors":[
+          {"bufferView":0,"componentType":5126,"count":)" + std::to_string(vCount) + R"(,"type":"VEC3","min":[-1,-1,-1],"max":[1,1,1.1]},
+          {"bufferView":1,"componentType":5126,"count":)" + std::to_string(vCount) + R"(,"type":"VEC3"},
+          {"bufferView":2,"componentType":5126,"count":)" + std::to_string(vCount) + R"(,"type":"VEC2"},
+          {"bufferView":3,"componentType":5125,"count":)" + std::to_string(leftIdx.size()) + R"(,"type":"SCALAR"},
+          {"bufferView":4,"componentType":5125,"count":)" + std::to_string(rightIdx.size()) + R"(,"type":"SCALAR"},
+          {"bufferView":5,"componentType":5125,"count":)" + std::to_string(unlitIdx.size()) + R"(,"type":"SCALAR"}
+        ]})";
+  const Model model(glb(std::move(json), std::move(bin)));
+
+  Settings settings;
+  settings.width = settings.height = 96;
+  settings.yaw = 0;
+  settings.pitch = 10;
+  settings.ambient = 0.25f;
+  settings.groundShadow = false;
+  settings.lights[0].azimuth = 35;
+  settings.lights[0].elevation = 35;
+  settings.lights[0].intensity = 0.9f;
+  model.fit(settings, false);
+
+  const auto collectTones = [](const Image& img) {
+    std::set<uint32_t> redTones, tealTones, greenUnlit;
+    for (std::size_t i = 0; i < img.rgba.size(); i += 4) {
+      if (img.rgba[i + 3] != 255)
+        continue;
+      const uint8_t r = img.rgba[i], g = img.rgba[i + 1], b = img.rgba[i + 2];
+      const uint32_t key = (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
+      if (r > g + 30 && r > b + 30)
+        redTones.insert(key);
+      else if (g > r + 30 && b > r + 30)
+        tealTones.insert(key);
+      else if (g > r + 30 && g > b + 30)
+        greenUnlit.insert(key);
+    }
+    return std::tuple{ redTones, tealTones, greenUnlit };
+  };
+
+  settings.shadesEnabled = false;
+  const auto smooth = model.render(settings, 0);
+  const auto [smoothRed, smoothTeal, smoothUnlit] = collectTones(smooth);
+  EXPECT_GT(smoothRed.size(), 8u);
+  EXPECT_GT(smoothTeal.size(), 8u);
+  EXPECT_EQ(smoothUnlit.size(), 1u);
+
+  for (int count : { 2, 3, 5, 8 }) {
+    settings.shadesEnabled = true;
+    settings.shades = count;
+    const auto layers = model.renderLayers(settings, 0);
+    EXPECT_EQ(model.render(settings, 0).rgba, layers.combined.rgba);
+    const auto [redTones, tealTones, unlitTones] = collectTones(layers.combined);
+    EXPECT_GE(redTones.size(), 2u);
+    EXPECT_LE(redTones.size(), std::size_t(count));
+    EXPECT_GE(tealTones.size(), 2u);
+    EXPECT_LE(tealTones.size(), std::size_t(count));
+    // Unlit material must remain untouched by shade quantization.
+    EXPECT_EQ(unlitTones, smoothUnlit);
+  }
+}
+
+TEST(EasymetricModel, OutlineFollowsModelSilhouetteNotGroundShadow)
+{
+  const Model model(shadowTestScene());
+  Settings settings;
+  settings.width = settings.height = 64;
+  settings.yaw = 0;
+  settings.pitch = 30;
+  settings.ambient = 0.25f;
+  settings.groundShadow = true;
+  settings.shadowStrength = 1.0f;
+  settings.lights[0].azimuth = 30;
+  settings.lights[0].elevation = 55;
+  model.fit(settings, false);
+  settings.framing *= 1.5f;
+
+  const auto baseline = model.renderLayers(settings, 0);
+  int groundShadowOutsideCount = 0;
+  for (std::size_t i = 0; i < baseline.model.rgba.size(); i += 4) {
+    if (baseline.model.rgba[i + 3] > 0 && baseline.model.rgba[i + 3] < 255)
+      ++groundShadowOutsideCount;
+  }
+  ASSERT_GT(groundShadowOutsideCount, 0);
+
+  settings.outlineEnabled = true;
+  settings.outlineWidth = 1;
+  settings.outlineColor = { 255, 0, 128, 255 };
+  const auto w1 = model.renderLayers(settings, 0);
+  EXPECT_EQ(w1.model.rgba, baseline.model.rgba);
+  EXPECT_EQ(model.render(settings, 0).rgba, w1.combined.rgba);
+
+  int outlineCount1 = 0;
+  for (int y = 0; y < settings.height; ++y) {
+    for (int x = 0; x < settings.width; ++x) {
+      const std::size_t off = (std::size_t(y) * settings.width + x) * 4;
+      const uint8_t oa = w1.outline.rgba[off + 3];
+      if (oa == 0) {
+        EXPECT_EQ(w1.combined.rgba[off + 3], w1.model.rgba[off + 3]);
+        continue;
+      }
+      ++outlineCount1;
+      EXPECT_EQ(w1.outline.rgba[off], 255);
+      EXPECT_EQ(w1.outline.rgba[off + 1], 0);
+      EXPECT_EQ(w1.outline.rgba[off + 2], 128);
+      EXPECT_EQ(oa, 255);
+      // Outline must never overwrite opaque model silhouette pixels.
+      EXPECT_LT(w1.model.rgba[off + 3], 255);
+      // Combined output must carry the outline pixel over background or ground shadow.
+      EXPECT_EQ(w1.combined.rgba[off], 255);
+      EXPECT_EQ(w1.combined.rgba[off + 1], 0);
+      EXPECT_EQ(w1.combined.rgba[off + 2], 128);
+      EXPECT_EQ(w1.combined.rgba[off + 3], 255);
+      // At width 1 (4-connected), at least one cardinal neighbor must be an opaque model pixel,
+      // proving ground shadow pixels are NOT outlined.
+      bool touchesModel = false;
+      for (auto [dx, dy] : { std::pair{ 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) {
+        const int nx = x + dx, ny = y + dy;
+        if (nx >= 0 && nx < settings.width && ny >= 0 && ny < settings.height &&
+            w1.model.rgba[(std::size_t(ny) * settings.width + nx) * 4 + 3] == 255) {
+          touchesModel = true;
+          break;
+        }
+      }
+      EXPECT_TRUE(touchesModel);
+    }
+  }
+  EXPECT_GT(outlineCount1, 0);
+
+  settings.outlineWidth = 2;
+  const auto w2 = model.renderLayers(settings, 0);
+  int outlineCount2 = 0;
+  for (std::size_t i = 0; i < w2.outline.rgba.size(); i += 4)
+    if (w2.outline.rgba[i + 3] == 255)
+      ++outlineCount2;
+  EXPECT_GT(outlineCount2, outlineCount1);
+}
+
+TEST(EasymetricModel, OutlineAndShadingFollowAnimationFrames)
+{
+  const Model model(riggedTriangle());
+  Settings settings;
+  settings.width = settings.height = 64;
+  settings.yaw = settings.pitch = 0;
+  settings.groundShadow = false;
+  settings.shadesEnabled = true;
+  settings.shades = 3;
+  settings.outlineEnabled = true;
+  settings.outlineWidth = 1;
+  settings.outlineColor = { 10, 20, 30, 255 };
+  settings.clip = 0;
+  settings.exportFrames = 4;
+  settings.loop = false;
+  model.fit(settings, true);
+
+  const auto seq = samples(settings);
+  ASSERT_EQ(seq.size(), 4u);
+  int prevModelX = -1;
+  int prevOutlineX = -1;
+  for (const auto& f : seq) {
+    const auto res = model.renderLayers(settings, f.time);
+    const int mx = firstOpaqueX(res.model);
+    const int ox = firstOpaqueX(res.outline);
+    EXPECT_EQ(ox, mx - 1);
+    EXPECT_GT(mx, prevModelX);
+    EXPECT_GT(ox, prevOutlineX);
+    prevModelX = mx;
+    prevOutlineX = ox;
+  }
+}
+
+TEST(EasymetricModel, SeparateOutlineLayerBakeAndSingleStepUndo)
+{
+  const Model model(riggedTriangle());
+  Settings settings;
+  settings.width = settings.height = 64;
+  settings.yaw = settings.pitch = 0;
+  settings.groundShadow = false;
+  settings.shadesEnabled = true;
+  settings.shades = 3;
+  settings.outlineEnabled = true;
+  settings.outlineWidth = 1;
+  settings.outlineColor = { 200, 30, 40, 255 };
+  settings.outlineSeparateLayer = true;
+  settings.clip = 0;
+  settings.exportFrames = 3;
+  settings.loop = false;
+  model.fit(settings, true);
+
+  const auto seq = samples(settings);
+  std::vector<BakedFrame> baked;
+  for (const auto& f : seq) {
+    auto res = model.renderLayers(settings, f.time);
+    baked.push_back({ std::move(res.model), std::move(res.outline), f.duration });
+  }
+
+  app::Context context;
+  std::unique_ptr<app::Doc> doc(context.documents().add(64, 64, doc::ColorMode::RGB, 256));
+  auto* artLayer = static_cast<doc::LayerImage*>(doc->sprite()->root()->firstLayer());
+  ASSERT_TRUE(artLayer);
+  artLayer->setName("Existing Art");
+  auto* artCel = artLayer->cel(0);
+  ASSERT_TRUE(artCel);
+  doc::put_pixel(artCel->image(), 2, 2, doc::rgba(12, 34, 56, 255));
+  const doc::color_t beforeArtPixel = doc::get_pixel(artCel->image(), 2, 2);
+
+  {
+    app::Tx tx(doc.get(), "Bake Sequence");
+    commitBakedOutput(tx,
+                      *doc,
+                      baked,
+                      0,
+                      true,
+                      true,
+                      "Model Render",
+                      "Model Outline",
+                      "Slide");
+    tx.commit();
+  }
+
+  const auto& layers = doc->sprite()->root()->layers();
+  ASSERT_EQ(layers.size(), 3u);
+  EXPECT_EQ(layers[0]->name(), "Existing Art");
+  EXPECT_EQ(layers[1]->name(), "Model Render");
+  EXPECT_EQ(layers[2]->name(), "Model Outline");
+  EXPECT_EQ(doc->sprite()->totalFrames(), 3);
+  ASSERT_TRUE(doc->sprite()->tags().getByName("Slide") != nullptr);
+  EXPECT_EQ(doc::get_pixel(artLayer->cel(0)->image(), 2, 2), beforeArtPixel);
+
+  for (doc::frame_t f = 0; f < 3; ++f) {
+    const auto* rCel = layers[1]->cel(f);
+    const auto* oCel = layers[2]->cel(f);
+    ASSERT_TRUE(rCel != nullptr);
+    ASSERT_TRUE(oCel != nullptr);
+    EXPECT_EQ(doc->sprite()->frameDuration(f), baked[f].duration);
+    int outlinePx = 0;
+    for (int y = 0; y < 64; ++y) {
+      for (int x = 0; x < 64; ++x) {
+        if (doc::rgba_geta(doc::get_pixel(oCel->image(), x, y)) == 255) {
+          ++outlinePx;
+          EXPECT_EQ(doc::rgba_geta(doc::get_pixel(rCel->image(), x, y)), 0);
+        }
+      }
+    }
+    EXPECT_GT(outlinePx, 0);
+  }
+
+  // Single undo removes both Model Outline and Model Render, plus frames & tag.
+  doc->undoHistory()->undo();
+  EXPECT_EQ(doc->sprite()->root()->layers().size(), 1u);
+  EXPECT_EQ(doc->sprite()->root()->layers()[0]->name(), "Existing Art");
+  EXPECT_EQ(doc->sprite()->totalFrames(), 1);
+  EXPECT_EQ(doc->sprite()->tags().getByName("Slide"), nullptr);
+  EXPECT_EQ(doc::get_pixel(artLayer->cel(0)->image(), 2, 2), beforeArtPixel);
+
+  doc->undoHistory()->redo();
+  EXPECT_EQ(doc->sprite()->root()->layers().size(), 3u);
+  EXPECT_EQ(doc->sprite()->totalFrames(), 3);
+  EXPECT_NE(doc->sprite()->tags().getByName("Slide"), nullptr);
+
+  // Combined mode adds only Model Render.
+  doc->undoHistory()->undo();
+  std::vector<BakedFrame> combinedBaked;
+  for (const auto& f : seq) {
+    auto res = model.renderLayers(settings, f.time);
+    combinedBaked.push_back({ std::move(res.combined), Image{}, f.duration });
+  }
+  {
+    app::Tx tx(doc.get(), "Bake Combined");
+    commitBakedOutput(tx,
+                      *doc,
+                      combinedBaked,
+                      0,
+                      false,
+                      false,
+                      "Model Render",
+                      "Model Outline",
+                      "");
+    tx.commit();
+  }
+  ASSERT_EQ(doc->sprite()->root()->layers().size(), 2u);
+  EXPECT_EQ(doc->sprite()->root()->layers()[1]->name(), "Model Render");
+  doc->close();
+}
+
+TEST(EasymetricModel, ShadingAndOutlinePersistAcrossSaveReopenAndConfig)
+{
+  const Model model(riggedTriangle());
+  Settings settings;
+  settings.width = settings.height = 64;
+  settings.yaw = settings.pitch = 0;
+  settings.shadesEnabled = true;
+  settings.shades = 5;
+  settings.outlineEnabled = true;
+  settings.outlineWidth = 3;
+  settings.outlineColor = { 12, 34, 56, 255 };
+  settings.outlineSeparateLayer = true;
+  model.fit(settings, false);
+
+  app::Context context;
+  struct File {
+    std::string path = base::join_path(
+      base::get_temp_path(),
+      "easymetric-shade-outline-" + base::convert_to<std::string>(base::Uuid::Generate()) +
+        ".aseprite");
+    ~File() { std::remove(path.c_str()); }
+  } file;
+  {
+    std::unique_ptr<app::Doc> doc(context.documents().add(64, 64, doc::ColorMode::RGB, 256));
+    doc->setFilename(file.path);
+    {
+      app::Tx tx(doc.get(), "Import GLB");
+      setProjectAsset(tx, *doc->sprite(), encodeAsset("triangle.glb", model));
+      setProjectSettings(tx, *doc->sprite(), encodeSettings(settings));
+      tx.commit();
+    }
+    app::save_document(&context, doc.get());
+    doc->close();
+  }
+
+  std::unique_ptr<app::Doc> reopened(app::load_document(&context, file.path));
+  ASSERT_TRUE(reopened);
+  const auto restoredSettings = decodeSettings(savedSettings(*reopened->sprite()));
+  EXPECT_TRUE(restoredSettings.shadesEnabled);
+  EXPECT_EQ(restoredSettings.shades, 5);
+  EXPECT_TRUE(restoredSettings.outlineEnabled);
+  EXPECT_EQ(restoredSettings.outlineWidth, 3);
+  EXPECT_EQ(restoredSettings.outlineColor, (std::array<uint8_t, 4>{ 12, 34, 56, 255 }));
+  EXPECT_TRUE(restoredSettings.outlineSeparateLayer);
+
+  const auto expected = model.renderLayers(settings, 0);
+  const auto actual = model.renderLayers(restoredSettings, 0);
+  EXPECT_EQ(actual.model.rgba, expected.model.rgba);
+  EXPECT_EQ(actual.outline.rgba, expected.outline.rgba);
+  EXPECT_EQ(actual.combined.rgba, expected.combined.rgba);
+  reopened->close();
+
+  // Legacy saved settings without shading/outline fields default to Off / smooth / 1px black.
+  const auto legacy = decodeSettings(
+    R"({"version":1,"orientation":[0,0,0],"heading":0,"modelScale":1,"basePivot":false,
+        "yaw":45,"pitch":30,"target":[0,0,0],"framing":1,"width":64,"height":64,
+        "ambient":0.35,"lights":[],"clip":-1,"start":0,"end":1000,"fps":12,
+        "speed":1,"loop":true,"turntable":false,"position":[],"rotation":[],"scale":[]})");
+  EXPECT_FALSE(legacy.shadesEnabled);
+  EXPECT_EQ(legacy.shades, 3);
+  EXPECT_FALSE(legacy.outlineEnabled);
+  EXPECT_EQ(legacy.outlineWidth, 1);
+  EXPECT_EQ(legacy.outlineColor, (std::array<uint8_t, 4>{ 0, 0, 0, 255 }));
+  EXPECT_FALSE(legacy.outlineSeparateLayer);
+
+  // Config round-trip & validation boundaries.
+  const std::string cfg = encodeConfig(settings);
+  const Settings applied = applyConfig(Settings{}, cfg);
+  EXPECT_TRUE(applied.shadesEnabled);
+  EXPECT_EQ(applied.shades, 5);
+  EXPECT_TRUE(applied.outlineEnabled);
+  EXPECT_EQ(applied.outlineWidth, 3);
+  EXPECT_EQ(applied.outlineColor, (std::array<uint8_t, 4>{ 12, 34, 56, 255 }));
+  EXPECT_TRUE(applied.outlineSeparateLayer);
+
+  Settings bad = settings;
+  bad.shades = 1;
+  EXPECT_THROW(model.validate(bad), ModelIssue);
+  bad.shades = 9;
+  EXPECT_THROW(model.validate(bad), ModelIssue);
+  bad.shades = 3;
+  bad.outlineWidth = 0;
+  EXPECT_THROW(model.validate(bad), ModelIssue);
+  bad.outlineWidth = 9;
+  EXPECT_THROW(model.validate(bad), ModelIssue);
 }

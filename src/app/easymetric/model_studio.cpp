@@ -17,6 +17,8 @@
 #include "app/resource_finder.h"
 #include "app/tx.h"
 #include "app/ui/button_set.h"
+#include "app/ui/color_button.h"
+#include "app/ui/color_button_options.h"
 #include "app/ui/doc_view.h"
 #include "app/ui/editor/editor.h"
 #include "app/ui_context.h"
@@ -82,22 +84,6 @@ std::string localizedError(const std::exception& error)
   return error.what();
 }
 
-doc::ImageRef documentImage(const Image& src)
-{
-  doc::ImageRef out(doc::Image::create(IMAGE_RGB, src.width, src.height));
-  for (int y = 0; y < src.height; ++y) {
-    for (int x = 0; x < src.width; ++x) {
-      const auto off = (std::size_t(y) * src.width + x) * 4;
-      doc::put_pixel(
-        out.get(),
-        x,
-        y,
-        doc::rgba(src.rgba[off], src.rgba[off + 1], src.rgba[off + 2], src.rgba[off + 3]));
-    }
-  }
-  return out;
-}
-
 class WorkJob : public Job {
 public:
   using Work = std::function<void(const Canceled&, const std::function<void(double)>&)>;
@@ -143,7 +129,7 @@ public:
 
   void setImage(const Image& image)
   {
-    auto doc = documentImage(image);
+    auto doc = toDocumentImage(image);
     m_surface = os::System::instance()->makeRgbaSurface(image.width, image.height);
     convert_image_to_surface(doc.get(),
                              nullptr,
@@ -766,6 +752,26 @@ private:
         apply(std::move(next));
       });
     });
+    auto& shades = row(panel);
+    m_shadesEnabled = check(shades, MODEL_TEXT(shades));
+    m_shades = number(shades, "", float(kMinShades), float(kMaxShades));
+    const auto applyShades = [this] {
+      Settings next = m_settings;
+      next.shades = m_shades.integer();
+      next.shadesEnabled = true;
+      apply(std::move(next));
+    };
+    button(shades, MODEL_TEXT(apply), applyShades);
+    bindEnter(m_shades, applyShades);
+    m_shadesEnabled->Click.connect([this] {
+      action([this] {
+        Settings next = m_settings;
+        next.shadesEnabled = m_shadesEnabled->isSelected();
+        if (next.shadesEnabled)
+          next.shades = m_shades.integer();
+        apply(std::move(next));
+      });
+    });
 
     m_lightControls = new ui::VBox;
     panel.addChild(m_lightControls);
@@ -961,6 +967,56 @@ private:
       action([this] {
         Settings next = m_settings;
         next.fitSequenceOnBake = m_fitSequenceOnBake->isSelected();
+        apply(std::move(next));
+      });
+    });
+    auto& outlineMain = row(panel);
+    m_outlineEnabled = check(outlineMain, MODEL_TEXT(outline));
+    ColorButtonOptions outlineColorOpts;
+    outlineColorOpts.canPinSelector = false;
+    m_outlineColor =
+      new ColorButton(app::Color::fromRgb(0, 0, 0, 255), IMAGE_RGB, outlineColorOpts);
+    outlineMain.addChild(m_outlineColor);
+    auto& outlineWidthRow = row(panel);
+    m_outlineWidth = number(outlineWidthRow,
+                            MODEL_TEXT(outline_width),
+                            float(kMinOutlineWidth),
+                            float(kMaxOutlineWidth));
+    const auto applyOutlineWidth = [this] {
+      Settings next = m_settings;
+      next.outlineWidth = m_outlineWidth.integer();
+      next.outlineEnabled = true;
+      apply(std::move(next));
+    };
+    button(outlineWidthRow, MODEL_TEXT(apply), applyOutlineWidth);
+    bindEnter(m_outlineWidth, applyOutlineWidth);
+    m_outlineEnabled->Click.connect([this] {
+      action([this] {
+        Settings next = m_settings;
+        next.outlineEnabled = m_outlineEnabled->isSelected();
+        if (next.outlineEnabled)
+          next.outlineWidth = m_outlineWidth.integer();
+        apply(std::move(next));
+      });
+    });
+    m_outlineColor->Change.connect([this](const app::Color& color) {
+      if (m_refreshing || !m_model)
+        return;
+      m_settings.outlineColor = { uint8_t(color.getRed()),
+                                  uint8_t(color.getGreen()),
+                                  uint8_t(color.getBlue()),
+                                  uint8_t(color.getAlpha()) };
+      requestPreview();
+      if (!m_outlineColor->isPopupVisible() && !m_outlineColor->hasCapture())
+        action([this] { commit(); });
+    });
+    m_outlineMode = combo(panel, { MODEL_TEXT(outline_combine), MODEL_TEXT(outline_new_layer) });
+    m_outlineMode->Change.connect([this] {
+      if (m_refreshing)
+        return;
+      action([this] {
+        Settings next = m_settings;
+        next.outlineSeparateLayer = m_outlineMode->getSelectedItemIndex() == 1;
         apply(std::move(next));
       });
     });
@@ -1252,6 +1308,8 @@ private:
     m_ambient.set(m_settings.ambient);
     m_shadowStrength.set(m_settings.shadowStrength);
     m_groundShadow->setSelected(m_settings.groundShadow);
+    m_shadesEnabled->setSelected(m_settings.shadesEnabled);
+    m_shades.set(float(m_settings.shades));
 
     m_clips->deleteAllItems();
     m_clips->addItem(MODEL_TEXT(rest_pose));
@@ -1269,6 +1327,13 @@ private:
     m_height.set(float(m_settings.height));
     m_exportFrames.set(float(m_settings.exportFrames));
     m_fitSequenceOnBake->setSelected(m_settings.fitSequenceOnBake);
+    m_outlineEnabled->setSelected(m_settings.outlineEnabled);
+    m_outlineColor->setColor(app::Color::fromRgb(m_settings.outlineColor[0],
+                                                 m_settings.outlineColor[1],
+                                                 m_settings.outlineColor[2],
+                                                 m_settings.outlineColor[3]));
+    m_outlineWidth.set(float(m_settings.outlineWidth));
+    m_outlineMode->setSelectedItemIndex(m_settings.outlineSeparateLayer ? 1 : 0);
     int preset = 5;
     for (int i = 0; i < 5; ++i)
       if (m_settings.width == (16 << i) && m_settings.height == m_settings.width)
@@ -1438,8 +1503,11 @@ private:
       edited.width = m_width.integer();
       edited.height = m_height.integer();
       edited.exportFrames = m_exportFrames.integer();
+      edited.shades = m_shades.integer();
+      edited.outlineWidth = m_outlineWidth.integer();
       if (edited.width != m_settings.width || edited.height != m_settings.height ||
-          edited.exportFrames != m_settings.exportFrames)
+          edited.exportFrames != m_settings.exportFrames || edited.shades != m_settings.shades ||
+          edited.outlineWidth != m_settings.outlineWidth)
         apply(std::move(edited));
     }
     refreshTime();
@@ -1458,7 +1526,8 @@ private:
     if (append && sequence && std::size_t(int(sprite().totalFrames())) + frames.size() > 65535)
       throw std::runtime_error(MODEL_TEXT(frame_limit));
 
-    std::vector<doc::ImageRef> images;
+    const bool separateOutline = setup.outlineEnabled && setup.outlineSeparateLayer;
+    std::vector<BakedFrame> baked;
     WorkJob job(sequence ? MODEL_TEXT(bake_sequence) : MODEL_TEXT(render_pose),
                 [&](const Canceled& canceled, const auto& progress) {
                   if (sequence && setup.fitSequenceOnBake)
@@ -1466,8 +1535,12 @@ private:
                   for (const auto& frame : frames) {
                     if (canceled())
                       return;
-                    images.push_back(documentImage(model->render(setup, frame.time, canceled)));
-                    progress(double(images.size()) / frames.size());
+                    auto rendered = model->renderLayers(setup, frame.time, canceled);
+                    baked.push_back(
+                      { separateOutline ? std::move(rendered.model) : std::move(rendered.combined),
+                        separateOutline ? std::move(rendered.outline) : Image{},
+                        frame.duration });
+                    progress(double(baked.size()) / frames.size());
                   }
                 });
     if (!job.run())
@@ -1487,33 +1560,23 @@ private:
     const auto start = !append  ? doc::frame_t(0) :
                        sequence ? destSprite->totalFrames() :
                                   m_view.primaryEditor()->frame();
+    const auto tagName = setup.turntable ? MODEL_TEXT(turntable_name) :
+                         setup.clip >= 0 ? model->clips()[setup.clip].name :
+                                           MODEL_TEXT(motion_name);
     {
       Tx tx(Tx::LockDoc,
             m_view.document()->context(),
             destination,
             sequence ? MODEL_TEXT(bake_sequence) : MODEL_TEXT(render_pose));
-      DocApi api = destination->getApi(tx);
-      const auto end = start + doc::frame_t(images.size()) - 1;
-      if (end >= destSprite->totalFrames())
-        api.setTotalFrames(destSprite, end + 1);
-      auto* layer = api.newLayer(destSprite->root(), MODEL_TEXT(rendered_layer));
-      for (std::size_t i = 0; i < images.size(); ++i) {
-        const auto frame = start + doc::frame_t(i);
-        api.addCel(layer, frame, images[i]);
-        if (sequence)
-          api.setFrameDuration(destSprite, frame, frames[i].duration);
-      }
-      if (sequence) {
-        const auto name = setup.turntable ? MODEL_TEXT(turntable_name) :
-                          setup.clip >= 0 ? model->clips()[setup.clip].name :
-                                            MODEL_TEXT(motion_name);
-        auto* tag = new doc::Tag(start, end);
-        auto uniqueName = name;
-        for (int i = 2; destSprite->tags().getByName(uniqueName); ++i)
-          uniqueName = fmt::format("{} {}", name, i);
-        tag->setName(uniqueName);
-        tx(new cmd::AddTag(destSprite, tag));
-      }
+      commitBakedOutput(tx,
+                        *destination,
+                        baked,
+                        start,
+                        sequence,
+                        separateOutline,
+                        MODEL_TEXT(rendered_layer),
+                        MODEL_TEXT(outline_layer),
+                        tagName);
       tx.commit();
     }
     if (newDocument) {
@@ -1524,7 +1587,7 @@ private:
       destination->notifyGeneralUpdate();
       m_view.primaryEditor()->setFrame(start);
     }
-    setStatus(Strings::easymetric_model_baked(images.size()));
+    setStatus(Strings::easymetric_model_baked(baked.size()));
   }
 
   void requestPreview()
@@ -1538,6 +1601,12 @@ private:
   {
     if (!isVisible())
       return;
+    const bool colorPopupOpen =
+      m_outlineColor && (m_outlineColor->isPopupVisible() || m_outlineColor->hasCapture());
+    if (m_outlinePopupOpen && !colorPopupOpen)
+      action([this] { commit(); });
+    m_outlinePopupOpen = colorPopupOpen;
+
     syncProject();
     if (m_playing && m_model) {
       const auto now = Clock::now();
@@ -1604,18 +1673,21 @@ private:
   ui::Label *m_assetLabel = nullptr, *m_status = nullptr, *m_heading = nullptr,
             *m_sequence = nullptr;
   ui::Slider *m_yaw = nullptr, *m_pitch = nullptr, *m_scrub = nullptr;
-  ui::CheckBox *m_basePivot = nullptr, *m_groundShadow = nullptr, *m_lightEnabled = nullptr,
-               *m_loop = nullptr, *m_fitSequenceOnBake = nullptr;
+  ui::CheckBox *m_basePivot = nullptr, *m_groundShadow = nullptr, *m_shadesEnabled = nullptr,
+               *m_lightEnabled = nullptr, *m_loop = nullptr, *m_fitSequenceOnBake = nullptr,
+               *m_outlineEnabled = nullptr;
   ui::ComboBox *m_lights = nullptr, *m_clips = nullptr, *m_tracks = nullptr, *m_keys = nullptr,
-               *m_preset = nullptr, *m_destination = nullptr;
+               *m_preset = nullptr, *m_outlineMode = nullptr, *m_destination = nullptr;
+  ColorButton* m_outlineColor = nullptr;
   ui::VBox *m_lightControls = nullptr, *m_pointControls = nullptr, *m_directionControls = nullptr;
   ui::Button* m_play = nullptr;
   std::array<Number, 3> m_orientation{}, m_lightPosition{}, m_lightColor{}, m_keyValues{};
-  Number m_modelScale{}, m_framing{}, m_ambient{}, m_shadowStrength{}, m_lightIntensity{},
-    m_lightRange{}, m_lightAzimuth{}, m_lightElevation{}, m_start{}, m_end{}, m_speed{}, m_fps{},
-    m_width{}, m_height{}, m_exportFrames{};
+  Number m_modelScale{}, m_framing{}, m_ambient{}, m_shadowStrength{}, m_shades{},
+    m_lightIntensity{}, m_lightRange{}, m_lightAzimuth{}, m_lightElevation{}, m_start{}, m_end{},
+    m_speed{}, m_fps{}, m_width{}, m_height{}, m_exportFrames{}, m_outlineWidth{};
   int m_lightIndex = -1, m_marker = -1;
-  bool m_playing = false, m_previewPending = false, m_refreshing = false;
+  bool m_playing = false, m_previewPending = false, m_refreshing = false,
+       m_outlinePopupOpen = false;
   double m_time = 0;
   Clock::time_point m_lastPlay;
   std::atomic<unsigned> m_generation{ 0 };

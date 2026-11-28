@@ -6,10 +6,19 @@
 
 #include "app/easymetric/model_project.h"
 
+#include "app/cmd/add_tag.h"
 #include "app/cmd/set_user_data_property.h"
+#include "app/doc.h"
+#include "app/doc_api.h"
 #include "app/tx.h"
 #include "base/base64.h"
+#include "doc/image.h"
+#include "doc/layer.h"
+#include "doc/primitives.h"
 #include "doc/sprite.h"
+#include "doc/tag.h"
+#include "doc/tags.h"
+#include "fmt/format.h"
 #include "json11.hpp"
 
 #include <algorithm>
@@ -112,6 +121,25 @@ Vec3 vec(const Json& x)
   if (x.array_items().size() != 3)
     invalid();
   return { number(x[0]), number(x[1]), number(x[2]) };
+}
+
+Json encodeColor(const std::array<uint8_t, 4>& c)
+{
+  return Json::array{ int(c[0]), int(c[1]), int(c[2]), int(c[3]) };
+}
+
+std::array<uint8_t, 4> decodeColor(const Json& x)
+{
+  if (!x.is_array() || x.array_items().size() != 4)
+    invalid();
+  std::array<uint8_t, 4> out{};
+  for (int i = 0; i < 4; ++i) {
+    const int v = integer(x[i]);
+    if (v < 0 || v > 255)
+      invalid();
+    out[i] = uint8_t(v);
+  }
+  return out;
 }
 
 Json encodeKeys(const std::vector<MotionKey>& keys)
@@ -264,6 +292,10 @@ void applyLightingFields(Settings& s, const Json::object& obj)
     s.shadowStrength = number(obj.at("shadowStrength"));
   if (obj.count("groundShadow"))
     s.groundShadow = boolean(obj.at("groundShadow"));
+  if (obj.count("shadesEnabled"))
+    s.shadesEnabled = boolean(obj.at("shadesEnabled"));
+  if (obj.count("shades"))
+    s.shades = integer(obj.at("shades"));
   if (obj.count("lights"))
     s.lights = decodeLights(obj.at("lights"));
 }
@@ -280,6 +312,14 @@ void applyOutputFields(Settings& s, const Json::object& obj)
     s.exportFrames = integer(obj.at("exportFrames"));
   if (obj.count("fitSequenceOnBake"))
     s.fitSequenceOnBake = boolean(obj.at("fitSequenceOnBake"));
+  if (obj.count("outlineEnabled"))
+    s.outlineEnabled = boolean(obj.at("outlineEnabled"));
+  if (obj.count("outlineWidth"))
+    s.outlineWidth = integer(obj.at("outlineWidth"));
+  if (obj.count("outlineColor"))
+    s.outlineColor = decodeColor(obj.at("outlineColor"));
+  if (obj.count("outlineSeparateLayer"))
+    s.outlineSeparateLayer = boolean(obj.at("outlineSeparateLayer"));
 }
 
 } // namespace
@@ -394,6 +434,18 @@ Settings decodeSettings(const std::string& source)
     s.shadowStrength = number(json["shadowStrength"]);
   if (obj.count("groundShadow"))
     s.groundShadow = boolean(json["groundShadow"]);
+  if (obj.count("shadesEnabled"))
+    s.shadesEnabled = boolean(json["shadesEnabled"]);
+  if (obj.count("shades"))
+    s.shades = integer(json["shades"]);
+  if (obj.count("outlineEnabled"))
+    s.outlineEnabled = boolean(json["outlineEnabled"]);
+  if (obj.count("outlineWidth"))
+    s.outlineWidth = integer(json["outlineWidth"]);
+  if (obj.count("outlineColor"))
+    s.outlineColor = decodeColor(json["outlineColor"]);
+  if (obj.count("outlineSeparateLayer"))
+    s.outlineSeparateLayer = boolean(json["outlineSeparateLayer"]);
   const auto& lights = json["lights"];
   s.lights = decodeLights(lights);
   s.clip = integer(json["clip"]);
@@ -417,33 +469,39 @@ std::string encodeSettings(const Settings& s)
 {
   auto lights = encodeLights(s.lights);
   const auto value = Json(Json::object{
-                            { "version",     kVersion               },
-                            { "orientation", vec(s.orientation)     },
-                            { "heading",     s.heading              },
-                            { "modelScale",  s.modelScale           },
-                            { "basePivot",   s.basePivot            },
-                            { "yaw",         s.yaw                  },
-                            { "pitch",       s.pitch                },
-                            { "target",      vec(s.target)          },
-                            { "framing",     s.framing              },
-                            { "width",       s.width                },
-                            { "height",      s.height               },
-                            { "ambient",        s.ambient              },
-                            { "shadowStrength", s.shadowStrength       },
-                            { "groundShadow",   s.groundShadow         },
-                            { "lights",         std::move(lights)      },
-                            { "clip",        s.clip                 },
-                            { "start",       s.start                },
-                            { "end",         s.end                  },
-                            { "fps",               s.fps               },
-                            { "exportFrames",      s.exportFrames      },
-                            { "speed",             s.speed             },
-                            { "loop",              s.loop              },
-                            { "turntable",         s.turntable         },
-                            { "fitSequenceOnBake", s.fitSequenceOnBake },
-                            { "position",    encodeKeys(s.position) },
-                            { "rotation",    encodeKeys(s.rotation) },
-                            { "scale",       encodeKeys(s.scale)    }
+                            { "version",              kVersion                          },
+                            { "orientation",          vec(s.orientation)                },
+                            { "heading",              s.heading                         },
+                            { "modelScale",           s.modelScale                      },
+                            { "basePivot",            s.basePivot                       },
+                            { "yaw",                  s.yaw                             },
+                            { "pitch",                s.pitch                           },
+                            { "target",               vec(s.target)                     },
+                            { "framing",              s.framing                         },
+                            { "width",                s.width                           },
+                            { "height",               s.height                          },
+                            { "ambient",              s.ambient                         },
+                            { "shadowStrength",       s.shadowStrength                  },
+                            { "groundShadow",         s.groundShadow                    },
+                            { "shadesEnabled",        s.shadesEnabled                   },
+                            { "shades",               s.shades                          },
+                            { "outlineEnabled",       s.outlineEnabled                  },
+                            { "outlineWidth",         s.outlineWidth                    },
+                            { "outlineColor",         encodeColor(s.outlineColor)       },
+                            { "outlineSeparateLayer", s.outlineSeparateLayer            },
+                            { "lights",               std::move(lights)                 },
+                            { "clip",                 s.clip                            },
+                            { "start",                s.start                           },
+                            { "end",                  s.end                             },
+                            { "fps",                  s.fps                             },
+                            { "exportFrames",         s.exportFrames                    },
+                            { "speed",                s.speed                           },
+                            { "loop",                 s.loop                            },
+                            { "turntable",            s.turntable                       },
+                            { "fitSequenceOnBake",    s.fitSequenceOnBake               },
+                            { "position",             encodeKeys(s.position)            },
+                            { "rotation",             encodeKeys(s.rotation)            },
+                            { "scale",                encodeKeys(s.scale)               }
   })
                        .dump();
   if (value.size() > kSettingsLimit)
@@ -469,13 +527,19 @@ std::string encodeConfig(const Settings& s)
       Json::object{ { "ambient", s.ambient },
                     { "shadowStrength", s.shadowStrength },
                     { "groundShadow", s.groundShadow },
+                    { "shadesEnabled", s.shadesEnabled },
+                    { "shades", s.shades },
                     { "lights", encodeLights(s.lights) } } },
     { "output",
       Json::object{ { "width", s.width },
                     { "height", s.height },
                     { "fps", s.fps },
                     { "exportFrames", s.exportFrames },
-                    { "fitSequenceOnBake", s.fitSequenceOnBake } } }
+                    { "fitSequenceOnBake", s.fitSequenceOnBake },
+                    { "outlineEnabled", s.outlineEnabled },
+                    { "outlineWidth", s.outlineWidth },
+                    { "outlineColor", encodeColor(s.outlineColor) },
+                    { "outlineSeparateLayer", s.outlineSeparateLayer } } }
   };
   std::string out;
   writePrettyJson(out, doc, 0);
@@ -525,10 +589,29 @@ Settings applyConfig(const Settings& current, const std::string& source)
   }
   if (!appliedAny) {
     // Allow flat scene/preset JSON without section wrappers.
-    for (const char* k : { "orientation", "heading", "modelScale", "basePivot", "yaw", "pitch",
-                           "target", "framing", "ambient", "shadowStrength", "groundShadow",
-                           "lights", "width", "height", "fps", "exportFrames",
-                           "fitSequenceOnBake" }) {
+    for (const char* k : { "orientation",
+                           "heading",
+                           "modelScale",
+                           "basePivot",
+                           "yaw",
+                           "pitch",
+                           "target",
+                           "framing",
+                           "ambient",
+                           "shadowStrength",
+                           "groundShadow",
+                           "shadesEnabled",
+                           "shades",
+                           "lights",
+                           "width",
+                           "height",
+                           "fps",
+                           "exportFrames",
+                           "fitSequenceOnBake",
+                           "outlineEnabled",
+                           "outlineWidth",
+                           "outlineColor",
+                           "outlineSeparateLayer" }) {
       if (obj.count(k)) {
         appliedAny = true;
         break;
@@ -562,6 +645,60 @@ void copyProject(const doc::Sprite& source, doc::Sprite& output)
 {
   if (const auto* props = properties(source))
     output.userData().properties(kGroup) = *props;
+}
+
+doc::ImageRef toDocumentImage(const Image& src)
+{
+  doc::ImageRef out(doc::Image::create(IMAGE_RGB, src.width, src.height));
+  for (int y = 0; y < src.height; ++y) {
+    for (int x = 0; x < src.width; ++x) {
+      const auto off = (std::size_t(y) * src.width + x) * 4;
+      doc::put_pixel(
+        out.get(),
+        x,
+        y,
+        doc::rgba(src.rgba[off], src.rgba[off + 1], src.rgba[off + 2], src.rgba[off + 3]));
+    }
+  }
+  return out;
+}
+
+void commitBakedOutput(Tx& tx,
+                       Doc& document,
+                       const std::vector<BakedFrame>& frames,
+                       doc::frame_t startFrame,
+                       bool sequence,
+                       bool separateOutlineLayer,
+                       const std::string& renderLayerName,
+                       const std::string& outlineLayerName,
+                       const std::string& tagName)
+{
+  if (frames.empty())
+    return;
+  auto* destSprite = document.sprite();
+  DocApi api = document.getApi(tx);
+  const auto end = startFrame + doc::frame_t(frames.size()) - 1;
+  if (end >= destSprite->totalFrames())
+    api.setTotalFrames(destSprite, end + 1);
+  auto* renderLayer = api.newLayer(destSprite->root(), renderLayerName);
+  doc::LayerImage* outlineLayer =
+    separateOutlineLayer ? api.newLayer(destSprite->root(), outlineLayerName) : nullptr;
+  for (std::size_t i = 0; i < frames.size(); ++i) {
+    const auto frame = startFrame + doc::frame_t(i);
+    api.addCel(renderLayer, frame, toDocumentImage(frames[i].model));
+    if (outlineLayer)
+      api.addCel(outlineLayer, frame, toDocumentImage(frames[i].outline));
+    if (sequence)
+      api.setFrameDuration(destSprite, frame, frames[i].duration);
+  }
+  if (sequence) {
+    auto* tag = new doc::Tag(startFrame, end);
+    auto uniqueName = tagName;
+    for (int i = 2; destSprite->tags().getByName(uniqueName); ++i)
+      uniqueName = fmt::format("{} {}", tagName, i);
+    tag->setName(uniqueName);
+    tx(new cmd::AddTag(destSprite, tag));
+  }
 }
 
 } // namespace app::easymetric

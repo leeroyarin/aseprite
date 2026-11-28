@@ -9,16 +9,25 @@
 #pragma once
 
 #include "app/easymetric/model.h"
+#include "doc/frame.h"
+#include "doc/image_ref.h"
 #include "doc/user_data.h"
 
 namespace doc {
 class Sprite;
 }
 namespace app {
+class Doc;
 class Tx;
-}
+} // namespace app
 
 namespace app::easymetric {
+
+struct BakedFrame {
+  Image model;
+  Image outline;
+  int duration = 0;
+};
 
 bool hasEmbeddedModel(const doc::Sprite& sprite);
 const doc::UserData::Properties* embeddedModel(const doc::Sprite& sprite);
@@ -35,6 +44,16 @@ Settings applyConfig(const Settings& current, const std::string& source);
 void setProjectAsset(Tx& tx, doc::Sprite& sprite, doc::UserData::Properties asset);
 void setProjectSettings(Tx& tx, doc::Sprite& sprite, std::string settings);
 void copyProject(const doc::Sprite& original, doc::Sprite& output);
+doc::ImageRef toDocumentImage(const Image& src);
+void commitBakedOutput(Tx& tx,
+                       Doc& document,
+                       const std::vector<BakedFrame>& frames,
+                       doc::frame_t startFrame,
+                       bool sequence,
+                       bool separateOutlineLayer,
+                       const std::string& renderLayerName,
+                       const std::string& outlineLayerName,
+                       const std::string& tagName);
 
 } // namespace app::easymetric
 #endif
